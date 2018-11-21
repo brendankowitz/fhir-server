@@ -3,7 +3,6 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
-using System;
 using System.Collections.Generic;
 using EnsureThat;
 
@@ -109,10 +108,10 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             }
 
             // Escaping character has to be escaped first since the rest of the escaping uses escaping character.
-            s = s.Replace($"{EscapingCharacter}", EscapedEscapingCharacter, StringComparison.Ordinal);
-            s = s.Replace($"{TokenSeparator}", EscapedTokenSeparator, StringComparison.Ordinal);
-            s = s.Replace($"{CompositeSeparator}", EscapedCompositeSeparator, StringComparison.Ordinal);
-            s = s.Replace($"{OrSeparator}", EscapedOrSeparator, StringComparison.Ordinal);
+            s = s.Replace($"{EscapingCharacter}", EscapedEscapingCharacter);
+            s = s.Replace($"{TokenSeparator}", EscapedTokenSeparator);
+            s = s.Replace($"{CompositeSeparator}", EscapedCompositeSeparator);
+            s = s.Replace($"{OrSeparator}", EscapedOrSeparator);
 
             return s;
         }
@@ -129,12 +128,12 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 return s;
             }
 
-            s = s.Replace(EscapedTokenSeparator, $"{TokenSeparator}", StringComparison.Ordinal);
-            s = s.Replace(EscapedCompositeSeparator, $"{CompositeSeparator}", StringComparison.Ordinal);
-            s = s.Replace(EscapedOrSeparator, $"{OrSeparator}", StringComparison.Ordinal);
+            s = s.Replace(EscapedTokenSeparator, $"{TokenSeparator}");
+            s = s.Replace(EscapedCompositeSeparator, $"{CompositeSeparator}");
+            s = s.Replace(EscapedOrSeparator, $"{OrSeparator}");
 
             // Escaping character has to be escaped last.
-            s = s.Replace(EscapedEscapingCharacter, $"{EscapingCharacter}", StringComparison.Ordinal);
+            s = s.Replace(EscapedEscapingCharacter, $"{EscapingCharacter}");
 
             return s;
         }

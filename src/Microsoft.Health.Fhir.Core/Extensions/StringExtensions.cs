@@ -3,13 +3,15 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
-using System.Collections.Immutable;
-using Hl7.Fhir.Model;
+using System;
 
-namespace Microsoft.Health.Fhir.Core.Features.Definition
+namespace Microsoft.Health.Fhir.Core.Extensions
 {
-    public interface ICompartmentDefinitionManager
+    public static class StringExtensions
     {
-        bool TryGetSearchParams(ResourceType resourceType, CompartmentType compartmentType, out ImmutableHashSet<string> searchParams);
+        public static bool Contains(this string str, string val, StringComparison comparison)
+        {
+            return str.IndexOf(val, comparison) > -1;
+        }
     }
 }

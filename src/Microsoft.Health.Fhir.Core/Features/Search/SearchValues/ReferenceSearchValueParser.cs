@@ -20,7 +20,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.SearchValues
         private const string ResourceTypeCapture = "resourceType";
         private const string ResourceIdCapture = "resourceId";
         private static readonly string[] SupportedSchemes = new string[] { Uri.UriSchemeHttps, Uri.UriSchemeHttp };
-        private static readonly string ResourceTypesPattern = string.Join('|', Enum.GetNames(typeof(ResourceType)));
+        private static readonly string ResourceTypesPattern = string.Join("|", Enum.GetNames(typeof(ResourceType)));
         private static readonly string ReferenceCaptureRegexPattern = $@"(?<{ResourceTypeCapture}>{ResourceTypesPattern})\/(?<{ResourceIdCapture}>[A-Za-z0-9\-\.]{{1,64}})(\/_history\/[A-Za-z0-9\-\.]{{1,64}})?";
 
         private static readonly Regex ReferenceRegex = new Regex(
@@ -46,7 +46,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.SearchValues
             if (match.Success)
             {
                 string resourceTypeInString = match.Groups[ResourceTypeCapture].Value;
-                ResourceType resourceType = Enum.Parse<ResourceType>(resourceTypeInString);
+                ResourceType resourceType = (ResourceType)Enum.Parse(typeof(ResourceType), resourceTypeInString);
 
                 string resourceId = match.Groups[ResourceIdCapture].Value;
 

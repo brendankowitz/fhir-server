@@ -3,7 +3,7 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
-using System.Collections.Generic;
+using System.Collections.Immutable;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
 using Microsoft.Health.Fhir.Core.Exceptions;
@@ -31,7 +31,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Definition
         [InlineData(ResourceType.Observation, CompartmentType.Encounter, 1)]
         public void GivenAValidCompartmentDefinitionBundle_WhenValidated_ThenValidSearchParams(ResourceType resourceType, CompartmentType compartmentType, int testCount)
         {
-            Assert.True(_validBuiltCompartment.TryGetSearchParams(resourceType, compartmentType, out HashSet<string> searchParams));
+            Assert.True(_validBuiltCompartment.TryGetSearchParams(resourceType, compartmentType, out ImmutableHashSet<string> searchParams));
             Assert.Equal(testCount, searchParams.Count);
         }
 

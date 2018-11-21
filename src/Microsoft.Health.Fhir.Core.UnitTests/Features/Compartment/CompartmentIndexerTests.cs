@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using Hl7.Fhir.Model;
 using Microsoft.Health.Fhir.Core.Features.Compartment;
 using Microsoft.Health.Fhir.Core.Features.Definition;
@@ -29,11 +30,11 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Compartment
             var compartmentManager = Substitute.For<ICompartmentDefinitionManager>();
             var compartmentIndexer = new CompartmentIndexer(compartmentManager);
 
-            HashSet<string> compParams = null;
+            ImmutableHashSet<string> compParams = null;
             compartmentManager.TryGetSearchParams(resourceType, compartmentType, out compParams)
                 .Returns(x =>
                 {
-                    x[2] = new HashSet<string> { "testParam" };
+                    x[2] = new HashSet<string> { "testParam" }.ToImmutableHashSet();
                     return true;
                 });
             var searchIndexEntries = new List<SearchIndexEntry> { new SearchIndexEntry("testParam", new ReferenceSearchValue(ReferenceKind.Internal, new Uri("http://localhost"), CompartmentDefinitionManager.CompartmentTypeToResourceType(compartmentType), resourceId)) };

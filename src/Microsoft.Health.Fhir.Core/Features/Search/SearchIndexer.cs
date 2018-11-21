@@ -12,6 +12,7 @@ using EnsureThat;
 using Hl7.Fhir.FhirPath;
 using Hl7.Fhir.Model;
 using Microsoft.Extensions.Logging;
+using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Search.Converters;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;

@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -17,6 +18,7 @@ using Newtonsoft.Json;
 using static Hl7.Fhir.Model.Bundle;
 using static Hl7.Fhir.Model.CompartmentDefinition;
 using static Hl7.Fhir.Model.OperationOutcome;
+using CompartmentTypeHashSet = System.Collections.Generic.Dictionary<Hl7.Fhir.Model.CompartmentType, System.Collections.Immutable.ImmutableHashSet<string>>;
 
 namespace Microsoft.Health.Fhir.Core.Features.Definition
 {
@@ -28,7 +30,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Definition
         private readonly FhirJsonParser _fhirJsonParser;
 
         // This data structure stores the lookup of compartmentsearchparams (in the hash set) by ResourceType and CompartmentType.
-        private Dictionary<ResourceType, Dictionary<CompartmentType, HashSet<string>>> _compartmentSearchParamsLookup;
+        private Dictionary<ResourceType, CompartmentTypeHashSet> _compartmentSearchParamsLookup;
 
         public CompartmentDefinitionManager(FhirJsonParser fhirJsonParser)
         {
@@ -60,10 +62,10 @@ namespace Microsoft.Health.Fhir.Core.Features.Definition
             }
         }
 
-        public bool TryGetSearchParams(ResourceType resourceType, CompartmentType compartment, out HashSet<string> searchParams)
+        public bool TryGetSearchParams(ResourceType resourceType, CompartmentType compartment, out ImmutableHashSet<string> searchParams)
         {
-            if (_compartmentSearchParamsLookup.TryGetValue(resourceType, out Dictionary<CompartmentType, HashSet<string>> compartmentSearchParams)
-&& compartmentSearchParams.TryGetValue(compartment, out searchParams))
+            if (_compartmentSearchParamsLookup.TryGetValue(resourceType, out CompartmentTypeHashSet compartmentSearchParams)
+                && compartmentSearchParams.TryGetValue(compartment, out searchParams))
             {
                 return true;
             }
@@ -151,21 +153,21 @@ namespace Microsoft.Health.Fhir.Core.Features.Definition
             }
         }
 
-        private static Dictionary<ResourceType, Dictionary<CompartmentType, HashSet<string>>> BuildResourceTypeLookup(ICollection<CompartmentDefinition> compartmentDefinitions)
+        private static Dictionary<ResourceType, CompartmentTypeHashSet> BuildResourceTypeLookup(ICollection<CompartmentDefinition> compartmentDefinitions)
         {
-            var resourceTypeParamsByCompartmentDictionary = new Dictionary<ResourceType, Dictionary<CompartmentType, HashSet<string>>>();
+            var resourceTypeParamsByCompartmentDictionary = new Dictionary<ResourceType, CompartmentTypeHashSet>();
 
             foreach (CompartmentDefinition compartment in compartmentDefinitions)
             {
                 foreach (ResourceComponent resource in compartment.Resource)
                 {
-                    if (!resourceTypeParamsByCompartmentDictionary.TryGetValue(resource.Code.Value, out Dictionary<CompartmentType, HashSet<string>> resourceTypeDict))
+                    if (!resourceTypeParamsByCompartmentDictionary.TryGetValue(resource.Code.Value, out CompartmentTypeHashSet resourceTypeDict))
                     {
-                        resourceTypeDict = new Dictionary<CompartmentType, HashSet<string>>();
+                        resourceTypeDict = new CompartmentTypeHashSet();
                         resourceTypeParamsByCompartmentDictionary.Add(resource.Code.Value, resourceTypeDict);
                     }
 
-                    resourceTypeDict[compartment.Code.Value] = resource.Param?.ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    resourceTypeDict[compartment.Code.Value] = resource.Param?.ToImmutableHashSet(StringComparer.OrdinalIgnoreCase);
                 }
             }
 

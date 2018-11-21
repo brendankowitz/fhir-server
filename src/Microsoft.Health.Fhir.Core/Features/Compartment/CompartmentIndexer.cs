@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using EnsureThat;
 using Hl7.Fhir.Model;
@@ -35,7 +36,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Compartment
             {
                 compartmentTypeToResourceIds[compartmentType] = null;
 
-                if (_compartmentDefinitionManager.TryGetSearchParams(resourceType, compartmentType, out HashSet<string> searchParams) && searchIndicesByCompartmentType.TryGetValue(compartmentType, out List<SearchIndexEntry> searchIndicesForCompartment))
+                if (_compartmentDefinitionManager.TryGetSearchParams(resourceType, compartmentType, out ImmutableHashSet<string> searchParams) && searchIndicesByCompartmentType.TryGetValue(compartmentType, out List<SearchIndexEntry> searchIndicesForCompartment))
                 {
                     var searchEntries = searchIndicesForCompartment.Where(si => searchParams.Contains(si.ParamName));
 

@@ -22,7 +22,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Security.Authorization
             EnsureArg.IsNotNull(authorizationConfiguration, nameof(authorizationConfiguration));
 
             _roles = authorizationConfiguration.Roles.ToDictionary(r => r.Name, StringComparer.InvariantCultureIgnoreCase);
-            _roleNameToResourceActions = _roles.Select(kvp => KeyValuePair.Create(kvp.Key, kvp.Value.ResourcePermissions.Select(rp => rp.Actions).SelectMany(x => x))).ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+            _roleNameToResourceActions = _roles.Select(kvp => (kvp.Key, Value: kvp.Value.ResourcePermissions.Select(rp => rp.Actions).SelectMany(x => x))).ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
         }
 
         public bool HasPermission(ClaimsPrincipal user, ResourceAction action)
