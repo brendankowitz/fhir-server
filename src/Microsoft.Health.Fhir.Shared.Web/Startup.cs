@@ -10,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Health.Fhir.Api.Features.ApiNotifications;
 using Microsoft.Health.Fhir.Azure;
+using SamplesFileStorageProvider;
 
 namespace Microsoft.Health.Fhir.Web
 {
@@ -40,6 +41,10 @@ namespace Microsoft.Health.Fhir.Web
             else if (dataStore.Equals(KnownDataStores.SqlServer, StringComparison.InvariantCultureIgnoreCase))
             {
                 fhirServerBuilder.AddExperimentalSqlServer();
+            }
+            else if (dataStore.Equals("FileStorage", StringComparison.InvariantCultureIgnoreCase))
+            {
+                fhirServerBuilder.AddFileStorage(Configuration);
             }
 
             AddApplicationInsightsTelemetry(services);

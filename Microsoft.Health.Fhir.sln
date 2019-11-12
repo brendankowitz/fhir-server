@@ -1,4 +1,5 @@
-﻿Microsoft Visual Studio Solution File, Format Version 12.00
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 16
 VisualStudioVersion = 16.0.28729.10
 MinimumVisualStudioVersion = 10.0.40219.1
@@ -124,6 +125,8 @@ EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Integration", "Integration", "{FCD51BAF-BFE5-476F-B562-C9AB36AA9839}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "DataStore", "DataStore", "{DC5A2CB1-8995-4D39-97FE-3CE80E892C69}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Samples.FileStorageProvider", "samples\extensions\Samples.FileStorageProvider\Samples.FileStorageProvider.csproj", "{302A185C-4358-4B12-A812-5763063B1583}"
 EndProject
 Global
 	GlobalSection(SharedMSBuildProjectFiles) = preSolution
@@ -287,6 +290,10 @@ Global
 		{514B56AD-4E95-46AF-9976-2C68791E157E}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{514B56AD-4E95-46AF-9976-2C68791E157E}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{514B56AD-4E95-46AF-9976-2C68791E157E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{302A185C-4358-4B12-A812-5763063B1583}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{302A185C-4358-4B12-A812-5763063B1583}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{302A185C-4358-4B12-A812-5763063B1583}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{302A185C-4358-4B12-A812-5763063B1583}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -347,9 +354,10 @@ Global
 		{85F39C13-BC62-49A0-9C06-3BBA724D35ED} = {BA0D5243-CFC7-4DEB-9836-657C50195DD1}
 		{FCD51BAF-BFE5-476F-B562-C9AB36AA9839} = {BA0D5243-CFC7-4DEB-9836-657C50195DD1}
 		{DC5A2CB1-8995-4D39-97FE-3CE80E892C69} = {7457B218-2651-49B5-BED8-22233889516A}
+		{302A185C-4358-4B12-A812-5763063B1583} = {DC5A2CB1-8995-4D39-97FE-3CE80E892C69}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
-		SolutionGuid = {E370FB31-CF95-47D1-B1E1-863A77973FF8}
 		RESX_SortFileContentOnSave = True
+		SolutionGuid = {E370FB31-CF95-47D1-B1E1-863A77973FF8}
 	EndGlobalSection
 EndGlobal
