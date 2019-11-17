@@ -24,18 +24,10 @@ namespace SamplesFileStorageProvider
 
         public SearchPredicate VisitBinary(BinaryExpression expression, Context context)
         {
-            return VisitBinary(
-                context.ParameterName,
-                expression.BinaryOperator,
-                expression.Value);
-        }
-
-        private SearchPredicate VisitBinary(string fieldName, BinaryOperator op, object value)
-        {
             SearchPredicate filter = input =>
             {
-                return input.Where(x => x.Index.Any(y => y.SearchParameter.Name == fieldName &&
-                                                         GetMappedValue(op, y.Value, (IComparable)value)));
+                return input.Where(x => x.Index.Any(y => y.SearchParameter.Name == context.ParameterName &&
+                                                         GetMappedValue(expression.BinaryOperator, y.Value, (IComparable)expression.Value)));
             };
 
             return filter;
@@ -49,6 +41,7 @@ namespace SamplesFileStorageProvider
             }
 
             var comparisonVisitor = new ComparisonValueVisitor(expressionBinaryOperator, second);
+
             first.AcceptVisitor(comparisonVisitor);
 
             return comparisonVisitor.Compare();
@@ -56,7 +49,7 @@ namespace SamplesFileStorageProvider
 
         public SearchPredicate VisitChained(ChainedExpression expression, Context context)
         {
-            throw new SearchOperationNotSupportedException("ChainedExpression is not supported.");
+            throw new System.NotImplementedException();
         }
 
         public SearchPredicate VisitMissingField(MissingFieldExpression expression, Context context)
@@ -116,23 +109,22 @@ namespace SamplesFileStorageProvider
                     case StringOperator.Equals:
                         filter = input => input.Where(x => x.Index.Any(y => y.SearchParameter.Name == context.ParameterName &&
                                                                             CompareStringParameter(y, string.Equals)));
-
                         break;
                     default:
                         throw new NotImplementedException();
                 }
             }
 
-            bool CompareStringParameter(SearchIndexEntry y, Func<string, string, StringComparison, bool> compareFunc)
+            bool CompareStringParameter(SearchIndexEntry entry, Func<string, string, StringComparison, bool> compareFunc)
             {
-                switch (y.SearchParameter.Type)
+                switch (entry.SearchParameter.Type)
                 {
                     case Microsoft.Health.Fhir.ValueSets.SearchParamType.String:
-                        return compareFunc(((StringSearchValue)y.Value).String, expression.Value, comparison);
+                        return compareFunc(((StringSearchValue)entry.Value).String, expression.Value, comparison);
 
                     case Microsoft.Health.Fhir.ValueSets.SearchParamType.Token:
-                        return compareFunc(((TokenSearchValue)y.Value).Code, expression.Value, comparison) ||
-                               compareFunc(((TokenSearchValue)y.Value).System, expression.Value, comparison);
+                        return compareFunc(((TokenSearchValue)entry.Value).Code, expression.Value, comparison) ||
+                               compareFunc(((TokenSearchValue)entry.Value).System, expression.Value, comparison);
                     default:
                         throw new NotImplementedException();
                 }
@@ -143,12 +135,12 @@ namespace SamplesFileStorageProvider
 
         public SearchPredicate VisitCompartment(CompartmentSearchExpression expression, Context context)
         {
-            throw new SearchOperationNotSupportedException("Compartment search is not supported.");
+            throw new System.NotImplementedException();
         }
 
         public SearchPredicate VisitInclude(IncludeExpression expression, Context context)
         {
-            throw new NotImplementedException();
+            throw new System.NotImplementedException();
         }
 
         private SearchPredicate AppendSubquery(string parameterName, Expression expression, Context context, bool negate = false)
@@ -165,8 +157,7 @@ namespace SamplesFileStorageProvider
                 }
                 else
                 {
-                    // :missing will end up here
-                    throw new NotSupportedException("This query is not supported");
+                    throw new NotSupportedException();
                 }
             };
 

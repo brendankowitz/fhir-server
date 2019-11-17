@@ -39,7 +39,11 @@ namespace SamplesFileStorageProvider
                 results = InMemoryIndex.Index.Values.Take(10).ToArray();
             }
 
-            var resources = await Task.WhenAll(results.Select(async x => new SearchResultEntry(await _fhirDataStore.GetAsync(new ResourceKey(x.Item1.ResourceType, x.Item1.ResourceId), cancellationToken))));
+            var resources = await Task.WhenAll(
+                results.Select(async x =>
+                new SearchResultEntry(
+                    await _fhirDataStore.GetAsync(
+                        new ResourceKey(x.Item1.ResourceType, x.Item1.ResourceId), cancellationToken))));
 
             return new SearchResult(
                 resources,
