@@ -14,23 +14,37 @@ on:
 
 env:
   LABELS: ${{ join( github.event.pull_request.labels.*.name, ' ' ) }}
+  TITLE: ${{ github.event.pull_request.title }}
+  NO_MILESTONE: ${{ github.event.pull_request.milestone == null }}
+  NO_TYPE_LABEL: ${{ contains( join( github.event.pull_request.labels.*.name, ' ' ), 'Build' ) == false && contains( join( github.event.pull_request.labels.*.name, ' ' ), 'Documentation' ) == false && contains( join( github.event.pull_request.labels.*.name, ' ' ), 'Bug' ) == false && contains( join( github.event.pull_request.labels.*.name, ' ' ), 'Dependencies' ) == false && contains( join( github.event.pull_request.labels.*.name, ' ' ), 'Enhancement' ) == false && contains( join( github.event.pull_request.labels.*.name, ' ' ), 'New-Feature' ) == false }}
+  NO_PRODUCT_LABEL: ${{ contains( join( github.event.pull_request.labels.*.name, ' ' ), 'Open source only' ) == false && contains( join( github.event.pull_request.labels.*.name, ' ' ), 'Azure API for FHIR' ) == false && contains( join( github.event.pull_request.labels.*.name, ' ' ), 'Azure Healthcare APIs' ) == false }}
 
 jobs:
-  check-type-label:
-    name: Check label for type
-    runs-on: ubuntu-latest
+  js-title:
+    name: Check PR Metadata
+    runs-on: "ubuntu-latest"
     steps:
-      - if: contains( env.LABELS, 'Build' ) == false && contains( env.LABELS, 'Documentation' ) == false && contains( env.LABELS, 'Bug' ) == false && contains( env.LABELS, 'Dependencies' ) == false && contains( env.LABELS, 'Enhancement' ) == false && contains( env.LABELS, 'New-Feature' ) == false
-        run: exit 1
-  check-product-label:
-    name: Check label for product
-    runs-on: ubuntu-latest
-    steps:
-      - if: contains( env.LABELS, 'Open source only' ) == false && contains( env.LABELS, 'Azure API for FHIR' ) == false && contains( env.LABELS, 'Azure Healthcare APIs' ) == false
-        run: exit 1
-  check-milestone:
-    name: Check milestone
-    runs-on: ubuntu-latest
-    steps:
-      - if: github.event.pull_request.milestone == null
-        run: exit 1
+      - uses: actions/github-script@v6
+        with:
+          script: |
+            var errors = "";
+            const title = "${{env.TITLE}}";
+            if(title.includes('personal') || (title.length > 65)) {
+              errors += '- Title of the PR to be succinct and less than 65 characters.\n';
+            }
+
+            if(${{env.NO_MILESTONE}}) {
+              errors += '- Add a milestone to the PR for the sprint that it is merged (i.e. add S47).\n';
+            }
+
+            if(${{env.NO_TYPE_LABEL}}) {
+              errors += '- Tag the PR with the type of update: **Bug**, **Build**, **Dependencies**, **Enhancement**, **New-Feature** or **Documentation**.\n';
+            }
+
+            if(${{env.NO_PRODUCT_LABEL}}) {
+              errors += '- Tag the PR with **Open source only**, **Azure API for FHIR** (CosmosDB or common code) or **Azure Healthcare APIs** (SQL or common code) to specify where this change is intended to be released.';
+            }
+
+            if(errors != "") {
+              core.setFailed(errors)
+            }
