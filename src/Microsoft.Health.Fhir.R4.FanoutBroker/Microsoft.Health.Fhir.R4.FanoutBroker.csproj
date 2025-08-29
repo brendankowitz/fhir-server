@@ -11,10 +11,13 @@
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" />
     <PackageReference Include="Microsoft.Extensions.Http" />
     <PackageReference Include="Microsoft.Extensions.Logging" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" />
     <PackageReference Include="Hl7.Fhir.R4" />
     <PackageReference Include="System.Collections.Immutable" />
     <PackageReference Include="System.Net.Http" />
+    <PackageReference Include="System.Web.HttpUtility" />
     <PackageReference Include="Polly" />
+    <PackageReference Include="Swashbuckle.AspNetCore" />
   </ItemGroup>
 
   <ItemGroup>

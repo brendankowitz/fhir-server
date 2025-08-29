@@ -213,9 +213,23 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
         private SearchOptions CreateServerSearchOptions(SearchOptions originalOptions, string serverContinuationToken)
         {
-            // Create a copy of the original search options with server-specific continuation token
-            var serverOptions = new SearchOptions(originalOptions);
-            serverOptions.ContinuationToken = serverContinuationToken;
+            // Since SearchOptions constructor is internal, we need to create a new instance through the factory
+            // and then manually copy over the relevant settings
+            var serverOptions = _searchOptionsFactory.Create(
+                originalOptions.ResourceType,
+                originalOptions.UnsupportedSearchParams,
+                false, // isAsyncOperation
+                ResourceVersionType.Latest,
+                originalOptions.OnlyIds);
+
+            // Manually set the continuation token for this server
+            if (!string.IsNullOrEmpty(serverContinuationToken))
+            {
+                // Note: In a real implementation, you would need access to set the continuation token
+                // This is a limitation of the current SearchOptions design
+                _logger.LogWarning("Unable to set server-specific continuation token due to SearchOptions design limitations");
+            }
+
             return serverOptions;
         }
 

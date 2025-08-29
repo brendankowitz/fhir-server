@@ -14,6 +14,7 @@ using Microsoft.Health.Fhir.FanoutBroker.Extensions;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Conformance;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Search;
+using Microsoft.Health.Fhir.FanoutBroker.Features.Health;
 using Microsoft.Health.Fhir.FanoutBroker.Models;
 
 namespace Microsoft.Health.Fhir.FanoutBroker
@@ -44,16 +45,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker
             services.AddHttpClient();
             services.AddLogging();
 
-            // Add FHIR services
-            services.AddFhirServer()
-                .AddSearchService<FanoutSearchService>()
-                .AddCapabilityProvider<FanoutCapabilityStatementProvider>();
-
             // Add fanout-specific services
             services.AddScoped<IExecutionStrategyAnalyzer, ExecutionStrategyAnalyzer>();
             services.AddScoped<IFhirServerOrchestrator, FhirServerOrchestrator>();
             services.AddScoped<IResultAggregator, ResultAggregator>();
             services.AddScoped<IConformanceProvider, FanoutCapabilityStatementProvider>();
+            services.AddScoped<ISearchService, FanoutSearchService>();
 
             // Add health checks
             services.AddHealthChecks()
@@ -88,9 +85,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker
             }
 
             app.UseRouting();
-
-            // Add FHIR-specific middleware
-            app.UseFhirServer();
 
             app.UseEndpoints(endpoints =>
             {
