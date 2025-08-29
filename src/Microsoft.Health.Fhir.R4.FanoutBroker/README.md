@@ -16,9 +16,27 @@ The FHIR Fanout Broker Query Service acts as a FHIR-compliant proxy that intelli
 
 ### Advanced Search Support
 - **Distributed sorting** with global merge algorithm and continuation token management
+- **Chained search expressions** with timeout protection and payload optimization
 - **Include/RevInclude operations** (planned for Phase 3)
-- **Chained search expressions** (planned for Phase 3)
 - **Standard search parameters**: `_count`, `_sort`, `_elements`, `_id`, `_lastModified`
+
+#### Chained Search Implementation
+The fanout broker supports both forward and reverse chained searches across multiple FHIR servers:
+
+**Forward Chained Searches** (e.g., `Observation?subject.name=John`):
+- Executes sub-queries on target resource servers (Patient) to find matching resources
+- Uses `_elements=id` optimization to minimize payload transfer
+- Converts results to ID filters for the main query on source resources (Observation)
+
+**Reverse Chained Searches** (e.g., `Patient?_has:Group:member:_id=group123`):
+- Searches source resource servers (Group) for resources matching the criteria
+- Extracts reference information to identify target resources (Patient)
+- Applies timeout protection (configurable via `ChainSearchTimeoutSeconds`)
+
+**Timeout Protection**:
+- Configurable timeout for chained search operations (default: 15 seconds)
+- Automatic fallback to `RequestTooCostlyException` if timeout exceeded
+- Prevents runaway queries from impacting service performance
 
 ### Architecture Components
 - **ExecutionStrategyAnalyzer** - Determines optimal query execution approach
@@ -62,11 +80,23 @@ Configure target FHIR servers in `appsettings.json`:
     ],
     "SearchTimeoutSeconds": 30,
     "ChainSearchTimeoutSeconds": 15,
+    "MaxChainDepth": 3,
     "FillFactor": 0.5,
+    "MaxResultsPerServer": 1000,
     "EnableCircuitBreaker": true,
     "CircuitBreakerFailureThreshold": 5
   }
 }
+```
+
+### Configuration Options
+
+- `SearchTimeoutSeconds` - Global timeout for search operations (default: 30)
+- `ChainSearchTimeoutSeconds` - Timeout for chained search sub-queries (default: 15)
+- `MaxChainDepth` - Maximum allowed depth for nested chained expressions (default: 3)
+- `FillFactor` - Fill factor threshold for sequential execution (default: 0.5)
+- `MaxResultsPerServer` - Maximum results from a single server (default: 1000)
+- `EnableCircuitBreaker` - Enable circuit breaker pattern (default: true)
 ```
 
 ### Authentication Types
@@ -140,6 +170,31 @@ Responses follow standard FHIR Bundle format with enhanced `fullUrl` values for 
 }
 ```
 
+### Chained Search Examples
+
+The fanout broker supports FHIR chained search expressions across multiple servers:
+
+**Forward Chained Search** - Find observations for patients named "John":
+```bash
+GET /Observation?subject.name=John
+```
+
+**Reverse Chained Search** - Find patients who are members of a specific group:
+```bash
+GET /Patient?_has:Group:member:_id=group123
+```
+
+**Complex Chained Search** - Find observations for patients with specific identifier:
+```bash
+GET /Observation?subject.identifier=http://hospital.org/mrn|123456
+```
+
+The service automatically:
+1. Detects chained parameters in the query
+2. Executes optimized sub-queries on target servers using `_elements=id`
+3. Converts results to ID filters for the main query
+4. Applies timeout protection to prevent runaway queries
+
 ## Running the Service
 
 ```bash
@@ -171,11 +226,15 @@ The service will be available at:
 - Health monitoring
 - Complete service setup
 
-### 🔄 Phase 3 - Advanced Features (Planned)
-- Include/RevInclude processing
-- Chained search expressions
-- Advanced continuation token handling
-- Performance optimizations
+### ✅ Phase 3 - Advanced Features (Partial)
+- ✅ **Chained search expressions** with timeout protection and payload optimization
+- ✅ Forward chained searches (e.g., `Observation?subject.name=John`) 
+- ✅ Reverse chained searches (e.g., `Patient?_has:Group:member:_id=group123`)
+- ✅ Configurable timeout protection for complex chained queries
+- ✅ `_elements=id` optimization for minimal payload transfer
+- 📋 Include/RevInclude processing (planned)
+- 📋 Advanced continuation token handling for chained queries (planned)
+- 📋 Performance optimizations for complex search scenarios (planned)
 
 ### 📋 Phase 4 - Production Ready (Planned)
 - Comprehensive testing

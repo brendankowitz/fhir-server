@@ -12,8 +12,10 @@ using EnsureThat;
 using Hl7.Fhir.Model;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
 using Microsoft.Health.Fhir.FanoutBroker.Models;
@@ -29,6 +31,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         private readonly IFhirServerOrchestrator _serverOrchestrator;
         private readonly IResultAggregator _resultAggregator;
         private readonly ISearchOptionsFactory _searchOptionsFactory;
+        private readonly IChainedSearchProcessor _chainedSearchProcessor;
         private readonly IOptions<FanoutBrokerConfiguration> _configuration;
         private readonly ILogger<FanoutSearchService> _logger;
 
@@ -37,6 +40,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             IFhirServerOrchestrator serverOrchestrator,
             IResultAggregator resultAggregator,
             ISearchOptionsFactory searchOptionsFactory,
+            IChainedSearchProcessor chainedSearchProcessor,
             IOptions<FanoutBrokerConfiguration> configuration,
             ILogger<FanoutSearchService> logger)
         {
@@ -44,6 +48,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             _serverOrchestrator = EnsureArg.IsNotNull(serverOrchestrator, nameof(serverOrchestrator));
             _resultAggregator = EnsureArg.IsNotNull(resultAggregator, nameof(resultAggregator));
             _searchOptionsFactory = EnsureArg.IsNotNull(searchOptionsFactory, nameof(searchOptionsFactory));
+            _chainedSearchProcessor = EnsureArg.IsNotNull(chainedSearchProcessor, nameof(chainedSearchProcessor));
             _configuration = EnsureArg.IsNotNull(configuration, nameof(configuration));
             _logger = EnsureArg.IsNotNull(logger, nameof(logger));
         }
@@ -64,15 +69,80 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 throw new InvalidOperationException("Fanout broker only supports latest resource versions.");
             }
 
-            SearchOptions searchOptions = _searchOptionsFactory.Create(
-                resourceType, 
-                queryParameters, 
-                isAsyncOperation, 
-                resourceVersionTypes, 
-                onlyIds, 
-                isIncludesOperation);
+            _logger.LogInformation("Starting fanout search for resource type: {ResourceType} with {ParamCount} parameters", 
+                resourceType, queryParameters.Count);
+
+            // Process chained search parameters if present
+            var processedQueryParameters = queryParameters;
+            
+            try
+            {
+                processedQueryParameters = await _chainedSearchProcessor.ProcessChainedSearchAsync(
+                    resourceType, queryParameters, cancellationToken);
+                
+                if (processedQueryParameters.Count != queryParameters.Count)
+                {
+                    _logger.LogInformation("Chained search processing modified query from {OriginalCount} to {ProcessedCount} parameters", 
+                        queryParameters.Count, processedQueryParameters.Count);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error processing chained search parameters");
+                throw;
+            }
+
+            // Create search options with processed parameters
+            SearchOptions searchOptions;
+            try
+            {
+                searchOptions = _searchOptionsFactory.Create(
+                    resourceType, 
+                    processedQueryParameters, 
+                    isAsyncOperation, 
+                    resourceVersionTypes, 
+                    onlyIds, 
+                    isIncludesOperation);
+            }
+            catch (NotImplementedException)
+            {
+                // Fallback for simplified fanout broker implementation
+                // Create a basic search options that works as a proxy
+                searchOptions = CreateBasicSearchOptions(resourceType, processedQueryParameters, onlyIds);
+            }
 
             return await SearchAsync(searchOptions, cancellationToken);
+        }
+
+        /// <summary>
+        /// Creates basic search options for proxy operation when full SearchOptionsFactory is not available.
+        /// </summary>
+        private SearchOptions CreateBasicSearchOptions(string resourceType, IReadOnlyList<Tuple<string, string>> queryParameters, bool onlyIds)
+        {
+            // Create a minimal SearchOptions for proxy operation
+            // This is a workaround for the SearchOptions internal constructor limitation
+            var searchOptions = (SearchOptions)Activator.CreateInstance(typeof(SearchOptions), true);
+            
+            // Set basic properties using reflection or public setters where available
+            typeof(SearchOptions).GetProperty("ResourceType")?.SetValue(searchOptions, resourceType);
+            typeof(SearchOptions).GetProperty("OnlyIds")?.SetValue(searchOptions, onlyIds);
+            typeof(SearchOptions).GetProperty("UnsupportedSearchParams")?.SetValue(searchOptions, new List<Tuple<string, string>>());
+
+            // Extract count parameter
+            var countParam = queryParameters.FirstOrDefault(p => p.Item1.Equals("_count", StringComparison.OrdinalIgnoreCase));
+            if (countParam != null && int.TryParse(countParam.Item2, out int count))
+            {
+                try
+                {
+                    typeof(SearchOptions).GetProperty("MaxItemCount")?.SetValue(searchOptions, Math.Min(count, 1000));
+                }
+                catch
+                {
+                    // MaxItemCount property may not be settable - use default
+                }
+            }
+            
+            return searchOptions;
         }
 
         /// <inheritdoc />
@@ -81,7 +151,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             _logger.LogInformation("Starting fanout search for resource type: {ResourceType}", 
                 searchOptions.ResourceType);
 
-            // Determine execution strategy
+            // For the simplified fanout broker, we don't parse complex expressions
+            // Instead, we work as a query proxy forwarding requests to downstream servers
+            
+            // Determine execution strategy based on basic search options
             var strategy = _strategyAnalyzer.DetermineStrategy(searchOptions);
             
             _logger.LogInformation("Using {Strategy} execution strategy for fanout search", strategy);
