@@ -207,6 +207,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Microsoft.Health.Fhir.Api.O
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Microsoft.Health.Fhir.R4.FanoutBroker", "src\Microsoft.Health.Fhir.R4.FanoutBroker\Microsoft.Health.Fhir.R4.FanoutBroker.csproj", "{7069920C-23A6-4371-AB4F-55E9141527CB}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests", "src\Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests\Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.csproj", "{33DFAA53-6D93-4DE5-A915-FE3070284663}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -493,6 +495,10 @@ Global
 		{7069920C-23A6-4371-AB4F-55E9141527CB}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{7069920C-23A6-4371-AB4F-55E9141527CB}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{7069920C-23A6-4371-AB4F-55E9141527CB}.Release|Any CPU.Build.0 = Release|Any CPU
+		{33DFAA53-6D93-4DE5-A915-FE3070284663}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{33DFAA53-6D93-4DE5-A915-FE3070284663}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{33DFAA53-6D93-4DE5-A915-FE3070284663}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{33DFAA53-6D93-4DE5-A915-FE3070284663}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -589,6 +595,7 @@ Global
 		{1CD46DC5-6022-4BBE-9A1C-6B13C3CEFC75} = {DC5A2CB1-8995-4D39-97FE-3CE80E892C69}
 		{869F0CD6-280E-403E-8034-185A8B63D03E} = {1295CCC3-73FB-4376-AE95-F6F31A37B152}
 		{7069920C-23A6-4371-AB4F-55E9141527CB} = {8AD2A324-DAB5-4380-94A5-31F7D817C384}
+		{33DFAA53-6D93-4DE5-A915-FE3070284663} = {8AD2A324-DAB5-4380-94A5-31F7D817C384}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {E370FB31-CF95-47D1-B1E1-863A77973FF8}
