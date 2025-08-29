@@ -32,6 +32,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         private readonly IResultAggregator _resultAggregator;
         private readonly ISearchOptionsFactory _searchOptionsFactory;
         private readonly IChainedSearchProcessor _chainedSearchProcessor;
+        private readonly IIncludeProcessor _includeProcessor;
         private readonly IOptions<FanoutBrokerConfiguration> _configuration;
         private readonly ILogger<FanoutSearchService> _logger;
 
@@ -41,6 +42,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             IResultAggregator resultAggregator,
             ISearchOptionsFactory searchOptionsFactory,
             IChainedSearchProcessor chainedSearchProcessor,
+            IIncludeProcessor includeProcessor,
             IOptions<FanoutBrokerConfiguration> configuration,
             ILogger<FanoutSearchService> logger)
         {
@@ -49,6 +51,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             _resultAggregator = EnsureArg.IsNotNull(resultAggregator, nameof(resultAggregator));
             _searchOptionsFactory = EnsureArg.IsNotNull(searchOptionsFactory, nameof(searchOptionsFactory));
             _chainedSearchProcessor = EnsureArg.IsNotNull(chainedSearchProcessor, nameof(chainedSearchProcessor));
+            _includeProcessor = EnsureArg.IsNotNull(includeProcessor, nameof(includeProcessor));
             _configuration = EnsureArg.IsNotNull(configuration, nameof(configuration));
             _logger = EnsureArg.IsNotNull(logger, nameof(logger));
         }
@@ -71,6 +74,15 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             _logger.LogInformation("Starting fanout search for resource type: {ResourceType} with {ParamCount} parameters", 
                 resourceType, queryParameters.Count);
+
+            // If this is an $includes operation, handle it directly
+            if (isIncludesOperation)
+            {
+                return await _includeProcessor.ProcessIncludesOperationAsync(
+                    resourceType,
+                    queryParameters,
+                    cancellationToken);
+            }
 
             // Process chained search parameters if present
             var processedQueryParameters = queryParameters;
@@ -151,6 +163,16 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             _logger.LogInformation("Starting fanout search for resource type: {ResourceType}", 
                 searchOptions.ResourceType);
 
+            // Check if this is an $includes operation
+            if (searchOptions.OnlyIds && searchOptions.UnsupportedSearchParams.Any(p => p.Item1.Equals("includesCt", StringComparison.OrdinalIgnoreCase)))
+            {
+                // This is an $includes operation request
+                return await _includeProcessor.ProcessIncludesOperationAsync(
+                    searchOptions.ResourceType,
+                    searchOptions.UnsupportedSearchParams,
+                    cancellationToken);
+            }
+
             // For the simplified fanout broker, we don't parse complex expressions
             // Instead, we work as a query proxy forwarding requests to downstream servers
             
@@ -166,6 +188,16 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 ExecutionStrategy.Sequential => await ExecuteSequentialSearchAsync(searchOptions, cancellationToken),
                 _ => throw new ArgumentOutOfRangeException(nameof(strategy), strategy, "Unknown execution strategy")
             };
+
+            // Process include/revinclude parameters if present
+            if (_includeProcessor.HasIncludeParameters(searchOptions.UnsupportedSearchParams))
+            {
+                result = await _includeProcessor.ProcessIncludesAsync(
+                    searchOptions.ResourceType,
+                    searchOptions.UnsupportedSearchParams,
+                    result,
+                    cancellationToken);
+            }
 
             _logger.LogInformation("Fanout search completed. Returned {Count} results", 
                 result.Results?.Count() ?? 0);

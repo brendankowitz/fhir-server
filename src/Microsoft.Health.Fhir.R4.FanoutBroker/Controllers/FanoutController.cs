@@ -93,6 +93,34 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
         }
 
         /// <summary>
+        /// Handle $includes operation for paginated retrieval of included resources.
+        /// </summary>
+        [HttpGet("{resourceType}/$includes")]
+        public async Task<IActionResult> SearchIncludes(string resourceType, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var queryParameters = GetQueryParameters();
+                
+                _logger.LogInformation("$includes operation request for {ResourceType} with {ParamCount} parameters", 
+                    resourceType, queryParameters.Count);
+
+                var result = await _searchService.SearchAsync(
+                    resourceType: resourceType,
+                    queryParameters: queryParameters,
+                    cancellationToken: cancellationToken,
+                    isIncludesOperation: true);
+
+                return Ok(CreateBundle(result));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error during $includes operation for {ResourceType}", resourceType);
+                return StatusCode(500, CreateOperationOutcome("Error during $includes operation", ex.Message));
+            }
+        }
+
+        /// <summary>
         /// Handle capability statement requests.
         /// </summary>
         [HttpGet("metadata")]

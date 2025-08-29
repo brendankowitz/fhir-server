@@ -50,6 +50,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker
             services.AddScoped<IFhirServerOrchestrator, FhirServerOrchestrator>();
             services.AddScoped<IResultAggregator, ResultAggregator>();
             services.AddScoped<IChainedSearchProcessor, ChainedSearchProcessor>();
+            services.AddScoped<IIncludeProcessor, IncludeProcessor>();
             services.AddScoped<ISearchOptionsFactory, FanoutSearchOptionsFactory>();
             services.AddScoped<IConformanceProvider, FanoutCapabilityStatementProvider>();
             services.AddScoped<ISearchService, FanoutSearchService>();

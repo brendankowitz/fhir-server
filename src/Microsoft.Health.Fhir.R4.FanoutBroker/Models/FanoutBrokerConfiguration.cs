@@ -44,6 +44,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Models
         public int MaxChainDepth { get; set; } = 3;
 
         /// <summary>
+        /// Maximum number of included resources to include in the main search bundle.
+        /// If exceeded, a related link to $includes operation is provided.
+        /// </summary>
+        public int MaxIncludedResourcesInBundle { get; set; } = 1000;
+
+        /// <summary>
         /// Whether to enable circuit breaker pattern for server failures.
         /// </summary>
         public bool EnableCircuitBreaker { get; set; } = true;
