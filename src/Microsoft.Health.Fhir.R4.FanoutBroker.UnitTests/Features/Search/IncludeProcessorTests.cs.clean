@@ -8,9 +8,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Hl7.Fhir.Model;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
@@ -114,7 +114,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.UnitTests.Features.Search
                 },
                 continuationToken: null,
                 sortOrder: null,
-                unsupportedSearchParameters: new List<Tuple<string, string>>());
+                unsupportedSearchParameters: new List<Tuple<string, string>>(),
+                maxItemCountExceeded: false);
 
             var result = await _includeProcessor.ProcessIncludesAsync(
                 "Patient",
@@ -142,7 +143,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.UnitTests.Features.Search
                 },
                 continuationToken: null,
                 sortOrder: null,
-                unsupportedSearchParameters: new List<Tuple<string, string>>());
+                unsupportedSearchParameters: new List<Tuple<string, string>>(),
+                maxItemCountExceeded: false);
 
             var server1Result = new ServerSearchResult
             {
@@ -155,7 +157,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.UnitTests.Features.Search
                     },
                     continuationToken: null,
                     sortOrder: null,
-                    unsupportedSearchParameters: new List<Tuple<string, string>>()),
+                    unsupportedSearchParameters: new List<Tuple<string, string>>(),
+                    maxItemCountExceeded: false),
             };
 
             var server2Result = new ServerSearchResult
@@ -169,7 +172,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.UnitTests.Features.Search
                     },
                     continuationToken: null,
                     sortOrder: null,
-                    unsupportedSearchParameters: new List<Tuple<string, string>>()),
+                    unsupportedSearchParameters: new List<Tuple<string, string>>(),
+                    maxItemCountExceeded: false),
             };
 
             _serverOrchestrator.GetEnabledServers().Returns(new List<FhirServerEndpoint>
@@ -190,7 +194,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.UnitTests.Features.Search
             Assert.NotSame(originalResult, result);
             Assert.Equal(3, result.Results.Count());
 
-            var resourceTypes = result.Results.Select(r => r.Resource.ResourceTypeName).ToList();
+            var resourceTypes = result.Results.Select(r => r.Resource.ResourceType.ToString()).ToList();
             Assert.Contains("Patient", resourceTypes);
             Assert.Contains("Organization", resourceTypes);
             Assert.Equal(2, resourceTypes.Count(rt => rt == "Organization"));
@@ -217,7 +221,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.UnitTests.Features.Search
                     },
                     continuationToken: null,
                     sortOrder: null,
-                    unsupportedSearchParameters: new List<Tuple<string, string>>()),
+                    unsupportedSearchParameters: new List<Tuple<string, string>>(),
+                    maxItemCountExceeded: false),
             };
 
             _serverOrchestrator.GetEnabledServers().Returns(new List<FhirServerEndpoint>
@@ -234,7 +239,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.UnitTests.Features.Search
                 CancellationToken.None);
 
             Assert.Equal(2, result.Results.Count());
-            Assert.All(result.Results, r => Assert.Equal("Organization", r.Resource.ResourceTypeName));
+            Assert.All(result.Results, r => Assert.Equal("Organization", r.Resource.ResourceType.ToString()));
         }
 
         [Fact]
@@ -253,7 +258,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.UnitTests.Features.Search
                 },
                 continuationToken: null,
                 sortOrder: null,
-                unsupportedSearchParameters: new List<Tuple<string, string>>());
+                unsupportedSearchParameters: new List<Tuple<string, string>>(),
+                maxItemCountExceeded: false);
 
             var serverResult1 = new ServerSearchResult
             {
@@ -266,7 +272,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.UnitTests.Features.Search
                     },
                     continuationToken: null,
                     sortOrder: null,
-                    unsupportedSearchParameters: new List<Tuple<string, string>>()),
+                    unsupportedSearchParameters: new List<Tuple<string, string>>(),
+                    maxItemCountExceeded: false),
             };
 
             var serverResult2 = new ServerSearchResult
@@ -280,7 +287,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.UnitTests.Features.Search
                     },
                     continuationToken: null,
                     sortOrder: null,
-                    unsupportedSearchParameters: new List<Tuple<string, string>>()),
+                    unsupportedSearchParameters: new List<Tuple<string, string>>(),
+                    maxItemCountExceeded: false),
             };
 
             _serverOrchestrator.GetEnabledServers().Returns(new List<FhirServerEndpoint>
@@ -300,26 +308,22 @@ namespace Microsoft.Health.Fhir.FanoutBroker.UnitTests.Features.Search
 
             Assert.Equal(2, result.Results.Count());
 
-            var organizations = result.Results.Where(r => r.Resource.ResourceTypeName == "Organization").ToList();
+            var organizations = result.Results.Where(r => r.Resource.ResourceType.ToString() == "Organization").ToList();
             Assert.Single(organizations);
-            Assert.Equal("org1", organizations.First().Resource.ResourceId);
+            Assert.Equal("org1", organizations.First().Resource.Id);
         }
 
         private SearchResultEntry CreateSearchResultEntry(string resourceType, string id)
         {
-            var wrapper = new Microsoft.Health.Fhir.Core.Features.Persistence.ResourceWrapper(
-                resourceId: id,
-                versionId: "1",
-                resourceTypeName: resourceType,
-                rawResource: new RawResource("{}", FhirResourceFormat.Json, isMetaSet: false),
-                request: null,
-                lastModified: DateTimeOffset.UtcNow,
-                deleted: false,
-                searchIndices: null,
-                compartmentIndices: null,
-                lastModifiedClaims: null);
+            var resource = new Patient { Id = id };
+            if (resourceType == "Organization")
+            {
+                resource = new Organization { Id = id };
+            }
 
-            return new SearchResultEntry(wrapper, Microsoft.Health.Fhir.ValueSets.SearchEntryMode.Match);
+            return new SearchResultEntry(
+                resource: resource,
+                searchEntryMode: Bundle.SearchEntryMode.Match);
         }
     }
 }

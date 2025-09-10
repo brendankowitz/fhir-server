@@ -5,14 +5,18 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
 using Hl7.Fhir.Model;
-using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Extensions;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
-using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Conformance;
+using Microsoft.Health.Fhir.Core.Features.Persistence;
+using Microsoft.Health.Fhir.Core.Features.Routing;
+using Microsoft.Health.Fhir.Core.Features.Search;
 
 namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
 {
@@ -22,19 +26,23 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
     /// </summary>
     [ApiController]
     [Route("")]
+    [SuppressMessage("Maintainability", "CA1515:Consider making public types internal", Justification = "ASP.NET Controller")]
     public class FanoutController : ControllerBase
     {
         private readonly ISearchService _searchService;
         private readonly IConformanceProvider _conformanceProvider;
+        private readonly IResourceDeserializer _resourceDeserializer;
         private readonly ILogger<FanoutController> _logger;
 
         public FanoutController(
             ISearchService searchService,
             IConformanceProvider conformanceProvider,
+            IResourceDeserializer resourceDeserializer,
             ILogger<FanoutController> logger)
         {
             _searchService = searchService ?? throw new ArgumentNullException(nameof(searchService));
             _conformanceProvider = conformanceProvider ?? throw new ArgumentNullException(nameof(conformanceProvider));
+            _resourceDeserializer = resourceDeserializer ?? throw new ArgumentNullException(nameof(resourceDeserializer));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
@@ -47,9 +55,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
             try
             {
                 var queryParameters = GetQueryParameters();
-                
-                _logger.LogInformation("System-level search request with {ParamCount} parameters", 
-                    queryParameters.Count);
+
+                _logger.LogInformation("System-level search request with {ParamCount} parameters", queryParameters.Count);
 
                 var result = await _searchService.SearchAsync(
                     resourceType: null,
@@ -74,9 +81,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
             try
             {
                 var queryParameters = GetQueryParameters();
-                
-                _logger.LogInformation("Resource search request for {ResourceType} with {ParamCount} parameters", 
-                    resourceType, queryParameters.Count);
+
+                _logger.LogInformation("Resource search request for {ResourceType} with {ParamCount} parameters", resourceType, queryParameters.Count);
 
                 var result = await _searchService.SearchAsync(
                     resourceType: resourceType,
@@ -101,9 +107,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
             try
             {
                 var queryParameters = GetQueryParameters();
-                
-                _logger.LogInformation("$includes operation request for {ResourceType} with {ParamCount} parameters", 
-                    resourceType, queryParameters.Count);
+
+                _logger.LogInformation("$includes operation request for {ResourceType} with {ParamCount} parameters", resourceType, queryParameters.Count);
 
                 var result = await _searchService.SearchAsync(
                     resourceType: resourceType,
@@ -130,7 +135,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
             {
                 _logger.LogInformation("Capability statement request");
 
-                var capabilityStatement = await _conformanceProvider.GetCapabilityStatementAsync(cancellationToken);
+                var capabilityStatement = await _conformanceProvider.GetMetadata(cancellationToken);
                 return Ok(capabilityStatement);
             }
             catch (Exception ex)
@@ -147,11 +152,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
         public IActionResult RejectPointRead(string resourceType, string id)
         {
             _logger.LogWarning("Rejected point read request for {ResourceType}/{Id}", resourceType, id);
-            
+
             return StatusCode(501, CreateOperationOutcome(
-                "Not Implemented", 
-                "Point read operations are not supported by the fanout broker service. " +
-                "Use search operations instead."));
+                "Not Implemented",
+                "Point read operations are not supported by the fanout broker service. Use search operations instead."));
         }
 
         /// <summary>
@@ -160,11 +164,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
         [HttpGet("{resourceType}/{id}/_history/{vid}")]
         public IActionResult RejectVersionedRead(string resourceType, string id, string vid)
         {
-            _logger.LogWarning("Rejected versioned read request for {ResourceType}/{Id}/_history/{Vid}", 
-                resourceType, id, vid);
-            
+            _logger.LogWarning("Rejected versioned read request for {ResourceType}/{Id}/_history/{Vid}", resourceType, id, vid);
+
             return StatusCode(501, CreateOperationOutcome(
-                "Not Implemented", 
+                "Not Implemented",
                 "Versioned read operations are not supported by the fanout broker service."));
         }
 
@@ -176,11 +179,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
         public IActionResult RejectCreate()
         {
             _logger.LogWarning("Rejected CREATE request");
-            
+
             return StatusCode(405, CreateOperationOutcome(
-                "Method Not Allowed", 
-                "Create operations are not supported by the fanout broker service. " +
-                "This is a read-only service for search aggregation."));
+                "Method Not Allowed",
+                "Create operations are not supported by the fanout broker service. This is a read-only service for search aggregation."));
         }
 
         /// <summary>
@@ -192,11 +194,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
         public IActionResult RejectUpdate()
         {
             _logger.LogWarning("Rejected UPDATE request");
-            
+
             return StatusCode(405, CreateOperationOutcome(
-                "Method Not Allowed", 
-                "Update operations are not supported by the fanout broker service. " +
-                "This is a read-only service for search aggregation."));
+                "Method Not Allowed",
+                "Update operations are not supported by the fanout broker service. This is a read-only service for search aggregation."));
         }
 
         /// <summary>
@@ -208,11 +209,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
         public IActionResult RejectDelete()
         {
             _logger.LogWarning("Rejected DELETE request");
-            
+
             return StatusCode(405, CreateOperationOutcome(
-                "Method Not Allowed", 
-                "Delete operations are not supported by the fanout broker service. " +
-                "This is a read-only service for search aggregation."));
+                "Method Not Allowed",
+                "Delete operations are not supported by the fanout broker service. This is a read-only service for search aggregation."));
         }
 
         /// <summary>
@@ -224,17 +224,16 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
         public IActionResult RejectPatch()
         {
             _logger.LogWarning("Rejected PATCH request");
-            
+
             return StatusCode(405, CreateOperationOutcome(
-                "Method Not Allowed", 
-                "Patch operations are not supported by the fanout broker service. " +
-                "This is a read-only service for search aggregation."));
+                "Method Not Allowed",
+                "Patch operations are not supported by the fanout broker service. This is a read-only service for search aggregation."));
         }
 
         private List<Tuple<string, string>> GetQueryParameters()
         {
             var queryParams = new List<Tuple<string, string>>();
-            
+
             foreach (var param in Request.Query)
             {
                 foreach (var value in param.Value)
@@ -251,21 +250,42 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
             var bundle = new Bundle
             {
                 Type = Bundle.BundleType.Searchset,
-                Entry = new List<Bundle.EntryComponent>()
+                Entry = new List<Bundle.EntryComponent>(),
             };
 
             if (searchResult.Results != null)
             {
                 foreach (var result in searchResult.Results)
                 {
+                    // Generate the full URL using the URL resolver with fanout context
+                    string fullUrl;
+                    if (!string.IsNullOrEmpty(searchResult.SourceServer))
+                    {
+                        // For fanout scenarios, generate URL with source server context for traceability
+                        // Pattern: {source-server-base-url}/{resourceType}/{id}
+                        var sourceServerBaseUrl = searchResult.SourceServer.TrimEnd('/');
+                        fullUrl = $"{sourceServerBaseUrl}/{result.Resource.ResourceTypeName}/{result.Resource.ResourceId}";
+
+                        _logger.LogDebug("Generated fanout URL with source server context: {FullUrl}", fullUrl);
+                    }
+                    else
+                    {
+                        // Standard URL resolution for non-fanout scenarios
+                        throw new NotImplementedException();
+                    }
+
+                    // Deserialize ResourceWrapper to ResourceElement, then convert to Resource
+                    var resourceElement = _resourceDeserializer.Deserialize(result.Resource);
+                    var fhirResource = resourceElement.ToPoco();
+
                     var entry = new Bundle.EntryComponent
                     {
-                        Resource = result.Resource,
-                        FullUrl = result.FullUrl,
+                        Resource = fhirResource,
+                        FullUrl = fullUrl,
                         Search = new Bundle.SearchComponent
                         {
-                            Mode = Bundle.SearchEntryMode.Match
-                        }
+                            Mode = Bundle.SearchEntryMode.Match,
+                        },
                     };
 
                     bundle.Entry.Add(entry);
@@ -284,7 +304,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
                 var nextLink = new Bundle.LinkComponent
                 {
                     Relation = "next",
-                    Url = Request.GetDisplayUrl() + $"&ct={searchResult.ContinuationToken}"
+                    Url = Request.GetDisplayUrl() + $"&ct={searchResult.ContinuationToken}",
                 };
                 bundle.Link = new List<Bundle.LinkComponent> { nextLink };
             }
@@ -292,7 +312,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
             return bundle;
         }
 
-        private OperationOutcome CreateOperationOutcome(string severity, string details)
+        private static OperationOutcome CreateOperationOutcome(string severity, string details)
         {
             return new OperationOutcome
             {
@@ -302,9 +322,9 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
                     {
                         Severity = OperationOutcome.IssueSeverity.Error,
                         Code = OperationOutcome.IssueType.NotSupported,
-                        Diagnostics = details
-                    }
-                }
+                        Diagnostics = details,
+                    },
+                },
             };
         }
     }

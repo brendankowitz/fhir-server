@@ -1,8 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <PropertyGroup>
     <RootNamespace>Microsoft.Health.Fhir.FanoutBroker</RootNamespace>
-    <TargetFramework>net8.0</TargetFramework>
     <DefineConstants>R4</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);CA1002;SA1025;SA1028;SA1201;CA1822;SA1402;SA1413;SA1513;SA1515;CA1515;SA1516;SA1518;CA1056;CA1822;CA1859;SA1116;SA1117;SA1503;CA2227</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -15,16 +18,23 @@
     <PackageReference Include="Hl7.Fhir.R4" />
     <PackageReference Include="System.Collections.Immutable" />
     <PackageReference Include="System.Net.Http" />
-    <PackageReference Include="System.Web.HttpUtility" />
     <PackageReference Include="Polly" />
-    <PackageReference Include="Swashbuckle.AspNetCore" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Microsoft.Health.Fhir.Core\Microsoft.Health.Fhir.Core.csproj" />
+    <ProjectReference Include="..\Microsoft.Health.Fhir.R4.Client\Microsoft.Health.Fhir.R4.Client.csproj" />
     <ProjectReference Include="..\Microsoft.Health.Fhir.R4.Core\Microsoft.Health.Fhir.R4.Core.csproj" />
-    <ProjectReference Include="..\Microsoft.Health.Fhir.Shared.Client\Microsoft.Health.Fhir.Shared.Client.csproj" />
-    <ProjectReference Include="..\Microsoft.Health.Fhir.Shared.Api\Microsoft.Health.Fhir.Shared.Api.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\docs\arch\Proposals\adr-2506-fanout-broker-query-service.md">
+      <Link>adr-2506-fanout-broker-query-service.md</Link>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Features\Api\" />
   </ItemGroup>
 
 </Project>

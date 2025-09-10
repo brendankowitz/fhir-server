@@ -15,6 +15,7 @@ using Microsoft.Health.Fhir.Core.Features.Conformance;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
 using Microsoft.Health.Fhir.FanoutBroker.Models;
+using Task = System.Threading.Tasks.Task;
 
 namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
 {
@@ -40,58 +41,18 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
             _serverOrchestrator = serverOrchestrator ?? throw new ArgumentNullException(nameof(serverOrchestrator));
             _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _cachedCapabilityStatement = null;
         }
 
         /// <inheritdoc />
         public void Build(ICapabilityStatementBuilder builder)
         {
-            // This method is called during service registration to configure capabilities
-            // For fanout broker, we'll configure basic read-only search capabilities
-            
+            // Configure basic read-only search capabilities using the shared builder API.
+            // Avoid customizing HL7 model directly; rely on core builder to populate defaults and sync search params/profiles.
             builder
                 .AddGlobalSearchParameters()
                 .SyncSearchParametersAsync()
                 .SyncProfiles();
-
-            // Configure server information
-            builder.Update(capability =>
-            {
-                capability.Name = "FHIR Fanout Broker";
-                capability.Title = "FHIR Fanout Broker Query Service";
-                capability.Description = new Markdown("Read-only FHIR service that aggregates search queries across multiple FHIR servers");
-                capability.Kind = CapabilityStatement.CapabilityStatementKind.Instance;
-                capability.Status = PublicationStatus.Active;
-                capability.Date = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssK");
-                capability.Software = new CapabilityStatement.SoftwareComponent
-                {
-                    Name = "Microsoft FHIR Fanout Broker",
-                    Version = "1.0.0"
-                };
-
-                // Configure REST capabilities
-                var rest = capability.Rest?.FirstOrDefault() ?? new CapabilityStatement.RestComponent();
-                rest.Mode = CapabilityStatement.RestfulCapabilityMode.Server;
-                
-                // Remove write operations - fanout broker is read-only
-                rest.Interaction?.RemoveAll(i => 
-                    i.Code == CapabilityStatement.SystemRestfulInteraction.Transaction ||
-                    i.Code == CapabilityStatement.SystemRestfulInteraction.Batch);
-
-                // Configure supported operations
-                rest.Interaction = new List<CapabilityStatement.SystemInteractionComponent>
-                {
-                    new CapabilityStatement.SystemInteractionComponent
-                    {
-                        Code = CapabilityStatement.SystemRestfulInteraction.SearchSystem,
-                        Documentation = "Search across all resource types on all configured FHIR servers"
-                    }
-                };
-
-                if (capability.Rest == null)
-                {
-                    capability.Rest = new List<CapabilityStatement.RestComponent> { rest };
-                }
-            });
         }
 
         /// <inheritdoc />
@@ -138,9 +99,9 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
             try
             {
                 _logger.LogInformation("Building capability statement from target FHIR servers");
-                
+
                 var capabilityStatement = await BuildCapabilityStatementAsync(cancellationToken);
-                
+
                 lock (_cacheLock)
                 {
                     // Cache would be set here in a real implementation
@@ -152,7 +113,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error building capability statement");
-                
+
                 // Return a basic capability statement in case of error
                 return CreateBasicCapabilityStatement();
             }
@@ -171,9 +132,9 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
             var serverCapabilities = new List<ServerCapabilityResult>();
 
             // Get capability statements from all enabled servers
-            var capabilityTasks = enabledServers.Select(server => 
+            var capabilityTasks = enabledServers.Select(server =>
                 _serverOrchestrator.GetCapabilityStatementAsync(server, cancellationToken));
-            
+
             var results = await Task.WhenAll(capabilityTasks);
             serverCapabilities.AddRange(results.Where(r => r.IsSuccess));
 
@@ -190,7 +151,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
         private CapabilityStatement IntersectCapabilities(List<CapabilityStatement> serverCapabilities)
         {
             var intersected = CreateBasicCapabilityStatement();
-            
+
             if (!serverCapabilities.Any())
             {
                 return intersected;
@@ -212,7 +173,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
 
             // Intersect resource capabilities
             var resourceCapabilities = new List<CapabilityStatement.ResourceComponent>();
-            
+
             foreach (var resourceType in firstServerRest.Resource.Select(r => r.Type).Distinct())
             {
                 var resourcesOfType = serverCapabilities
@@ -285,7 +246,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
                 Title = "FHIR Fanout Broker Query Service",
                 Status = PublicationStatus.Active,
                 Date = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssK"),
-                Kind = CapabilityStatement.CapabilityStatementKind.Instance,
+                Kind = CapabilityStatementKind.Instance,
                 Software = new CapabilityStatement.SoftwareComponent
                 {
                     Name = "Microsoft FHIR Fanout Broker",

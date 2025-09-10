@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
 using Microsoft.Health.Fhir.FanoutBroker.Models;
 
@@ -36,7 +37,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         }
 
         /// <inheritdoc />
-        public async Task<SearchResult> AggregateParallelResultsAsync(
+        public Task<SearchResult> AggregateParallelResultsAsync(
             IReadOnlyList<ServerSearchResult> serverResults,
             SearchOptions originalSearchOptions,
             CancellationToken cancellationToken)
@@ -66,7 +67,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     Endpoint = serverResult.ServerId,
                     Token = serverResult.SearchResult?.ContinuationToken,
                     Exhausted = string.IsNullOrEmpty(serverResult.SearchResult?.ContinuationToken),
-                    ResultsReturned = serverResult.SearchResult?.Results?.Count() ?? 0
+                    ResultsReturned = serverResult.SearchResult?.Results?.Count() ?? 0,
                 };
 
                 serverTokens.Add(serverToken);
@@ -101,7 +102,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     SortCriteria = SerializeSortCriteria(originalSearchOptions.Sort),
                     PageSize = originalSearchOptions.MaxItemCount,
                     ExecutionStrategy = ExecutionStrategy.Parallel.ToString(),
-                    ResourceType = originalSearchOptions.ResourceType
                 };
 
                 aggregatedContinuationToken = fanoutToken.ToBase64String();
@@ -113,14 +113,16 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 sortOrder: originalSearchOptions.Sort,
                 unsupportedSearchParameters: uniqueUnsupportedParams);
 
-            _logger.LogInformation("Parallel aggregation completed. {ResultCount} results, continuation: {HasContinuation}",
-                finalResults.Count, !string.IsNullOrEmpty(aggregatedContinuationToken));
+            _logger.LogInformation(
+                "Parallel aggregation completed. {ResultCount} results, continuation: {HasContinuation}",
+                finalResults.Count,
+                !string.IsNullOrEmpty(aggregatedContinuationToken));
 
-            return aggregatedResult;
+            return Task.FromResult(aggregatedResult);
         }
 
         /// <inheritdoc />
-        public async Task<SearchResult> AggregateSequentialResultsAsync(
+        public Task<SearchResult> AggregateSequentialResultsAsync(
             IReadOnlyList<ServerSearchResult> serverResults,
             SearchOptions originalSearchOptions,
             CancellationToken cancellationToken)
@@ -138,7 +140,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 if (serverResult.SearchResult?.Results != null)
                 {
                     var serverResultsList = serverResult.SearchResult.Results.ToList();
-                    
+
                     // Apply remaining count limit
                     if (targetCount > 0)
                     {
@@ -166,7 +168,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     Endpoint = serverResult.ServerId,
                     Token = serverResult.SearchResult?.ContinuationToken,
                     Exhausted = string.IsNullOrEmpty(serverResult.SearchResult?.ContinuationToken),
-                    ResultsReturned = serverResult.SearchResult?.Results?.Count() ?? 0
+                    ResultsReturned = serverResult.SearchResult?.Results?.Count() ?? 0,
                 };
 
                 serverTokens.Add(serverToken);
@@ -202,7 +204,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     SortCriteria = SerializeSortCriteria(originalSearchOptions.Sort),
                     PageSize = originalSearchOptions.MaxItemCount,
                     ExecutionStrategy = ExecutionStrategy.Sequential.ToString(),
-                    ResourceType = originalSearchOptions.ResourceType
                 };
 
                 aggregatedContinuationToken = fanoutToken.ToBase64String();
@@ -214,14 +215,16 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 sortOrder: originalSearchOptions.Sort,
                 unsupportedSearchParameters: uniqueUnsupportedParams);
 
-            _logger.LogInformation("Sequential aggregation completed. {ResultCount} results, continuation: {HasContinuation}",
-                finalResults.Count, !string.IsNullOrEmpty(aggregatedContinuationToken));
+            _logger.LogInformation(
+                "Sequential aggregation completed. {ResultCount} results, continuation: {HasContinuation}",
+                finalResults.Count,
+                !string.IsNullOrEmpty(aggregatedContinuationToken));
 
-            return aggregatedResult;
+            return Task.FromResult(aggregatedResult);
         }
 
         /// <inheritdoc />
-        public async Task<SearchResult> ProcessIncludesAsync(
+        public Task<SearchResult> ProcessIncludesAsync(
             SearchResult primaryResults,
             SearchOptions searchOptions,
             CancellationToken cancellationToken)
@@ -234,11 +237,11 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             // 4. Merge include results back into the primary results
 
             _logger.LogInformation("Include processing not yet implemented - returning primary results unchanged");
-            
-            return primaryResults;
+
+            return Task.FromResult(primaryResults);
         }
 
-        private List<SearchResultEntry> SortResults(
+        private static List<SearchResultEntry> SortResults(
             IEnumerable<SearchResultEntry> results,
             IReadOnlyList<(SearchParameterInfo searchParameterInfo, SortOrder sortOrder)> sortOrder)
         {
@@ -260,74 +263,28 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 {
                     "_lastmodified" => SortByLastModified(sorted, ascending),
                     "_id" => SortById(sorted, ascending),
-                    "name" => SortByName(sorted, ascending),
-                    _ => sorted // Unsupported sort parameter, maintain current order
+                    _ => sorted, // Unsupported sort parameter, maintain current order
                 };
             }
 
             return sorted.ToList();
         }
 
-        private IEnumerable<SearchResultEntry> SortByLastModified(IEnumerable<SearchResultEntry> results, bool ascending)
+        private static IEnumerable<SearchResultEntry> SortByLastModified(IEnumerable<SearchResultEntry> results, bool ascending)
         {
             return ascending
-                ? results.OrderBy(r => r.Resource.Meta?.LastUpdated)
-                : results.OrderByDescending(r => r.Resource.Meta?.LastUpdated);
+                ? results.OrderBy(r => r.Resource.LastModified)
+                : results.OrderByDescending(r => r.Resource.LastModified);
         }
 
-        private IEnumerable<SearchResultEntry> SortById(IEnumerable<SearchResultEntry> results, bool ascending)
+        private static IEnumerable<SearchResultEntry> SortById(IEnumerable<SearchResultEntry> results, bool ascending)
         {
             return ascending
-                ? results.OrderBy(r => r.Resource.Id)
-                : results.OrderByDescending(r => r.Resource.Id);
+                ? results.OrderBy(r => r.Resource.ResourceId)
+                : results.OrderByDescending(r => r.Resource.ResourceId);
         }
 
-        private IEnumerable<SearchResultEntry> SortByName(IEnumerable<SearchResultEntry> results, bool ascending)
-        {
-            // This is a simplified implementation for demonstration
-            // Real implementation would need to handle resource-specific name fields
-            return ascending
-                ? results.OrderBy(r => GetResourceName(r.Resource))
-                : results.OrderByDescending(r => GetResourceName(r.Resource));
-        }
-
-        private string GetResourceName(Hl7.Fhir.Model.Resource resource)
-        {
-            // Simplified name extraction - in reality this would be resource-type specific
-            return resource switch
-            {
-                Hl7.Fhir.Model.Patient patient => GetPatientName(patient),
-                Hl7.Fhir.Model.Organization org => org.Name,
-                Hl7.Fhir.Model.Practitioner practitioner => GetPractitionerName(practitioner),
-                _ => resource.Id ?? string.Empty
-            };
-        }
-
-        private string GetPatientName(Hl7.Fhir.Model.Patient patient)
-        {
-            var name = patient.Name?.FirstOrDefault();
-            if (name != null)
-            {
-                var family = string.Join(" ", name.Family ?? Enumerable.Empty<string>());
-                var given = string.Join(" ", name.Given ?? Enumerable.Empty<string>());
-                return $"{family}, {given}".Trim(' ', ',');
-            }
-            return patient.Id ?? string.Empty;
-        }
-
-        private string GetPractitionerName(Hl7.Fhir.Model.Practitioner practitioner)
-        {
-            var name = practitioner.Name?.FirstOrDefault();
-            if (name != null)
-            {
-                var family = string.Join(" ", name.Family ?? Enumerable.Empty<string>());
-                var given = string.Join(" ", name.Given ?? Enumerable.Empty<string>());
-                return $"{family}, {given}".Trim(' ', ',');
-            }
-            return practitioner.Id ?? string.Empty;
-        }
-
-        private string SerializeSortCriteria(IReadOnlyList<(SearchParameterInfo searchParameterInfo, SortOrder sortOrder)> sortOrder)
+        private static string SerializeSortCriteria(IReadOnlyList<(SearchParameterInfo searchParameterInfo, SortOrder sortOrder)> sortOrder)
         {
             if (sortOrder == null || !sortOrder.Any())
             {

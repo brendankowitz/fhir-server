@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
+using Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors;
 
 namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 {
@@ -19,7 +20,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
     {
         private const int ParallelCountThreshold = 10;
         private const int SequentialCountThreshold = 20;
-        private const int LowResultExpectedThreshold = 500;
 
         /// <summary>
         /// Analyzes search options to determine the optimal execution strategy.
@@ -76,72 +76,61 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         private bool HasChainedSearch(SearchOptions searchOptions)
         {
             if (searchOptions.Expression == null)
+            {
                 return false;
+            }
 
             var chainVisitor = new ChainSearchDetectorVisitor();
-            searchOptions.Expression.AcceptVisitor(chainVisitor);
+            searchOptions.Expression.AcceptVisitor(chainVisitor, null);
             return chainVisitor.HasChainedSearch;
         }
 
         private bool HasExactIdSearch(SearchOptions searchOptions)
         {
             if (searchOptions.Expression == null)
+            {
                 return false;
+            }
 
             var idVisitor = new IdSearchDetectorVisitor();
-            searchOptions.Expression.AcceptVisitor(idVisitor);
+            searchOptions.Expression.AcceptVisitor(idVisitor, null);
             return idVisitor.HasExactIdSearch;
         }
 
         private bool HasSpecificIdentifierSearch(SearchOptions searchOptions)
         {
             if (searchOptions.Expression == null)
+            {
                 return false;
+            }
 
             var identifierVisitor = new IdentifierSearchDetectorVisitor();
-            searchOptions.Expression.AcceptVisitor(identifierVisitor);
+            searchOptions.Expression.AcceptVisitor(identifierVisitor, null);
             return identifierVisitor.HasSpecificIdentifier;
         }
 
         private bool HasBroadTextSearches(SearchOptions searchOptions)
         {
             if (searchOptions.Expression == null)
+            {
                 return false;
+            }
 
             var textVisitor = new TextSearchDetectorVisitor();
-            searchOptions.Expression.AcceptVisitor(textVisitor);
+            searchOptions.Expression.AcceptVisitor(textVisitor, null);
             return textVisitor.HasBroadTextSearch;
         }
 
         private bool HasStatusBasedSearches(SearchOptions searchOptions)
         {
             if (searchOptions.Expression == null)
+            {
                 return false;
+            }
 
             var statusVisitor = new StatusSearchDetectorVisitor();
-            searchOptions.Expression.AcceptVisitor(statusVisitor);
+            searchOptions.Expression.AcceptVisitor(statusVisitor, null);
             return statusVisitor.HasStatusSearch;
         }
-    }
-
-    /// <summary>
-    /// Represents the execution strategy for fanout queries.
-    /// </summary>
-    public enum ExecutionStrategy
-    {
-        /// <summary>
-        /// Execute queries across all servers in parallel.
-        /// </summary>
-        Parallel,
-
-        /// <summary>
-        /// Execute queries sequentially until sufficient results are obtained.
-        /// </summary>
-        Sequential
-    }
-
-    public interface IExecutionStrategyAnalyzer
-    {
-        ExecutionStrategy DetermineStrategy(SearchOptions searchOptions);
     }
 }

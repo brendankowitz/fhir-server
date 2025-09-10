@@ -90,6 +90,11 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         public string IncludesContinuationToken { get; }
 
         /// <summary>
+        /// Usually self, but could be another server if the search was federated.
+        /// </summary>
+        public string SourceServer { get; set; }
+
+        /// <summary>
         /// A list of issues that will be returned inside a search result.
         /// </summary>
         public IReadOnlyList<OperationOutcomeIssue> SearchIssues { get; }

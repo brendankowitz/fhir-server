@@ -123,7 +123,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         private bool IsChainedParameter(string paramName)
         {
             // Forward chained parameters contain dots (e.g., "subject.name", "patient.identifier")
-            if (paramName.Contains('.'))
+            if (paramName.Contains('.', StringComparison.Ordinal))
             {
                 return true;
             }

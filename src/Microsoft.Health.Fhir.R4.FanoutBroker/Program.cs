@@ -12,7 +12,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker
     /// <summary>
     /// Entry point for the FHIR Fanout Broker service.
     /// </summary>
-    public class Program
+    public static class Program
     {
         /// <summary>
         /// Main entry point.

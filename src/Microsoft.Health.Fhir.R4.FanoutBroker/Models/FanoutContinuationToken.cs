@@ -48,12 +48,14 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Models
         /// Serializes the token to JSON string.
         /// </summary>
         /// <returns>JSON representation of the continuation token.</returns>
+        private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+        };
+
         public string ToJson()
         {
-            return JsonSerializer.Serialize(this, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
-            });
+            return JsonSerializer.Serialize(this, JsonOptions);
         }
 
         /// <summary>
@@ -68,10 +70,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Models
 
             try
             {
-                return JsonSerializer.Deserialize<FanoutContinuationToken>(json, new JsonSerializerOptions
-                {
-                    PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
-                });
+                return JsonSerializer.Deserialize<FanoutContinuationToken>(json, JsonOptions);
             }
             catch (JsonException)
             {

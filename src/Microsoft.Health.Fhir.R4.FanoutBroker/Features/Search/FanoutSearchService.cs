@@ -57,7 +57,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         }
 
         /// <inheritdoc />
-        public async Task<SearchResult> SearchAsync(
+        public async System.Threading.Tasks.Task<SearchResult> SearchAsync(
             string resourceType,
             IReadOnlyList<Tuple<string, string>> queryParameters,
             CancellationToken cancellationToken,
@@ -72,7 +72,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 throw new InvalidOperationException("Fanout broker only supports latest resource versions.");
             }
 
-            _logger.LogInformation("Starting fanout search for resource type: {ResourceType} with {ParamCount} parameters", 
+            _logger.LogInformation("Starting fanout search for resource type: {ResourceType} with {ParamCount} parameters",
                 resourceType, queryParameters.Count);
 
             // If this is an $includes operation, handle it directly
@@ -86,15 +86,15 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             // Process chained search parameters if present
             var processedQueryParameters = queryParameters;
-            
+
             try
             {
                 processedQueryParameters = await _chainedSearchProcessor.ProcessChainedSearchAsync(
                     resourceType, queryParameters, cancellationToken);
-                
+
                 if (processedQueryParameters.Count != queryParameters.Count)
                 {
-                    _logger.LogInformation("Chained search processing modified query from {OriginalCount} to {ProcessedCount} parameters", 
+                    _logger.LogInformation("Chained search processing modified query from {OriginalCount} to {ProcessedCount} parameters",
                         queryParameters.Count, processedQueryParameters.Count);
                 }
             }
@@ -109,11 +109,11 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             try
             {
                 searchOptions = _searchOptionsFactory.Create(
-                    resourceType, 
-                    processedQueryParameters, 
-                    isAsyncOperation, 
-                    resourceVersionTypes, 
-                    onlyIds, 
+                    resourceType,
+                    processedQueryParameters,
+                    isAsyncOperation,
+                    resourceVersionTypes,
+                    onlyIds,
                     isIncludesOperation);
             }
             catch (NotImplementedException)
@@ -134,7 +134,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             // Create a minimal SearchOptions for proxy operation
             // This is a workaround for the SearchOptions internal constructor limitation
             var searchOptions = (SearchOptions)Activator.CreateInstance(typeof(SearchOptions), true);
-            
+
             // Set basic properties using reflection or public setters where available
             typeof(SearchOptions).GetProperty("ResourceType")?.SetValue(searchOptions, resourceType);
             typeof(SearchOptions).GetProperty("OnlyIds")?.SetValue(searchOptions, onlyIds);
@@ -153,32 +153,32 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     // MaxItemCount property may not be settable - use default
                 }
             }
-            
+
             return searchOptions;
         }
 
         /// <inheritdoc />
-        public async Task<SearchResult> SearchAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
+        public async System.Threading.Tasks.Task<SearchResult> SearchAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
         {
-            _logger.LogInformation("Starting fanout search for resource type: {ResourceType}", 
-                searchOptions.ResourceType);
+            var resourceType = GetResourceType(searchOptions);
+            _logger.LogInformation("Starting fanout search for resource type: {ResourceType}", resourceType);
 
             // Check if this is an $includes operation
             if (searchOptions.OnlyIds && searchOptions.UnsupportedSearchParams.Any(p => p.Item1.Equals("includesCt", StringComparison.OrdinalIgnoreCase)))
             {
                 // This is an $includes operation request
                 return await _includeProcessor.ProcessIncludesOperationAsync(
-                    searchOptions.ResourceType,
+                    resourceType,
                     searchOptions.UnsupportedSearchParams,
                     cancellationToken);
             }
 
             // For the simplified fanout broker, we don't parse complex expressions
             // Instead, we work as a query proxy forwarding requests to downstream servers
-            
+
             // Determine execution strategy based on basic search options
             var strategy = _strategyAnalyzer.DetermineStrategy(searchOptions);
-            
+
             _logger.LogInformation("Using {Strategy} execution strategy for fanout search", strategy);
 
             // Execute search based on strategy
@@ -186,20 +186,20 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             {
                 ExecutionStrategy.Parallel => await ExecuteParallelSearchAsync(searchOptions, cancellationToken),
                 ExecutionStrategy.Sequential => await ExecuteSequentialSearchAsync(searchOptions, cancellationToken),
-                _ => throw new ArgumentOutOfRangeException(nameof(strategy), strategy, "Unknown execution strategy")
+                _ => throw new ArgumentOutOfRangeException(nameof(searchOptions), strategy, "Unknown execution strategy"),
             };
 
             // Process include/revinclude parameters if present
             if (_includeProcessor.HasIncludeParameters(searchOptions.UnsupportedSearchParams))
             {
                 result = await _includeProcessor.ProcessIncludesAsync(
-                    searchOptions.ResourceType,
+                    resourceType,
                     searchOptions.UnsupportedSearchParams,
                     result,
                     cancellationToken);
             }
 
-            _logger.LogInformation("Fanout search completed. Returned {Count} results", 
+            _logger.LogInformation("Fanout search completed. Returned {Count} results",
                 result.Results?.Count() ?? 0);
 
             return result;
@@ -208,10 +208,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         /// <summary>
         /// Executes search queries in parallel across all enabled FHIR servers.
         /// </summary>
-        private async Task<SearchResult> ExecuteParallelSearchAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
+        private async System.Threading.Tasks.Task<SearchResult> ExecuteParallelSearchAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
         {
             var enabledServers = _serverOrchestrator.GetEnabledServers();
-            var searchTasks = new List<Task<ServerSearchResult>>();
+            var searchTasks = new List<System.Threading.Tasks.Task<ServerSearchResult>>();
 
             // Parse continuation token if present
             FanoutContinuationToken fanoutToken = null;
@@ -225,13 +225,13 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             {
                 var serverToken = fanoutToken?.Servers?.FirstOrDefault(s => s.Endpoint == server.Id)?.Token;
                 var serverSearchOptions = CreateServerSearchOptions(searchOptions, serverToken);
-                
+
                 var searchTask = _serverOrchestrator.SearchAsync(server, serverSearchOptions, cancellationToken);
                 searchTasks.Add(searchTask);
             }
 
             // Wait for all searches to complete
-            var searchResults = await Task.WhenAll(searchTasks);
+            var searchResults = await System.Threading.Tasks.Task.WhenAll(searchTasks);
 
             // Filter out failed results
             var successfulResults = searchResults.Where(r => r.IsSuccess).ToList();
@@ -239,21 +239,21 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             if (failedResults.Any())
             {
-                _logger.LogWarning("Some servers failed during parallel search: {FailedServers}", 
+                _logger.LogWarning("Some servers failed during parallel search: {FailedServers}",
                     string.Join(", ", failedResults.Select(r => r.ServerId)));
             }
 
             // Aggregate results
             return await _resultAggregator.AggregateParallelResultsAsync(
-                successfulResults, 
-                searchOptions, 
+                successfulResults,
+                searchOptions,
                 cancellationToken);
         }
 
         /// <summary>
         /// Executes search queries sequentially until sufficient results are obtained.
         /// </summary>
-        private async Task<SearchResult> ExecuteSequentialSearchAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
+        private async System.Threading.Tasks.Task<SearchResult> ExecuteSequentialSearchAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
         {
             var enabledServers = _serverOrchestrator.GetEnabledServers()
                 .OrderByDescending(s => s.Priority)
@@ -283,7 +283,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 try
                 {
                     var result = await _serverOrchestrator.SearchAsync(server, serverSearchOptions, cancellationToken);
-                    
+
                     if (result.IsSuccess)
                     {
                         results.Add(result);
@@ -292,14 +292,14 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                         // Check if we have sufficient results (fill factor logic)
                         if (totalResults >= fillFactorThreshold)
                         {
-                            _logger.LogInformation("Sequential search completed early. Got {TotalResults} results from {ServerCount} servers", 
+                            _logger.LogInformation("Sequential search completed early. Got {TotalResults} results from {ServerCount} servers",
                                 totalResults, results.Count);
                             break;
                         }
                     }
                     else
                     {
-                        _logger.LogWarning("Server {ServerId} failed during sequential search: {Error}", 
+                        _logger.LogWarning("Server {ServerId} failed during sequential search: {Error}",
                             server.Id, result.ErrorMessage);
                     }
                 }
@@ -311,8 +311,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             // Aggregate results
             return await _resultAggregator.AggregateSequentialResultsAsync(
-                results, 
-                searchOptions, 
+                results,
+                searchOptions,
                 cancellationToken);
         }
 
@@ -321,7 +321,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             // Since SearchOptions constructor is internal, we need to create a new instance through the factory
             // and then manually copy over the relevant settings
             var serverOptions = _searchOptionsFactory.Create(
-                originalOptions.ResourceType,
+                GetResourceType(originalOptions),
                 originalOptions.UnsupportedSearchParams,
                 false, // isAsyncOperation
                 ResourceVersionType.Latest,
@@ -353,8 +353,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             return servers.Count; // All servers exhausted
         }
-
-        #region Unsupported Operations
 
         /// <inheritdoc />
         public Task<SearchResult> SearchCompartmentAsync(
@@ -421,7 +419,14 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         {
             throw new NotSupportedException("Feed ranges are not supported in the fanout broker service.");
         }
-
-        #endregion
+        private static string GetResourceType(SearchOptions options)
+        {
+            var prop = options.GetType().GetProperty("ResourceType");
+            if (prop != null && prop.GetValue(options) is string value && !string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+            return options.UnsupportedSearchParams.FirstOrDefault(p => p.Item1 == "resourceTypeHint")?.Item2 ?? "Resource";
+        }
     }
 }

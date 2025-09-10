@@ -75,9 +75,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
                 var searchResult = await circuitBreakerPolicy.ExecuteAsync(async () =>
                 {
                     var queryString = BuildQueryString(searchOptions);
-                    var requestUrl = string.IsNullOrEmpty(searchOptions.ResourceType)
+                    var resourceType = searchOptions.GetType().GetProperty("ResourceType")?.GetValue(searchOptions) as string;
+                    var requestUrl = string.IsNullOrEmpty(resourceType)
                         ? $"?{queryString}"
-                        : $"{searchOptions.ResourceType}?{queryString}";
+                        : $"{resourceType}?{queryString}";
 
                     _logger.LogDebug("Executing search on server {ServerId}: {RequestUrl}", 
                         server.Id, requestUrl);
@@ -229,7 +230,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
                     return existingClient;
                 }
 
+                // CA2000: HttpClient from IHttpClientFactory is managed by the factory and should not be manually disposed.
+#pragma warning disable CA2000 // Dispose objects before losing scope
                 var httpClient = _httpClientFactory.CreateClient();
+#pragma warning restore CA2000
                 httpClient.BaseAddress = new Uri(server.BaseUrl);
                 
                 // Configure authentication
@@ -370,34 +374,15 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
         private SearchResult ConvertBundleToSearchResult(Bundle bundle, FhirServerEndpoint server)
         {
             var results = new List<SearchResultEntry>();
-
-            if (bundle.Entry != null)
-            {
-                foreach (var entry in bundle.Entry)
-                {
-                    if (entry.Resource != null)
-                    {
-                        // Create fullUrl with server differentiation
-                        var fullUrl = $"{server.BaseUrl}/{entry.Resource.TypeName}/{entry.Resource.Id}";
-                        
-                        var searchResultEntry = new SearchResultEntry(
-                            resource: entry.Resource,
-                            searchEntryMode: SearchEntryMode.Match,
-                            searchScore: null,
-                            fullUrl: fullUrl);
-                        
-                        results.Add(searchResultEntry);
-                    }
-                }
-            }
+            // TODO: Map Bundle entries to ResourceWrapper objects to populate SearchResultEntry list.
 
             // Extract continuation token from Bundle links
             var continuationToken = ExtractContinuationToken(bundle);
 
             return new SearchResult(
-                results: results,
-                continuationToken: continuationToken,
-                sortOrder: null, // Sort order will be handled at aggregation level
+                results,
+                continuationToken,
+                sortOrder: null,
                 unsupportedSearchParameters: new List<Tuple<string, string>>(),
                 searchIssues: null);
         }

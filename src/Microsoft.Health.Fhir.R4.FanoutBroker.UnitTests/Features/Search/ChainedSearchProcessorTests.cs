@@ -37,7 +37,7 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search
             {
                 ChainSearchTimeoutSeconds = 15,
                 MaxChainDepth = 3,
-                MaxResultsPerServer = 1000
+                MaxResultsPerServer = 1000,
             });
 
             _processor = new ChainedSearchProcessor(_mockOrchestrator, _mockOptions, _mockLogger);
@@ -51,7 +51,7 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search
             var queryParameters = new List<Tuple<string, string>>
             {
                 new("name", "John"),
-                new("birthdate", "1980-01-01")
+                new("birthdate", "1980-01-01"),
             };
 
             // Act
@@ -71,13 +71,13 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search
             var queryParameters = new List<Tuple<string, string>>
             {
                 new("subject.name", "John Doe"),  // Forward chained parameter
-                new("status", "final")
+                new("status", "final"),
             };
 
             // Mock enabled servers
             var mockServers = new List<FhirServerEndpoint>
             {
-                new() { Id = "server1", BaseUrl = "http://server1.com/fhir", IsEnabled = true }
+                new() { Id = "server1", BaseUrl = "http://server1.com/fhir", IsEnabled = true },
             };
             _mockOrchestrator.GetEnabledServers().Returns(mockServers);
 
@@ -86,7 +86,7 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search
 
             // Assert
             // The chained parameter should be processed (even if not fully implemented yet)
-            Assert.Single(result.Where(p => p.Item1 == "status"));
+            Assert.Single(result, p => p.Item1 == "status");
             _mockLogger.Received().LogInformation(
                 Arg.Is<string>(s => s.Contains("Processing {ChainCount} chained search parameters")),
                 Arg.Any<object[]>());
@@ -100,13 +100,13 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search
             var queryParameters = new List<Tuple<string, string>>
             {
                 new("_has:Group:member:_id", "group123"),  // Reverse chained parameter
-                new("active", "true")
+                new("active", "true"),
             };
 
             // Mock enabled servers
             var mockServers = new List<FhirServerEndpoint>
             {
-                new() { Id = "server1", BaseUrl = "http://server1.com/fhir", IsEnabled = true }
+                new() { Id = "server1", BaseUrl = "http://server1.com/fhir", IsEnabled = true },
             };
             _mockOrchestrator.GetEnabledServers().Returns(mockServers);
 
@@ -114,7 +114,7 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search
             var result = await _processor.ProcessChainedSearchAsync(resourceType, queryParameters, CancellationToken.None);
 
             // Assert
-            Assert.Single(result.Where(p => p.Item1 == "active"));
+            Assert.Single(result, p => p.Item1 == "active");
             _mockLogger.Received().LogInformation(
                 Arg.Is<string>(s => s.Contains("Processing {ChainCount} chained search parameters")),
                 Arg.Any<object[]>());
@@ -127,7 +127,7 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search
             var resourceType = "Observation";
             var queryParameters = new List<Tuple<string, string>>
             {
-                new("subject.name", "John Doe")
+                new("subject.name", "John Doe"),
             };
 
             // Setup configuration with very short timeout
@@ -135,12 +135,12 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search
             {
                 ChainSearchTimeoutSeconds = 0, // Immediate timeout
                 MaxChainDepth = 3,
-                MaxResultsPerServer = 1000
+                MaxResultsPerServer = 1000,
             });
 
             var mockServers = new List<FhirServerEndpoint>
             {
-                new() { Id = "server1", BaseUrl = "http://server1.com/fhir", IsEnabled = true }
+                new() { Id = "server1", BaseUrl = "http://server1.com/fhir", IsEnabled = true },
             };
             _mockOrchestrator.GetEnabledServers().Returns(mockServers);
 
@@ -156,8 +156,10 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search
             var processor = new ChainedSearchProcessor(_mockOrchestrator, _mockOptions, _mockLogger);
 
             // Use reflection to test private method (for unit testing purposes)
-            var method = typeof(ChainedSearchProcessor).GetMethod("IsChainedParameter", 
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+            var method = typeof(ChainedSearchProcessor).GetMethod(
+                "IsChainedParameter",
+                flags);
 
             // Act & Assert
             Assert.True((bool)method.Invoke(processor, new[] { "subject.name" }));
@@ -173,8 +175,10 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search
             var processor = new ChainedSearchProcessor(_mockOrchestrator, _mockOptions, _mockLogger);
 
             // Use reflection to test private method
-            var method = typeof(ChainedSearchProcessor).GetMethod("IsChainedParameter", 
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+            var method = typeof(ChainedSearchProcessor).GetMethod(
+                "IsChainedParameter",
+                flags);
 
             // Act & Assert
             Assert.True((bool)method.Invoke(processor, new[] { "_has:Group:member:_id" }));
@@ -190,8 +194,10 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search
             var processor = new ChainedSearchProcessor(_mockOrchestrator, _mockOptions, _mockLogger);
 
             // Use reflection to test private method
-            var method = typeof(ChainedSearchProcessor).GetMethod("GuessTargetResourceType", 
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+            var method = typeof(ChainedSearchProcessor).GetMethod(
+                "GuessTargetResourceType",
+                flags);
 
             // Act & Assert
             Assert.Equal("Patient", method.Invoke(processor, new[] { "subject" }));
@@ -213,6 +219,9 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search
             var parts = paramName.Split('.');
             Assert.Equal(expectedRef, parts[0]);
             Assert.Equal(expectedTarget, parts[1]);
+
+            // Ensure the provided value is non-empty (utilize paramValue to satisfy analyzer)
+            Assert.False(string.IsNullOrWhiteSpace(paramValue));
         }
 
         [Theory]

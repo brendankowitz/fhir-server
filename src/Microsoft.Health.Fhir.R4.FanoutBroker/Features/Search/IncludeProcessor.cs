@@ -17,6 +17,7 @@ using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
 using Microsoft.Health.Fhir.FanoutBroker.Models;
+using Task = System.Threading.Tasks.Task;
 
 namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 {
@@ -30,7 +31,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         private readonly IOptions<FanoutBrokerConfiguration> _configuration;
         private readonly ILogger<IncludeProcessor> _logger;
 
-        private const string IncludeParameter = "_include";
+        private const string IncludeParameterName = "_include";
         private const string RevIncludeParameter = "_revinclude";
 
         public IncludeProcessor(
@@ -47,7 +48,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         public bool HasIncludeParameters(IReadOnlyList<Tuple<string, string>> queryParameters)
         {
             return queryParameters.Any(p =>
-                p.Item1.Equals(IncludeParameter, StringComparison.OrdinalIgnoreCase) ||
+                p.Item1.Equals(IncludeParameterName, StringComparison.OrdinalIgnoreCase) ||
                 p.Item1.Equals(RevIncludeParameter, StringComparison.OrdinalIgnoreCase));
         }
 
@@ -70,12 +71,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             {
                 // Extract include/revinclude parameters
                 var includeParameters = ExtractIncludeParameters(queryParameters);
-                
+
                 // Get included resources from all servers
                 var includedResources = await FetchIncludedResourcesAsync(
-                    resourceType, 
-                    includeParameters, 
-                    mainSearchResult, 
+                    resourceType,
+                    includeParameters,
+                    mainSearchResult,
                     cancellationToken);
 
                 // Create the result with included resources
@@ -125,12 +126,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             foreach (var param in queryParameters)
             {
-                if (param.Item1.Equals(IncludeParameter, StringComparison.OrdinalIgnoreCase))
+                if (param.Item1.Equals(IncludeParameterName, StringComparison.OrdinalIgnoreCase))
                 {
                     includeParams.Add(new IncludeParameter
                     {
                         Type = IncludeType.Include,
-                        Value = param.Item2
+                        Value = param.Item2,
                     });
                 }
                 else if (param.Item1.Equals(RevIncludeParameter, StringComparison.OrdinalIgnoreCase))
@@ -138,7 +139,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     includeParams.Add(new IncludeParameter
                     {
                         Type = IncludeType.RevInclude,
-                        Value = param.Item2
+                        Value = param.Item2,
                     });
                 }
             }
@@ -170,12 +171,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 foreach (var server in enabledServers)
                 {
                     var serverTask = FetchIncludesFromServerAsync(
-                        server, 
-                        resourceType, 
-                        includeParam, 
-                        mainSearchResult, 
+                        server,
+                        resourceType,
+                        includeParam,
+                        mainSearchResult,
                         cancellationToken);
-                    
+
                     serverTasks.Add(serverTask);
                 }
 
@@ -210,8 +211,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 // analyze the main search results to determine what included resources to fetch
                 var includeQuery = new List<Tuple<string, string>>
                 {
-                    new Tuple<string, string>(includeParam.Type == IncludeType.Include ? IncludeParameter : RevIncludeParameter, includeParam.Value),
-                    new Tuple<string, string>("_count", "1000") // Limit to prevent overwhelming results
+                    new Tuple<string, string>(includeParam.Type == IncludeType.Include ? IncludeParameterName : RevIncludeParameter, includeParam.Value),
+                    new Tuple<string, string>("_count", "1000"), // Limit to prevent overwhelming results
                 };
 
                 // For now, we'll use a basic approach of executing the original query with includes on each server
@@ -227,7 +228,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 {
                     ServerId = server.Id,
                     IsSuccess = false,
-                    ErrorMessage = ex.Message
+                    ErrorMessage = ex.Message,
                 };
             }
         }
@@ -253,8 +254,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 {
                     var includeQuery = new List<Tuple<string, string>>
                     {
-                        new Tuple<string, string>(includeParam.Type == IncludeType.Include ? IncludeParameter : RevIncludeParameter, includeParam.Value),
-                        new Tuple<string, string>("_count", "100") // Smaller count for $includes operation
+                        new Tuple<string, string>(includeParam.Type == IncludeType.Include ? IncludeParameterName : RevIncludeParameter, includeParam.Value),
+                        new Tuple<string, string>("_count", "100"), // Smaller count for $includes operation
                     };
 
                     if (!string.IsNullOrEmpty(continuationToken))
@@ -290,14 +291,13 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             foreach (var resource in resources)
             {
-                if (resource?.Resource != null)
+                if (resource.Resource != null)
                 {
-                    // Create a unique key based on resource type and ID
-                    var resourceKey = $"{resource.Resource.ResourceType}_{resource.Resource.Id}";
-                    
-                    if (!seen.Contains(resourceKey))
+                    // Use the wrapper properties (ResourceTypeName/ResourceId)
+                    var resourceKey = $"{resource.Resource.ResourceTypeName}_{resource.Resource.ResourceId}";
+                    // HashSet.Add already returns false if exists; no need for Contains (CA1868)
+                    if (seen.Add(resourceKey))
                     {
-                        seen.Add(resourceKey);
                         deduplicated.Add(resource);
                     }
                 }
@@ -309,7 +309,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         private SearchResult CreateSearchResultWithIncludes(SearchResult mainSearchResult, List<SearchResultEntry> includedResources)
         {
             var allResults = new List<SearchResultEntry>();
-            
+
             // Add main search results
             if (mainSearchResult.Results != null)
             {
@@ -329,34 +329,35 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 relatedLink = $"$includes?includesCt={CreateIncludesContinuationToken(includedResources, maxIncludedItems)}";
             }
 
-            return new SearchResult(
-                results: allResults,
-                continuationToken: mainSearchResult.ContinuationToken,
-                sortOrder: mainSearchResult.SortOrder,
-                unsupportedSearchParameters: mainSearchResult.UnsupportedSearchParameters,
-                maxItemCountExceeded: mainSearchResult.MaxItemCountExceeded)
-            {
-                TotalCount = mainSearchResult.TotalCount,
-                // Add related link if there are more includes
-                // Note: The actual SearchResult class may need to be extended to support this
-            };
+            // NOTE: SearchResult does not currently expose a related link collection or MaxItemCountExceeded parameter.
+            // We pass through original unsupported parameters and continuation token.
+            var result = new SearchResult(
+                allResults,
+                mainSearchResult.ContinuationToken,
+                mainSearchResult.SortOrder,
+                mainSearchResult.UnsupportedSearchParameters,
+                mainSearchResult.SearchIssues,
+                includesContinuationToken: relatedLink);
+            result.TotalCount = mainSearchResult.TotalCount;
+            return result;
         }
 
         private SearchResult CreateIncludesOperationResult(List<SearchResultEntry> includedResources, string resourceType, IReadOnlyList<Tuple<string, string>> queryParameters)
         {
             // For $includes operation, return only the included resources
-            var continuationToken = includedResources.Count > 100 ? 
+            var continuationToken = includedResources.Count > 100 ?
                 CreateIncludesContinuationToken(includedResources, 100) : null;
 
-            return new SearchResult(
-                results: includedResources.Take(100),
-                continuationToken: continuationToken,
+            var limited = includedResources.Take(100).ToList();
+            var includesResult = new SearchResult(
+                limited,
+                continuationToken,
                 sortOrder: null,
                 unsupportedSearchParameters: new List<Tuple<string, string>>(),
-                maxItemCountExceeded: includedResources.Count > 100)
-            {
-                TotalCount = includedResources.Count
-            };
+                searchIssues: null,
+                includesContinuationToken: continuationToken);
+            includesResult.TotalCount = includedResources.Count;
+            return includesResult;
         }
 
         private string CreateIncludesContinuationToken(List<SearchResultEntry> includedResources, int offset)
@@ -370,30 +371,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         {
             // Create a minimal SearchOptions for proxy operation
             var searchOptions = (SearchOptions)Activator.CreateInstance(typeof(SearchOptions), true);
-            
+
             // Set basic properties using reflection
-            typeof(SearchOptions).GetProperty("ResourceType")?.SetValue(searchOptions, resourceType);
+            typeof(SearchOptions).GetProperty("ResourceType")?.SetValue(searchOptions, resourceType); // InternalsVisibleTo grants access
             typeof(SearchOptions).GetProperty("UnsupportedSearchParams")?.SetValue(searchOptions, new List<Tuple<string, string>>());
 
             return searchOptions;
         }
-    }
-
-    /// <summary>
-    /// Represents an include or revinclude parameter.
-    /// </summary>
-    public class IncludeParameter
-    {
-        public IncludeType Type { get; set; }
-        public string Value { get; set; }
-    }
-
-    /// <summary>
-    /// Type of include parameter.
-    /// </summary>
-    public enum IncludeType
-    {
-        Include,
-        RevInclude
     }
 }
