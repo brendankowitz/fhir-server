@@ -15,8 +15,8 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Conformance;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
-using Microsoft.Health.Fhir.Core.Features.Routing;
 using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.FanoutBroker.Extensions;
 
 namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
 {
@@ -230,19 +230,9 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
                 "Patch operations are not supported by the fanout broker service. This is a read-only service for search aggregation."));
         }
 
-        private List<Tuple<string, string>> GetQueryParameters()
+        private IReadOnlyList<Tuple<string, string>> GetQueryParameters()
         {
-            var queryParams = new List<Tuple<string, string>>();
-
-            foreach (var param in Request.Query)
-            {
-                foreach (var value in param.Value)
-                {
-                    queryParams.Add(new Tuple<string, string>(param.Key, value));
-                }
-            }
-
-            return queryParams;
+            return Request.GetQueriesForSearch();
         }
 
         private Bundle CreateBundle(SearchResult searchResult)

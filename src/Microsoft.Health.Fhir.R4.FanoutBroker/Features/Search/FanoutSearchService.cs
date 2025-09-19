@@ -66,6 +66,15 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             bool onlyIds = false,
             bool isIncludesOperation = false)
         {
+            // Create search options with processed parameters
+            var searchOptions = _searchOptionsFactory.Create(
+                resourceType,
+                queryParameters,
+                isAsyncOperation,
+                resourceVersionTypes,
+                onlyIds,
+                isIncludesOperation);
+
             // Fanout broker only supports latest resource versions (read-only)
             if (resourceVersionTypes != ResourceVersionType.Latest)
             {
@@ -104,58 +113,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 throw;
             }
 
-            // Create search options with processed parameters
-            SearchOptions searchOptions;
-            try
-            {
-                searchOptions = _searchOptionsFactory.Create(
-                    resourceType,
-                    processedQueryParameters,
-                    isAsyncOperation,
-                    resourceVersionTypes,
-                    onlyIds,
-                    isIncludesOperation);
-            }
-            catch (NotImplementedException)
-            {
-                // Fallback for simplified fanout broker implementation
-                // Create a basic search options that works as a proxy
-                searchOptions = CreateBasicSearchOptions(resourceType, processedQueryParameters, onlyIds);
-            }
-
             return await SearchAsync(searchOptions, cancellationToken);
         }
 
-        /// <summary>
-        /// Creates basic search options for proxy operation when full SearchOptionsFactory is not available.
-        /// </summary>
-        private SearchOptions CreateBasicSearchOptions(string resourceType, IReadOnlyList<Tuple<string, string>> queryParameters, bool onlyIds)
-        {
-            // Create a minimal SearchOptions for proxy operation
-            // This is a workaround for the SearchOptions internal constructor limitation
-            var searchOptions = (SearchOptions)Activator.CreateInstance(typeof(SearchOptions), true);
-
-            // Set basic properties using reflection or public setters where available
-            typeof(SearchOptions).GetProperty("ResourceType")?.SetValue(searchOptions, resourceType);
-            typeof(SearchOptions).GetProperty("OnlyIds")?.SetValue(searchOptions, onlyIds);
-            typeof(SearchOptions).GetProperty("UnsupportedSearchParams")?.SetValue(searchOptions, new List<Tuple<string, string>>());
-
-            // Extract count parameter
-            var countParam = queryParameters.FirstOrDefault(p => p.Item1.Equals("_count", StringComparison.OrdinalIgnoreCase));
-            if (countParam != null && int.TryParse(countParam.Item2, out int count))
-            {
-                try
-                {
-                    typeof(SearchOptions).GetProperty("MaxItemCount")?.SetValue(searchOptions, Math.Min(count, 1000));
-                }
-                catch
-                {
-                    // MaxItemCount property may not be settable - use default
-                }
-            }
-
-            return searchOptions;
-        }
+    // Removed legacy CreateBasicSearchOptions fallback – SearchOptionsFactory now fully registered.
 
         /// <inheritdoc />
         public async System.Threading.Tasks.Task<SearchResult> SearchAsync(SearchOptions searchOptions, CancellationToken cancellationToken)

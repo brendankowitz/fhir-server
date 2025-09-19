@@ -57,18 +57,18 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             // Detect chained search parameters (containing dots like "subject.name" or reverse chains like "_has:Group:member:_id")
             var chainedParams = DetectChainedParameters(queryParameters);
-            
+
             if (!chainedParams.Any())
             {
                 // No chained parameters - return original query
                 return queryParameters.ToList();
             }
 
-            _logger.LogInformation("Processing {ChainCount} chained search parameters for resource type {ResourceType}", 
+            _logger.LogInformation("Processing {ChainCount} chained search parameters for resource type {ResourceType}",
                 chainedParams.Count, resourceType);
 
             var modifiedParams = queryParameters.Where(p => !IsChainedParameter(p.Item1)).ToList();
-            
+
             try
             {
                 // Create timeout for chained search operations
@@ -79,7 +79,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 foreach (var chainedParam in chainedParams)
                 {
                     var chainedResults = await ProcessChainedParameter(chainedParam, chainedTimeout.Token);
-                    
+
                     if (chainedResults?.Any() == true)
                     {
                         // Convert chained results into ID filters
@@ -97,12 +97,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                         break; // No point processing other chains if one returns empty
                     }
                 }
-                
+
                 return modifiedParams;
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
-                _logger.LogWarning(ex, "Chained search timed out after {Timeout} seconds", 
+                _logger.LogWarning(ex, "Chained search timed out after {Timeout} seconds",
                     _configuration.Value.ChainSearchTimeoutSeconds);
                 throw new RequestTooCostlyException("Chained search operation timed out - query too complex");
             }
@@ -112,7 +112,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         /// Detects parameters that represent chained searches.
         /// Examples: "subject.name", "patient.identifier", "_has:Group:member:_id"
         /// </summary>
-        private List<Tuple<string, string>> DetectChainedParameters(IReadOnlyList<Tuple<string, string>> queryParameters)
+        public IReadOnlyList<Tuple<string, string>> DetectChainedParameters(IReadOnlyList<Tuple<string, string>> queryParameters)
         {
             return queryParameters.Where(p => IsChainedParameter(p.Item1)).ToList();
         }
@@ -145,7 +145,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             CancellationToken cancellationToken)
         {
             var (paramName, paramValue) = chainedParam;
-            
+
             if (paramName.StartsWith("_has:", StringComparison.OrdinalIgnoreCase))
             {
                 return await ProcessReverseChainedParameter(paramName, paramValue, cancellationToken);
@@ -160,8 +160,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         /// Processes forward chained parameters like "subject.name=John".
         /// </summary>
         private async Task<List<ChainedSearchResult>> ProcessForwardChainedParameter(
-            string paramName, 
-            string paramValue, 
+            string paramName,
+            string paramValue,
             CancellationToken cancellationToken)
         {
             var parts = paramName.Split('.');
@@ -173,11 +173,11 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             var referenceParam = parts[0];      // e.g., "subject"
             var targetParam = parts[1];         // e.g., "name"
-            
+
             // Determine target resource type (simplified - in real implementation this would use search parameter definitions)
             var targetResourceType = GuessTargetResourceType(referenceParam);
-            
-            _logger.LogInformation("Processing forward chain: {Reference}.{Target} = {Value} -> searching {ResourceType}", 
+
+            _logger.LogInformation("Processing forward chain: {Reference}.{Target} = {Value} -> searching {ResourceType}",
                 referenceParam, targetParam, paramValue, targetResourceType);
 
             // Execute search on target resource type with optimized projection
@@ -194,8 +194,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         /// Processes reverse chained parameters like "_has:Group:member:_id=group1".
         /// </summary>
         private async Task<List<ChainedSearchResult>> ProcessReverseChainedParameter(
-            string paramName, 
-            string paramValue, 
+            string paramName,
+            string paramValue,
             CancellationToken cancellationToken)
         {
             // Parse _has:ResourceType:SearchParam:TargetParam format
@@ -209,8 +209,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             var sourceResourceType = parts[1];  // e.g., "Group"
             var referenceParam = parts[2];      // e.g., "member"
             var targetParam = parts[3];         // e.g., "_id"
-            
-            _logger.LogInformation("Processing reverse chain: _has:{Source}:{Reference}:{Target} = {Value}", 
+
+            _logger.LogInformation("Processing reverse chain: _has:{Source}:{Reference}:{Target} = {Value}",
                 sourceResourceType, referenceParam, targetParam, paramValue);
 
             // Execute search on source resource type
@@ -234,7 +234,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             var results = new List<ChainedSearchResult>();
             var enabledServers = _serverOrchestrator.GetEnabledServers();
 
-            _logger.LogInformation("Executing chained sub-query for {ResourceType} across {ServerCount} servers", 
+            _logger.LogInformation("Executing chained sub-query for {ResourceType} across {ServerCount} servers",
                 resourceType, enabledServers.Count);
 
             // Create search tasks for all servers
@@ -249,12 +249,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     // Use a simplified search approach since we're working as a proxy
                     // This would need to be implemented in the FhirServerOrchestrator
                     var serverResult = await ExecuteSimplifiedSearchAsync(server, resourceType, queryParams, cancellationToken);
-                    
+
                     if (serverResult?.SearchResult?.Results != null)
                     {
                         return ExtractChainedResults(serverResult);
                     }
-                    
+
                     return Enumerable.Empty<ChainedSearchResult>();
                 }
                 catch (Exception ex)
@@ -288,9 +288,9 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             // This would need to be implemented in the FhirServerOrchestrator
             // For now, return a placeholder
             _logger.LogWarning("ExecuteSimplifiedSearchAsync not yet implemented - chained search will not work correctly");
-            
+
             await Task.Delay(100, cancellationToken); // Simulate async operation
-            
+
             return new ServerSearchResult
             {
                 ServerId = server.Id,
@@ -311,7 +311,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             var resourceIds = results.Select(r => r.ResourceId).Distinct();
             var idFilter = string.Join(",", resourceIds);
-            
+
             // For forward chains, we filter by the reference parameter
             // For reverse chains, we filter by _id
             if (originalParam.Item1.StartsWith("_has:", StringComparison.OrdinalIgnoreCase))
@@ -367,6 +367,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             string resourceType,
             IReadOnlyList<Tuple<string, string>> queryParameters,
             CancellationToken cancellationToken);
+
+        IReadOnlyList<Tuple<string, string>> DetectChainedParameters(IReadOnlyList<Tuple<string, string>> queryParameters);
     }
 
     /// <summary>
