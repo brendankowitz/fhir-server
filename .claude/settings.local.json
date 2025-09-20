@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet build:*)",
+      "WebSearch",
+      "WebFetch(domain:hl7.org)",
+      "Bash(dotnet test:*)",
+      "Bash(find:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(dotnet clean:*)",
+      "Bash(dotnet script:*)",
+      "Bash(dotnet run:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

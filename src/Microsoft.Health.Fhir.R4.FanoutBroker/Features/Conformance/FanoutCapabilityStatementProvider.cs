@@ -157,12 +157,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
                 return intersected;
             }
 
-            // Get the first server's REST component as baseline
-            var firstServerRest = serverCapabilities.FirstOrDefault()?.Rest?.FirstOrDefault();
-            if (firstServerRest?.Resource == null)
-            {
-                return intersected;
-            }
+            // Get all unique resource types across all servers
+            var allResourceTypes = serverCapabilities
+                .SelectMany(cap => cap.Rest?.FirstOrDefault()?.Resource ?? Enumerable.Empty<CapabilityStatement.ResourceComponent>())
+                .Select(r => r.Type)
+                .Distinct()
+                .ToList();
 
             var intersectedRest = intersected.Rest.FirstOrDefault();
             if (intersectedRest == null)
@@ -173,18 +173,24 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
 
             // Intersect resource capabilities
             var resourceCapabilities = new List<CapabilityStatement.ResourceComponent>();
+            var serverCount = serverCapabilities.Count;
+            var supportMatrix = new Dictionary<string, int>();
 
-            foreach (var resourceType in firstServerRest.Resource.Select(r => r.Type).Distinct())
+            foreach (var resourceType in allResourceTypes)
             {
                 var resourcesOfType = serverCapabilities
                     .SelectMany(cap => cap.Rest?.FirstOrDefault()?.Resource ?? Enumerable.Empty<CapabilityStatement.ResourceComponent>())
                     .Where(r => r.Type == resourceType)
                     .ToList();
 
-                if (resourcesOfType.Count == serverCapabilities.Count)
+                supportMatrix[resourceType.ToString()] = resourcesOfType.Count;
+
+                // Include resource types supported by at least 50% of servers (configurable threshold)
+                var minimumSupportThreshold = Math.Max(1, (int)Math.Ceiling(serverCount * 0.5));
+
+                if (resourcesOfType.Count >= minimumSupportThreshold)
                 {
-                    // This resource type is supported by all servers
-                    var intersectedResource = IntersectResourceCapabilities(resourcesOfType);
+                    var intersectedResource = IntersectResourceCapabilities(resourcesOfType, resourcesOfType.Count == serverCount);
                     if (intersectedResource != null)
                     {
                         resourceCapabilities.Add(intersectedResource);
@@ -194,14 +200,23 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
 
             intersectedRest.Resource = resourceCapabilities;
 
-            _logger.LogInformation("Intersected capabilities from {ServerCount} servers, supporting {ResourceCount} resource types",
-                serverCapabilities.Count, resourceCapabilities.Count);
+            // Intersect system-level search parameters
+            IntersectSystemLevelCapabilities(serverCapabilities, intersectedRest);
+
+            // Add metadata about server support matrix
+            var documentation = $"Fanout broker aggregating {serverCount} FHIR servers. " +
+                               $"Resource support: {string.Join(", ", supportMatrix.Select(kv => $"{kv.Key}({kv.Value}/{serverCount})"))}";
+            intersectedRest.Documentation = documentation;
+
+            _logger.LogInformation("Intersected capabilities from {ServerCount} servers, supporting {ResourceCount} resource types. Support matrix: {SupportMatrix}",
+                serverCount, resourceCapabilities.Count, string.Join(", ", supportMatrix.Select(kv => $"{kv.Key}:{kv.Value}")));
 
             return intersected;
         }
 
         private CapabilityStatement.ResourceComponent IntersectResourceCapabilities(
-            List<CapabilityStatement.ResourceComponent> resourceCapabilities)
+            List<CapabilityStatement.ResourceComponent> resourceCapabilities,
+            bool isUniversallySupported)
         {
             if (!resourceCapabilities.Any())
             {
@@ -214,27 +229,139 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
                 Type = first.Type,
                 Profile = first.Profile, // Use first server's profile
                 Interaction = new List<CapabilityStatement.ResourceInteractionComponent>(),
-                SearchParam = new List<CapabilityStatement.SearchParamComponent>()
+                SearchParam = new List<CapabilityStatement.SearchParamComponent>(),
+                SearchInclude = new List<string>(),
+                SearchRevInclude = new List<string>()
             };
 
-            // Only include search-read interaction (fanout broker is read-only)
+            // Add fanout-specific interactions
             intersected.Interaction.Add(new CapabilityStatement.ResourceInteractionComponent
             {
                 Code = CapabilityStatement.TypeRestfulInteraction.SearchType,
-                Documentation = $"Search {first.Type} resources across all configured FHIR servers"
+                Documentation = isUniversallySupported
+                    ? $"Search {first.Type} resources across all configured FHIR servers"
+                    : $"Search {first.Type} resources across servers that support this resource type"
             });
 
-            // Intersect search parameters - only include parameters supported by all servers
+            // Add support for include operations
+            intersected.Interaction.Add(new CapabilityStatement.ResourceInteractionComponent
+            {
+                Code = CapabilityStatement.TypeRestfulInteraction.Read,
+                Documentation = $"Read {first.Type} resources via $includes operation when included in search results"
+            });
+
+            // Intersect search parameters
+            var searchParamThreshold = isUniversallySupported
+                ? resourceCapabilities.Count  // All servers must support for universal resources
+                : Math.Max(1, (int)Math.Ceiling(resourceCapabilities.Count * 0.7)); // 70% for partial support
+
             var commonSearchParams = resourceCapabilities
                 .SelectMany(r => r.SearchParam ?? Enumerable.Empty<CapabilityStatement.SearchParamComponent>())
                 .GroupBy(sp => sp.Name)
-                .Where(g => g.Count() == resourceCapabilities.Count)
+                .Where(g => g.Count() >= searchParamThreshold)
                 .Select(g => g.First())
                 .ToList();
 
             intersected.SearchParam = commonSearchParams;
 
+            // Intersect _include and _revinclude capabilities
+            var commonIncludes = resourceCapabilities
+                .SelectMany(r => r.SearchInclude ?? Enumerable.Empty<string>())
+                .GroupBy(inc => inc)
+                .Where(g => g.Count() >= searchParamThreshold)
+                .Select(g => g.Key)
+                .ToList();
+
+            var commonRevIncludes = resourceCapabilities
+                .SelectMany(r => r.SearchRevInclude ?? Enumerable.Empty<string>())
+                .GroupBy(inc => inc)
+                .Where(g => g.Count() >= searchParamThreshold)
+                .Select(g => g.Key)
+                .ToList();
+
+            intersected.SearchInclude = commonIncludes;
+            intersected.SearchRevInclude = commonRevIncludes;
+
+            // Add versioning information if available
+            if (resourceCapabilities.Any(r => r.Versioning != null))
+            {
+                var versioningSupport = resourceCapabilities
+                    .Select(r => r.Versioning)
+                    .Where(v => v != null)
+                    .GroupBy(v => v)
+                    .OrderByDescending(g => g.Count())
+                    .FirstOrDefault()?.Key;
+
+                intersected.Versioning = versioningSupport;
+            }
+
             return intersected;
+        }
+
+        private void IntersectSystemLevelCapabilities(
+            List<CapabilityStatement> serverCapabilities,
+            CapabilityStatement.RestComponent intersectedRest)
+        {
+            // Add common global search parameters
+            var globalSearchParams = new List<CapabilityStatement.SearchParamComponent>
+            {
+                new CapabilityStatement.SearchParamComponent
+                {
+                    Name = "_id",
+                    Type = SearchParamType.Token,
+                    Documentation = "Logical resource identifier"
+                },
+                new CapabilityStatement.SearchParamComponent
+                {
+                    Name = "_lastUpdated",
+                    Type = SearchParamType.Date,
+                    Documentation = "Last modified date"
+                },
+                new CapabilityStatement.SearchParamComponent
+                {
+                    Name = "_count",
+                    Type = SearchParamType.Number,
+                    Documentation = "Number of resources to return in a page"
+                },
+                new CapabilityStatement.SearchParamComponent
+                {
+                    Name = "_include",
+                    Type = SearchParamType.String,
+                    Documentation = "Include referenced resources"
+                },
+                new CapabilityStatement.SearchParamComponent
+                {
+                    Name = "_revinclude",
+                    Type = SearchParamType.String,
+                    Documentation = "Include resources that reference this resource"
+                }
+            };
+
+            intersectedRest.SearchParam = globalSearchParams;
+
+            // Add fanout-specific operations
+            var operations = new List<CapabilityStatement.OperationComponent>
+            {
+                new CapabilityStatement.OperationComponent
+                {
+                    Name = "$includes",
+                    Definition = "http://hl7.org/fhir/OperationDefinition/Resource-includes",
+                    Documentation = "Retrieve included resources separately to handle large include sets"
+                }
+            };
+
+            intersectedRest.Operation = operations;
+
+            // Set security information
+            if (intersectedRest.Security == null)
+            {
+                intersectedRest.Security = new CapabilityStatement.SecurityComponent
+                {
+                    Description = "Security is delegated to individual target FHIR servers. " +
+                                 "Authentication and authorization are handled by the fanout broker " +
+                                 "when configured with server-specific credentials."
+                };
+            }
         }
 
         private CapabilityStatement CreateBasicCapabilityStatement()

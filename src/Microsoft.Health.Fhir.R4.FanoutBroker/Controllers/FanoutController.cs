@@ -6,6 +6,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Hl7.Fhir.Model;
@@ -247,23 +248,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
             {
                 foreach (var result in searchResult.Results)
                 {
-                    // Generate the full URL using the URL resolver with fanout context
-                    string fullUrl;
-                    if (!string.IsNullOrEmpty(searchResult.SourceServer))
-                    {
-                        // For fanout scenarios, generate URL with source server context for traceability
-                        // Pattern: {source-server-base-url}/{resourceType}/{id}
-                        var sourceServerBaseUrl = searchResult.SourceServer.TrimEnd('/');
-                        fullUrl = $"{sourceServerBaseUrl}/{result.Resource.ResourceTypeName}/{result.Resource.ResourceId}";
-
-                        _logger.LogDebug("Generated fanout URL with source server context: {FullUrl}", fullUrl);
-                    }
-                    else
-                    {
-                        // Standard URL resolution for non-fanout scenarios
-                        throw new NotImplementedException();
-                    }
-
                     // Deserialize ResourceWrapper to ResourceElement, then convert to Resource
                     var resourceElement = _resourceDeserializer.Deserialize(result.Resource);
                     var fhirResource = resourceElement.ToPoco();
@@ -271,7 +255,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
                     var entry = new Bundle.EntryComponent
                     {
                         Resource = fhirResource,
-                        FullUrl = fullUrl,
+                        FullUrl = result.Resource.Request.Url.ToString(),
                         Search = new Bundle.SearchComponent
                         {
                             Mode = Bundle.SearchEntryMode.Match,
@@ -288,15 +272,52 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
                 bundle.Total = searchResult.TotalCount.Value;
             }
 
-            // Add continuation token for paging
+            // Initialize Bundle.link collection - required for FHIR R4 compliance
+            bundle.Link = new List<Bundle.LinkComponent>();
+
+            // Add mandatory 'self' link for search result bundles (FHIR R4 requirement)
+            // The self link must represent the exact search that was performed
+            try
+            {
+                var selfLink = new Bundle.LinkComponent
+                {
+                    Relation = "self",
+                    Url = Request.GetDisplayUrl(), // Includes all original query parameters
+                };
+                bundle.Link.Add(selfLink);
+
+                _logger.LogDebug("Added self link to bundle: {SelfUrl}", selfLink.Url);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to generate self link for bundle");
+                // Continue execution - self link generation failure shouldn't break the response
+            }
+
+            // Add 'next' link for pagination when continuation token is available
             if (!string.IsNullOrEmpty(searchResult.ContinuationToken))
             {
-                var nextLink = new Bundle.LinkComponent
+                try
                 {
-                    Relation = "next",
-                    Url = Request.GetDisplayUrl() + $"&ct={searchResult.ContinuationToken}",
-                };
-                bundle.Link = new List<Bundle.LinkComponent> { nextLink };
+                    var baseUrl = Request.GetDisplayUrl();
+                    var separator = baseUrl.Contains('?', StringComparison.Ordinal) ? "&" : "?";
+                    var nextUrl = $"{baseUrl}{separator}ct={Uri.EscapeDataString(searchResult.ContinuationToken)}";
+
+                    var nextLink = new Bundle.LinkComponent
+                    {
+                        Relation = "next",
+                        Url = nextUrl,
+                    };
+                    bundle.Link.Add(nextLink);
+
+                    _logger.LogDebug("Added next link to bundle: {NextUrl}", nextUrl);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to generate next link for bundle with continuation token: {Token}",
+                        searchResult.ContinuationToken);
+                    // Continue execution - next link generation failure shouldn't break the response
+                }
             }
 
             return bundle;

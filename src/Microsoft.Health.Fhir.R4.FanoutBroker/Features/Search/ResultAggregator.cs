@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
@@ -19,6 +20,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 {
     /// <summary>
     /// Aggregates search results from multiple FHIR servers into unified responses.
+    ///
+    /// IMPORTANT: Per ADR-2506, resources with identical logical IDs from different servers
+    /// are ALL returned and differentiated by their fullUrl values. No deduplication is performed
+    /// on resources, only on unsupported search parameters.
     /// </summary>
     public class ResultAggregator : IResultAggregator
     {
@@ -48,12 +53,14 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             var allUnsupportedParams = new List<Tuple<string, string>>();
             var serverTokens = new List<ServerContinuationToken>();
 
-            // Collect results from all servers
+            // Collect results from all servers and ensure proper fullUrl differentiation
             foreach (var serverResult in serverResults)
             {
                 if (serverResult.SearchResult?.Results != null)
                 {
-                    allResults.AddRange(serverResult.SearchResult.Results);
+                    // Ensure each result maintains its source server information in fullUrl
+                    var serverEntries = EnsureServerFullUrls(serverResult.SearchResult.Results, serverResult.ServerBaseUrl);
+                    allResults.AddRange(serverEntries);
                 }
 
                 if (serverResult.SearchResult?.UnsupportedSearchParameters != null)
@@ -61,13 +68,14 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     allUnsupportedParams.AddRange(serverResult.SearchResult.UnsupportedSearchParameters);
                 }
 
-                // Create server continuation token
+                // Create server continuation token with sort value tracking for distributed sorting
                 var serverToken = new ServerContinuationToken
                 {
                     Endpoint = serverResult.ServerId,
                     Token = serverResult.SearchResult?.ContinuationToken,
                     Exhausted = string.IsNullOrEmpty(serverResult.SearchResult?.ContinuationToken),
                     ResultsReturned = serverResult.SearchResult?.Results?.Count() ?? 0,
+                    LastSortValue = ExtractLastSortValue(serverResult.SearchResult, originalSearchOptions.Sort),
                 };
 
                 serverTokens.Add(serverToken);
@@ -77,6 +85,18 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             var uniqueUnsupportedParams = allUnsupportedParams
                 .Distinct()
                 .ToList();
+
+            // Check for potential duplicate resource IDs from different servers (this is expected and correct behavior)
+            var resourceIdCounts = allResults
+                .GroupBy(r => r.Resource.ResourceId)
+                .Where(g => g.Count() > 1)
+                .ToList();
+
+            if (resourceIdCounts.Any())
+            {
+                _logger.LogDebug("Found {DuplicateIdCount} resource IDs present on multiple servers (as expected per ADR-2506)",
+                    resourceIdCounts.Count);
+            }
 
             // Sort results if needed
             var finalResults = allResults;
@@ -102,6 +122,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     SortCriteria = SerializeSortCriteria(originalSearchOptions.Sort),
                     PageSize = originalSearchOptions.MaxItemCount,
                     ExecutionStrategy = ExecutionStrategy.Parallel.ToString(),
+                    // ResourceType can be inferred from the search context
                 };
 
                 aggregatedContinuationToken = fanoutToken.ToBase64String();
@@ -134,12 +155,13 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             var serverTokens = new List<ServerContinuationToken>();
             var targetCount = originalSearchOptions.MaxItemCount;
 
-            // Collect results from servers in order, respecting count limit
+            // Collect results from servers in order, respecting count limit and ensuring proper fullUrl differentiation
             foreach (var serverResult in serverResults)
             {
                 if (serverResult.SearchResult?.Results != null)
                 {
-                    var serverResultsList = serverResult.SearchResult.Results.ToList();
+                    // Ensure proper fullUrl differentiation with source server base URL
+                    var serverResultsList = EnsureServerFullUrls(serverResult.SearchResult.Results, serverResult.ServerBaseUrl).ToList();
 
                     // Apply remaining count limit
                     if (targetCount > 0)
@@ -162,13 +184,14 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     allUnsupportedParams.AddRange(serverResult.SearchResult.UnsupportedSearchParameters);
                 }
 
-                // Create server continuation token
+                // Create server continuation token with sort value tracking for distributed sorting
                 var serverToken = new ServerContinuationToken
                 {
                     Endpoint = serverResult.ServerId,
                     Token = serverResult.SearchResult?.ContinuationToken,
                     Exhausted = string.IsNullOrEmpty(serverResult.SearchResult?.ContinuationToken),
                     ResultsReturned = serverResult.SearchResult?.Results?.Count() ?? 0,
+                    LastSortValue = ExtractLastSortValue(serverResult.SearchResult, originalSearchOptions.Sort),
                 };
 
                 serverTokens.Add(serverToken);
@@ -204,6 +227,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     SortCriteria = SerializeSortCriteria(originalSearchOptions.Sort),
                     PageSize = originalSearchOptions.MaxItemCount,
                     ExecutionStrategy = ExecutionStrategy.Sequential.ToString(),
+                    // ResourceType can be inferred from the search context
                 };
 
                 aggregatedContinuationToken = fanoutToken.ToBase64String();
@@ -295,6 +319,129 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 s.sortOrder == SortOrder.Ascending ? s.searchParameterInfo.Name : $"-{s.searchParameterInfo.Name}");
 
             return string.Join(",", criteria);
+        }
+
+        /// <summary>
+        /// Ensures each search result entry has the correct fullUrl with source server base URL.
+        /// This implements the ADR requirement for fullUrl differentiation using source server URLs.
+        /// </summary>
+        private IEnumerable<SearchResultEntry> EnsureServerFullUrls(IEnumerable<SearchResultEntry> results, string serverBaseUrl)
+        {
+            foreach (var result in results)
+            {
+                if (result.Resource?.Request?.Url != null)
+                {
+                    // Check if the fullUrl already contains the correct server base URL
+                    var currentUrl = result.Resource.Request.Url.ToString();
+                    if (!currentUrl.StartsWith(serverBaseUrl, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Update the ResourceRequest to have the correct server base URL
+                        var correctedUri = new Uri($"{serverBaseUrl.TrimEnd('/')}/{result.Resource.ResourceTypeName}/{result.Resource.ResourceId}");
+                        var correctedRequest = new Microsoft.Health.Fhir.Core.Features.Persistence.ResourceRequest(
+                            result.Resource.Request.Method,
+                            correctedUri);
+
+                        // Create a new ResourceWrapper with the corrected request
+                        var correctedWrapper = new Microsoft.Health.Fhir.Core.Features.Persistence.ResourceWrapper(
+                            result.Resource.ResourceId,
+                            result.Resource.Version,
+                            result.Resource.ResourceTypeName,
+                            result.Resource.RawResource,
+                            correctedRequest,
+                            result.Resource.LastModified,
+                            result.Resource.IsDeleted,
+                            result.Resource.SearchIndices,
+                            result.Resource.CompartmentIndices,
+                            result.Resource.LastModifiedClaims);
+
+                        yield return new SearchResultEntry(correctedWrapper, result.SearchEntryMode);
+                    }
+                    else
+                    {
+                        yield return result;
+                    }
+                }
+                else
+                {
+                    yield return result;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Extracts the last sort value from a search result for distributed sorting continuation.
+        /// This enables proper resumption of sorted queries across multiple servers.
+        /// </summary>
+        private string ExtractLastSortValue(SearchResult searchResult, IReadOnlyList<(SearchParameterInfo searchParameterInfo, SortOrder sortOrder)> sortOrder)
+        {
+            if (searchResult?.Results == null || !searchResult.Results.Any() || sortOrder == null || !sortOrder.Any())
+            {
+                return null;
+            }
+
+            try
+            {
+                var resultsArray = searchResult.Results.ToArray();
+                var lastResult = resultsArray[resultsArray.Length - 1];
+                var primarySortParam = sortOrder[0];
+
+                // Extract sort value based on the primary sort parameter
+                string sortValue = primarySortParam.searchParameterInfo.Name.ToLowerInvariant() switch
+                {
+                    "_lastmodified" => lastResult.Resource.LastModified.ToString("o"), // ISO 8601 format
+                    "_id" => lastResult.Resource.ResourceId,
+                    "id" => lastResult.Resource.ResourceId,
+                    _ => ExtractSortValueFromResource(lastResult.Resource, primarySortParam.searchParameterInfo.Name)
+                };
+
+                _logger.LogDebug("Extracted sort value '{SortValue}' for parameter '{SortParam}' from server result",
+                    sortValue, primarySortParam.searchParameterInfo.Name);
+
+                return sortValue;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to extract sort value from search result");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Extracts a sort value from a resource's raw data for a specific sort parameter.
+        /// </summary>
+        private string ExtractSortValueFromResource(ResourceWrapper resource, string sortParameterName)
+        {
+            try
+            {
+                if (resource?.RawResource?.Data == null)
+                {
+                    return null;
+                }
+
+                // Parse the raw resource JSON to extract the sort field
+                using var document = System.Text.Json.JsonDocument.Parse(resource.RawResource.Data);
+                var root = document.RootElement;
+
+                // Try to find the sort parameter in the resource
+                if (root.TryGetProperty(sortParameterName, out var sortElement))
+                {
+                    return sortElement.ValueKind switch
+                    {
+                        System.Text.Json.JsonValueKind.String => sortElement.GetString(),
+                        System.Text.Json.JsonValueKind.Number => sortElement.GetRawText(),
+                        System.Text.Json.JsonValueKind.True => "true",
+                        System.Text.Json.JsonValueKind.False => "false",
+                        _ => sortElement.GetRawText()
+                    };
+                }
+
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not extract sort value for parameter '{SortParam}' from resource", sortParameterName);
+                return null;
+            }
         }
     }
 }

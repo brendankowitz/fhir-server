@@ -28,6 +28,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
     public class IncludeProcessor : IIncludeProcessor
     {
         private readonly IFhirServerOrchestrator _serverOrchestrator;
+        private readonly ISearchOptionsFactory _searchOptionsFactory;
         private readonly IOptions<FanoutBrokerConfiguration> _configuration;
         private readonly ILogger<IncludeProcessor> _logger;
 
@@ -36,10 +37,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
         public IncludeProcessor(
             IFhirServerOrchestrator serverOrchestrator,
+            ISearchOptionsFactory searchOptionsFactory,
             IOptions<FanoutBrokerConfiguration> configuration,
             ILogger<IncludeProcessor> logger)
         {
             _serverOrchestrator = EnsureArg.IsNotNull(serverOrchestrator, nameof(serverOrchestrator));
+            _searchOptionsFactory = EnsureArg.IsNotNull(searchOptionsFactory, nameof(searchOptionsFactory));
             _configuration = EnsureArg.IsNotNull(configuration, nameof(configuration));
             _logger = EnsureArg.IsNotNull(logger, nameof(logger));
         }
@@ -163,6 +166,15 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             var allIncludedResources = new List<SearchResultEntry>();
             var enabledServers = _serverOrchestrator.GetEnabledServers();
 
+            // Extract reference IDs from main search results to make targeted include queries
+            var referenceIds = ExtractReferenceIds(mainSearchResult, includeParameters);
+
+            if (!referenceIds.Any())
+            {
+                _logger.LogDebug("No reference IDs found in main search results for include processing");
+                return allIncludedResources;
+            }
+
             // Process each include parameter across all servers
             foreach (var includeParam in includeParameters)
             {
@@ -174,7 +186,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                         server,
                         resourceType,
                         includeParam,
-                        mainSearchResult,
+                        referenceIds,
                         cancellationToken);
 
                     serverTasks.Add(serverTask);
@@ -201,23 +213,28 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             FhirServerEndpoint server,
             string resourceType,
             IncludeParameter includeParam,
-            SearchResult mainSearchResult,
+            Dictionary<string, HashSet<string>> referenceIds,
             CancellationToken cancellationToken)
         {
             try
             {
-                // Create a query that will fetch the included resources
-                // This is a simplified approach - in a full implementation, we'd need to
-                // analyze the main search results to determine what included resources to fetch
-                var includeQuery = new List<Tuple<string, string>>
-                {
-                    new Tuple<string, string>(includeParam.Type == IncludeType.Include ? IncludeParameterName : RevIncludeParameter, includeParam.Value),
-                    new Tuple<string, string>("_count", "1000"), // Limit to prevent overwhelming results
-                };
+                // Parse the include parameter to determine target resource type and create targeted queries
+                var (targetResourceType, targetQuery) = CreateTargetedIncludeQuery(includeParam, referenceIds);
 
-                // For now, we'll use a basic approach of executing the original query with includes on each server
-                // A more sophisticated implementation would analyze the main results and create targeted include queries
-                var searchOptions = CreateBasicSearchOptions(resourceType, includeQuery);
+                if (targetQuery == null || !targetQuery.Any())
+                {
+                    _logger.LogDebug("No targeted query could be created for include parameter {Include} on server {ServerId}",
+                        includeParam.Value, server.Id);
+                    return new ServerSearchResult
+                    {
+                        ServerId = server.Id,
+                        IsSuccess = true,
+                        SearchResult = new SearchResult(new List<SearchResultEntry>(), null, null, new List<Tuple<string, string>>(), null)
+                    };
+                }
+
+                // Create search options for the targeted include query
+                var searchOptions = _searchOptionsFactory.Create(targetResourceType, targetQuery);
 
                 return await _serverOrchestrator.SearchAsync(server, searchOptions, cancellationToken);
             }
@@ -239,12 +256,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             string continuationToken,
             CancellationToken cancellationToken)
         {
-            // For $includes operation, we need to fetch the included resources based on the continuation token
-            // This is a simplified implementation - a full implementation would need to parse the continuation token
-            // to determine which included resources to fetch and from which offset
-
             var allIncludedResources = new List<SearchResultEntry>();
             var enabledServers = _serverOrchestrator.GetEnabledServers();
+
+            // Parse continuation token to determine offset and server distribution
+            var (offset, serverStates) = ParseIncludesContinuationToken(continuationToken);
+            var pageSize = 50; // Smaller page size for $includes operation
 
             foreach (var includeParam in includeParameters)
             {
@@ -255,15 +272,16 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     var includeQuery = new List<Tuple<string, string>>
                     {
                         new Tuple<string, string>(includeParam.Type == IncludeType.Include ? IncludeParameterName : RevIncludeParameter, includeParam.Value),
-                        new Tuple<string, string>("_count", "100"), // Smaller count for $includes operation
+                        new Tuple<string, string>("_count", pageSize.ToString()),
                     };
 
-                    if (!string.IsNullOrEmpty(continuationToken))
+                    // Apply server-specific continuation if available
+                    if (serverStates?.ContainsKey(server.Id) == true)
                     {
-                        includeQuery.Add(new Tuple<string, string>("includesCt", continuationToken));
+                        includeQuery.Add(new Tuple<string, string>("ct", serverStates[server.Id]));
                     }
 
-                    var searchOptions = CreateBasicSearchOptions(resourceType, includeQuery);
+                    var searchOptions = _searchOptionsFactory.Create(resourceType, includeQuery);
                     var serverTask = _serverOrchestrator.SearchAsync(server, searchOptions, cancellationToken);
                     serverTasks.Add(serverTask);
                 }
@@ -274,7 +292,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 {
                     if (result.SearchResult?.Results != null)
                     {
-                        allIncludedResources.AddRange(result.SearchResult.Results);
+                        // Apply fullUrl differentiation for included resources
+                        var server = enabledServers.First(s => s.Id == result.ServerId);
+                        var correctedResults = EnsureServerFullUrls(result.SearchResult.Results, server.BaseUrl);
+                        allIncludedResources.AddRange(correctedResults);
                     }
                 }
             }
@@ -344,11 +365,17 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
         private SearchResult CreateIncludesOperationResult(List<SearchResultEntry> includedResources, string resourceType, IReadOnlyList<Tuple<string, string>> queryParameters)
         {
-            // For $includes operation, return only the included resources
-            var continuationToken = includedResources.Count > 100 ?
-                CreateIncludesContinuationToken(includedResources, 100) : null;
+            var pageSize = 50; // Consistent page size for $includes operation
+            var continuationToken = includedResources.Count > pageSize ?
+                CreateIncludesContinuationToken(includedResources, pageSize) : null;
 
-            var limited = includedResources.Take(100).ToList();
+            var limited = includedResources.Take(pageSize).ToList();
+
+            // Sort results by resource type and ID for consistent ordering across servers
+            limited = limited.OrderBy(r => r.Resource.ResourceTypeName)
+                            .ThenBy(r => r.Resource.ResourceId)
+                            .ToList();
+
             var includesResult = new SearchResult(
                 limited,
                 continuationToken,
@@ -362,21 +389,256 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
         private string CreateIncludesContinuationToken(List<SearchResultEntry> includedResources, int offset)
         {
-            // Create a simple continuation token for includes
-            // In a full implementation, this would be more sophisticated
-            return Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"includes_offset_{offset}"));
+            // Create a distributed continuation token that tracks state across servers
+            var tokenData = new
+            {
+                Offset = offset,
+                Timestamp = DateTimeOffset.UtcNow.ToString("O"),
+                ServerStates = new Dictionary<string, string>() // Will be populated by server-specific tokens if available
+            };
+
+            var json = System.Text.Json.JsonSerializer.Serialize(tokenData);
+            return Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(json));
         }
 
-        private SearchOptions CreateBasicSearchOptions(string resourceType, List<Tuple<string, string>> queryParameters)
+        private (int offset, Dictionary<string, string> serverStates) ParseIncludesContinuationToken(string continuationToken)
         {
-            // Create a minimal SearchOptions for proxy operation
-            var searchOptions = (SearchOptions)Activator.CreateInstance(typeof(SearchOptions), true);
+            if (string.IsNullOrEmpty(continuationToken))
+            {
+                return (0, null);
+            }
 
-            // Set basic properties using reflection
-            typeof(SearchOptions).GetProperty("ResourceType")?.SetValue(searchOptions, resourceType); // InternalsVisibleTo grants access
-            typeof(SearchOptions).GetProperty("UnsupportedSearchParams")?.SetValue(searchOptions, new List<Tuple<string, string>>());
+            try
+            {
+                var json = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(continuationToken));
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                var root = doc.RootElement;
 
-            return searchOptions;
+                var offset = root.TryGetProperty("Offset", out var offsetProp) ? offsetProp.GetInt32() : 0;
+                var serverStates = new Dictionary<string, string>();
+
+                if (root.TryGetProperty("ServerStates", out var statesProp))
+                {
+                    foreach (var prop in statesProp.EnumerateObject())
+                    {
+                        serverStates[prop.Name] = prop.Value.GetString();
+                    }
+                }
+
+                return (offset, serverStates);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to parse includes continuation token, starting from beginning");
+                return (0, null);
+            }
+        }
+
+        private IEnumerable<SearchResultEntry> EnsureServerFullUrls(IEnumerable<SearchResultEntry> results, string serverBaseUrl)
+        {
+            foreach (var result in results)
+            {
+                if (result.Resource?.Request?.Url != null)
+                {
+                    // Check if the fullUrl already contains the correct server base URL
+                    var currentUrl = result.Resource.Request.Url.ToString();
+                    if (!currentUrl.StartsWith(serverBaseUrl, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Update the ResourceRequest to have the correct server base URL
+                        var correctedUri = new Uri($"{serverBaseUrl.TrimEnd('/')}/{result.Resource.ResourceTypeName}/{result.Resource.ResourceId}");
+                        var correctedRequest = new Microsoft.Health.Fhir.Core.Features.Persistence.ResourceRequest(
+                            result.Resource.Request.Method,
+                            correctedUri);
+
+                        // Create a new ResourceWrapper with the corrected request
+                        var correctedWrapper = new Microsoft.Health.Fhir.Core.Features.Persistence.ResourceWrapper(
+                            result.Resource.ResourceId,
+                            result.Resource.Version,
+                            result.Resource.ResourceTypeName,
+                            result.Resource.RawResource,
+                            correctedRequest,
+                            result.Resource.LastModified,
+                            result.Resource.IsDeleted,
+                            result.Resource.SearchIndices,
+                            result.Resource.CompartmentIndices,
+                            result.Resource.LastModifiedClaims);
+
+                        yield return new SearchResultEntry(correctedWrapper, result.SearchEntryMode);
+                    }
+                    else
+                    {
+                        yield return result;
+                    }
+                }
+                else
+                {
+                    yield return result;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Extracts reference IDs from the main search results to enable targeted include queries.
+        /// </summary>
+        private Dictionary<string, HashSet<string>> ExtractReferenceIds(SearchResult mainSearchResult, List<IncludeParameter> includeParameters)
+        {
+            var referenceIds = new Dictionary<string, HashSet<string>>();
+
+            if (mainSearchResult?.Results == null)
+            {
+                return referenceIds;
+            }
+
+            foreach (var entry in mainSearchResult.Results)
+            {
+                try
+                {
+                    // Parse the raw resource to extract reference fields
+                    if (entry.Resource?.RawResource?.Data != null)
+                    {
+                        var rawData = entry.Resource.RawResource.Data;
+                        // This is a simplified extraction - in a full implementation, you would
+                        // parse the JSON and extract specific reference fields based on the include parameters
+                        ExtractReferenceIdsFromRawResource(rawData, referenceIds, includeParameters);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error extracting reference IDs from resource {ResourceType}/{ResourceId}",
+                        entry.Resource?.ResourceTypeName, entry.Resource?.ResourceId);
+                }
+            }
+
+            return referenceIds;
+        }
+
+        /// <summary>
+        /// Extracts reference IDs from raw resource data based on include parameters.
+        /// </summary>
+        private void ExtractReferenceIdsFromRawResource(string rawData, Dictionary<string, HashSet<string>> referenceIds, List<IncludeParameter> includeParameters)
+        {
+            try
+            {
+                // Parse JSON to extract reference fields
+                using var document = System.Text.Json.JsonDocument.Parse(rawData);
+                var root = document.RootElement;
+
+                foreach (var includeParam in includeParameters)
+                {
+                    // Parse include parameter: ResourceType:field or ResourceType:field:targetType
+                    var parts = includeParam.Value.Split(':');
+                    if (parts.Length >= 2)
+                    {
+                        var fieldName = parts[1];
+
+                        // Extract reference values from the specified field
+                        if (root.TryGetProperty(fieldName, out var referenceElement))
+                        {
+                            ExtractReferenceFromElement(referenceElement, fieldName, referenceIds);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not parse resource JSON for reference extraction");
+            }
+        }
+
+        /// <summary>
+        /// Extracts reference values from a JSON element (could be single reference or array).
+        /// </summary>
+        private void ExtractReferenceFromElement(System.Text.Json.JsonElement element, string fieldName, Dictionary<string, HashSet<string>> referenceIds)
+        {
+            if (element.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                foreach (var item in element.EnumerateArray())
+                {
+                    ExtractSingleReference(item, fieldName, referenceIds);
+                }
+            }
+            else
+            {
+                ExtractSingleReference(element, fieldName, referenceIds);
+            }
+        }
+
+        /// <summary>
+        /// Extracts a single reference value from a JSON element.
+        /// </summary>
+        private void ExtractSingleReference(System.Text.Json.JsonElement element, string fieldName, Dictionary<string, HashSet<string>> referenceIds)
+        {
+            if (element.TryGetProperty("reference", out var referenceProperty) && referenceProperty.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                var referenceValue = referenceProperty.GetString();
+                if (!string.IsNullOrEmpty(referenceValue))
+                {
+                    // Parse reference format: ResourceType/id
+                    var referenceParts = referenceValue.Split('/');
+                    if (referenceParts.Length == 2)
+                    {
+                        var resourceType = referenceParts[0];
+                        var resourceId = referenceParts[1];
+
+                        if (!referenceIds.TryGetValue(resourceType, out var idSet))
+                        {
+                            idSet = new HashSet<string>();
+                            referenceIds[resourceType] = idSet;
+                        }
+                        idSet.Add(resourceId);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Creates a targeted include query based on the include parameter and extracted reference IDs.
+        /// </summary>
+        private (string targetResourceType, List<Tuple<string, string>> targetQuery) CreateTargetedIncludeQuery(
+            IncludeParameter includeParam,
+            Dictionary<string, HashSet<string>> referenceIds)
+        {
+            // Parse include parameter: ResourceType:field or ResourceType:field:targetType
+            var parts = includeParam.Value.Split(':');
+            if (parts.Length < 2)
+            {
+                return (null, null);
+            }
+
+            var targetResourceType = parts.Length >= 3 ? parts[2] : GuessTargetResourceType(parts[1]);
+
+            if (!referenceIds.TryGetValue(targetResourceType, out var idSet) || !idSet.Any())
+            {
+                return (targetResourceType, new List<Tuple<string, string>>());
+            }
+
+            var ids = string.Join(",", idSet);
+            var targetQuery = new List<Tuple<string, string>>
+            {
+                new Tuple<string, string>("_id", ids),
+                new Tuple<string, string>("_count", Math.Min(idSet.Count + 50, 1000).ToString()) // Buffer for safety
+            };
+
+            return (targetResourceType, targetQuery);
+        }
+
+        /// <summary>
+        /// Attempts to guess the target resource type from a reference field name.
+        /// </summary>
+        private string GuessTargetResourceType(string fieldName)
+        {
+            return fieldName.ToLowerInvariant() switch
+            {
+                "subject" => "Patient",
+                "patient" => "Patient",
+                "practitioner" => "Practitioner",
+                "organization" => "Organization",
+                "location" => "Location",
+                "encounter" => "Encounter",
+                "performer" => "Practitioner",
+                "requester" => "Practitioner",
+                _ => "Resource" // Generic fallback
+            };
         }
     }
 }

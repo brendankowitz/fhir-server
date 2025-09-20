@@ -63,6 +63,46 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Models
         /// Circuit breaker timeout in seconds before attempting to close the circuit.
         /// </summary>
         public int CircuitBreakerTimeoutSeconds { get; set; } = 60;
+
+        /// <summary>
+        /// Maximum total number of results across all servers for a single query.
+        /// </summary>
+        public int MaxTotalResults { get; set; } = 10000;
+
+        /// <summary>
+        /// Maximum memory usage in MB before throttling queries.
+        /// </summary>
+        public int MaxMemoryUsageMB { get; set; } = 500;
+
+        /// <summary>
+        /// Maximum concurrent search requests to all servers.
+        /// </summary>
+        public int MaxConcurrentSearches { get; set; } = 20;
+
+        /// <summary>
+        /// Maximum size of a single resource in KB.
+        /// </summary>
+        public int MaxResourceSizeKB { get; set; } = 1024;
+
+        /// <summary>
+        /// Query timeout in seconds for individual server requests.
+        /// </summary>
+        public int QueryTimeoutSeconds { get; set; } = 45;
+
+        /// <summary>
+        /// Maximum number of servers that can be queried in parallel.
+        /// </summary>
+        public int MaxParallelServers { get; set; } = 10;
+
+        /// <summary>
+        /// Rate limit: maximum queries per minute from a single client.
+        /// </summary>
+        public int MaxQueriesPerMinute { get; set; } = 60;
+
+        /// <summary>
+        /// Enable memory monitoring and resource protection.
+        /// </summary>
+        public bool EnableResourceProtection { get; set; } = true;
     }
 
     /// <summary>
