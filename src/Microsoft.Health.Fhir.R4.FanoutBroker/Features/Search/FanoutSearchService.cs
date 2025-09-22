@@ -36,6 +36,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         private readonly IChainedSearchProcessor _chainedSearchProcessor;
         private readonly IIncludeProcessor _includeProcessor;
         private readonly IResourceProtectionService _resourceProtectionService;
+        private readonly IResolutionStrategyFactory _resolutionStrategyFactory;
+        private readonly IExpressionResolutionStrategyFactory _expressionResolutionStrategyFactory;
         private readonly IOptions<FanoutBrokerConfiguration> _configuration;
         private readonly ILogger<FanoutSearchService> _logger;
 
@@ -47,6 +49,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             IChainedSearchProcessor chainedSearchProcessor,
             IIncludeProcessor includeProcessor,
             IResourceProtectionService resourceProtectionService,
+            IResolutionStrategyFactory resolutionStrategyFactory,
+            IExpressionResolutionStrategyFactory expressionResolutionStrategyFactory,
             IOptions<FanoutBrokerConfiguration> configuration,
             ILogger<FanoutSearchService> logger)
         {
@@ -57,6 +61,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             _chainedSearchProcessor = EnsureArg.IsNotNull(chainedSearchProcessor, nameof(chainedSearchProcessor));
             _includeProcessor = EnsureArg.IsNotNull(includeProcessor, nameof(includeProcessor));
             _resourceProtectionService = EnsureArg.IsNotNull(resourceProtectionService, nameof(resourceProtectionService));
+            _resolutionStrategyFactory = EnsureArg.IsNotNull(resolutionStrategyFactory, nameof(resolutionStrategyFactory));
+            _expressionResolutionStrategyFactory = EnsureArg.IsNotNull(expressionResolutionStrategyFactory, nameof(expressionResolutionStrategyFactory));
             _configuration = EnsureArg.IsNotNull(configuration, nameof(configuration));
             _logger = EnsureArg.IsNotNull(logger, nameof(logger));
         }
@@ -128,25 +134,27 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     cancellationToken);
             }
 
-                // Process chained search parameters if present
+                // Process chained search parameters using configured resolution strategy
                 var processedQueryParameters = queryParameters;
 
                 if (!string.IsNullOrEmpty(resourceType))
                 {
                     try
                     {
-                        processedQueryParameters = await _chainedSearchProcessor.ProcessChainedSearchAsync(
+                        var chainStrategy = _resolutionStrategyFactory.CreateChainedSearchStrategy();
+                        processedQueryParameters = await chainStrategy.ProcessChainedSearchAsync(
                             resourceType, queryParameters, cancellationToken);
 
                         if (processedQueryParameters.Count != queryParameters.Count)
                         {
-                            _logger.LogInformation("Chained search processing modified query from {OriginalCount} to {ProcessedCount} parameters",
-                                queryParameters.Count, processedQueryParameters.Count);
+                            _logger.LogInformation("Chained search processing ({Strategy}) modified query from {OriginalCount} to {ProcessedCount} parameters",
+                                _configuration.Value.ChainedSearchResolution, queryParameters.Count, processedQueryParameters.Count);
                         }
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Error processing chained search parameters");
+                        _logger.LogError(ex, "Error processing chained search parameters using {Strategy} strategy",
+                            _configuration.Value.ChainedSearchResolution);
                         throw;
                     }
                 }
@@ -178,6 +186,13 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     cancellationToken);
             }
 
+            // Check if we should use expression-based processing for complex scenarios
+            if (searchOptions.Expression != null && ShouldUseExpressionBasedProcessing(searchOptions.Expression))
+            {
+                _logger.LogDebug("Complex expression detected, using expression-based processing");
+                return await SearchWithExpressionAsync(searchOptions, cancellationToken);
+            }
+
             // Extract chained search and include parameters from Expression if available
             var expressionParameters = ExtractQueryParametersFromExpression(searchOptions);
 
@@ -202,24 +217,94 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 {
                     try
                     {
-                        finalQueryParameters = await _chainedSearchProcessor.ProcessChainedSearchAsync(
+                        var chainStrategy = _resolutionStrategyFactory.CreateChainedSearchStrategy();
+                        var chainResult = await chainStrategy.ProcessChainedSearchAsync(
                             resourceType, processedQueryParameters, cancellationToken);
+                        finalQueryParameters = chainResult.ToList();
 
                         if (finalQueryParameters.Count != processedQueryParameters.Count)
                         {
-                            _logger.LogInformation("Chained search processing modified query from {OriginalCount} to {ProcessedCount} parameters",
-                                processedQueryParameters.Count, finalQueryParameters.Count);
+                            _logger.LogInformation("Chained search processing ({Strategy}) modified query from {OriginalCount} to {ProcessedCount} parameters",
+                                _configuration.Value.ChainedSearchResolution, processedQueryParameters.Count, finalQueryParameters.Count);
                         }
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Error processing chained search parameters");
+                        _logger.LogError(ex, "Error processing chained search parameters using {Strategy} strategy",
+                            _configuration.Value.ChainedSearchResolution);
                         throw;
                     }
                 }
             }
 
             return await SearchInternalAsync(resourceType, searchOptions, finalQueryParameters, cancellationToken);
+        }
+
+        /// <summary>
+        /// Expression-based search method that uses rich FHIR expression metadata for complex scenarios.
+        /// This method provides enhanced processing for iterative includes, wildcard includes, and metadata-driven chained searches.
+        /// </summary>
+        public async Task<SearchResult> SearchWithExpressionAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
+        {
+            EnsureArg.IsNotNull(searchOptions, nameof(searchOptions));
+
+            var resourceType = GetResourceType(searchOptions);
+
+            _logger.LogInformation("Starting expression-based fanout search for resource type: {ResourceType}", resourceType);
+
+            // Check if we have an expression to work with
+            if (searchOptions.Expression == null)
+            {
+                _logger.LogDebug("No expression available, falling back to parameter-based search");
+                return await SearchAsync(searchOptions, cancellationToken);
+            }
+
+            // Use expression-based strategy selection
+            var resolutionStrategy = _expressionResolutionStrategyFactory.CreateStrategy(searchOptions.Expression);
+
+            _logger.LogInformation("Selected expression resolution strategy: {StrategyType}", resolutionStrategy.GetType().Name);
+
+            try
+            {
+                // Phase 1: Process chained searches using expression metadata
+                var processedExpression = await resolutionStrategy.ProcessChainedSearchAsync(
+                    searchOptions.Expression,
+                    cancellationToken);
+
+                // Update search options with processed expression
+                var updatedSearchOptions = new SearchOptions
+                {
+                    Expression = processedExpression,
+                    Sort = searchOptions.Sort,
+                    ContinuationToken = searchOptions.ContinuationToken,
+                    UnsupportedSearchParams = searchOptions.UnsupportedSearchParams,
+                    OnlyIds = searchOptions.OnlyIds,
+                    IncludeCount = searchOptions.IncludeCount,
+                    CountOnly = searchOptions.CountOnly
+                };
+
+                // Phase 2: Execute the main search with processed expression
+                var mainResult = await SearchInternalAsync(resourceType, updatedSearchOptions,
+                    ExtractQueryParametersFromExpression(updatedSearchOptions), cancellationToken);
+
+                // Phase 3: Process includes using expression metadata
+                var finalResult = await resolutionStrategy.ProcessIncludesAsync(
+                    searchOptions.Expression,
+                    mainResult,
+                    cancellationToken);
+
+                _logger.LogInformation("Expression-based fanout search completed. Strategy: {StrategyType}, Results: {Count}",
+                    resolutionStrategy.GetType().Name, finalResult.Results?.Count() ?? 0);
+
+                return finalResult;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in expression-based search, falling back to parameter-based search");
+
+                // Fallback to traditional parameter-based search
+                return await SearchAsync(searchOptions, cancellationToken);
+            }
         }
 
         /// <summary>
@@ -248,14 +333,17 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 _ => throw new ArgumentOutOfRangeException(null, strategy, "Unknown execution strategy"),
             };
 
-            // Process include/revinclude parameters if present
+            // Process include/revinclude parameters using configured resolution strategy
             if (_includeProcessor.HasIncludeParameters(queryParameters))
             {
-                result = await _includeProcessor.ProcessIncludesAsync(
+                var includeStrategy = _resolutionStrategyFactory.CreateIncludeStrategy();
+                result = await includeStrategy.ProcessIncludesAsync(
                     resourceType,
                     queryParameters,
                     result,
                     cancellationToken);
+
+                _logger.LogDebug("Include processing completed using {Strategy} strategy", _configuration.Value.IncludeResolution);
             }
 
             _logger.LogInformation("Fanout search completed. Returned {Count} results",
@@ -505,6 +593,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             var extractor = new ExpressionToQueryParameterExtractor(resourceTypeHint);
             searchOptions.Expression.AcceptVisitor(extractor, null);
+
             return extractor.QueryParameters;
         }
 
@@ -536,6 +625,18 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         {
             var resourceTypes = GetResourceTypes(options);
             return resourceTypes.Length > 0 ? resourceTypes[0] : null;
+        }
+
+        /// <summary>
+        /// Determines whether to use expression-based processing based on expression complexity.
+        /// </summary>
+        private static bool ShouldUseExpressionBasedProcessing(Microsoft.Health.Fhir.Core.Features.Search.Expressions.Expression expression)
+        {
+            // Use expression-based processing for complex scenarios that benefit from rich metadata
+            return IncludeExtractionVisitor.HasIterativeIncludes(expression) ||
+                   IncludeExtractionVisitor.HasWildcardIncludes(expression) ||
+                   IncludeExtractionVisitor.HasCircularReferenceIncludes(expression) ||
+                   ChainedSearchExtractionVisitor.GetMaxChainDepth(expression) > 1;
         }
     }
 }

@@ -85,6 +85,16 @@ namespace Microsoft.Health.Fhir.FanoutBroker
             services.AddScoped<ISearchService, FanoutSearchService>();
             services.AddScoped<IConfigurationValidationService, ConfigurationValidationService>();
             services.AddScoped<IResourceProtectionService, ResourceProtectionService>();
+
+            // Add resolution strategy services
+            services.AddScoped<IResolutionStrategyFactory, ResolutionStrategyFactory>();
+            services.AddScoped<PassthroughResolutionStrategy>();
+            services.AddScoped<DistributedResolutionStrategy>();
+
+            // Add expression-based resolution strategy services
+            services.AddScoped<IExpressionResolutionStrategyFactory, ExpressionResolutionStrategyFactory>();
+            services.AddScoped<ExpressionDistributedResolutionStrategy>();
+            services.AddScoped<ExpressionPassthroughResolutionStrategy>();
             services.AddSingleton<IResourceDeserializer, ResourceDeserializer>();
             AddSerializers(services);
 

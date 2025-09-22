@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using Microsoft.Health.Fhir.FanoutBroker.Features.Search;
 
 namespace Microsoft.Health.Fhir.FanoutBroker.Models
 {
@@ -103,6 +104,50 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Models
         /// Enable memory monitoring and resource protection.
         /// </summary>
         public bool EnableResourceProtection { get; set; } = true;
+
+        /// <summary>
+        /// Resolution strategy for chained search expressions.
+        /// Passthrough: Assumes references are co-located on same servers (optimal performance).
+        /// Distributed: Executes comprehensive cross-shard resolution (higher latency, complete coverage).
+        /// </summary>
+        public ResolutionMode ChainedSearchResolution { get; set; } = ResolutionMode.Passthrough;
+
+        /// <summary>
+        /// Resolution strategy for include/revinclude operations.
+        /// Passthrough: Assumes included resources are co-located (optimal performance).
+        /// Distributed: Executes comprehensive cross-shard resolution (higher latency, complete coverage).
+        /// </summary>
+        public ResolutionMode IncludeResolution { get; set; } = ResolutionMode.Passthrough;
+
+        /// <summary>
+        /// Timeout for distributed chain resolution phases in seconds.
+        /// </summary>
+        public int DistributedChainTimeoutSeconds { get; set; } = 15;
+
+        /// <summary>
+        /// Timeout for distributed include resolution phases in seconds.
+        /// </summary>
+        public int DistributedIncludeTimeoutSeconds { get; set; } = 10;
+
+        /// <summary>
+        /// Maximum number of reference IDs to process in distributed resolution mode.
+        /// </summary>
+        public int MaxDistributedReferenceIds { get; set; } = 1000;
+
+        /// <summary>
+        /// Batch size for ID-based queries in distributed resolution mode.
+        /// </summary>
+        public int DistributedBatchSize { get; set; } = 100;
+
+        /// <summary>
+        /// Enable caching for distributed resolution results to optimize repeated sub-queries.
+        /// </summary>
+        public bool EnableDistributedResolutionCache { get; set; } = true;
+
+        /// <summary>
+        /// Cache expiration time in minutes for distributed resolution results.
+        /// </summary>
+        public int DistributedResolutionCacheExpirationMinutes { get; set; } = 5;
     }
 
     /// <summary>

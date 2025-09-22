@@ -198,5 +198,63 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search.Visito
             Assert.Contains("DiagnosticReport", typeParam.Item2);
             Assert.Contains("Observation", typeParam.Item2);
         }
+
+        [Fact]
+        public void ReferenceSearchParameter_ShouldPreserveFullReferenceValue()
+        {
+            // Arrange - Reproduce the issue: /Encounter?subject=Patient/searchpatient3
+            var extractor = new ExpressionToQueryParameterExtractor("Encounter");
+
+            var subjectSearchParam = new SearchParameterInfo("subject", "subject", SearchParamType.Reference, null, null, "Encounter.subject", null);
+
+            // Create a reference expression that should preserve "Patient/searchpatient3"
+            var referenceExpr = SearchParamExpression.StringEquals(FieldName.ReferenceResourceId, 0, "Patient/searchpatient3", false);
+            var searchParamExpr = SearchParamExpression.SearchParameter(subjectSearchParam, referenceExpr);
+
+            // Act
+            searchParamExpr.AcceptVisitor(extractor, null);
+
+            // Assert
+            var parameters = extractor.QueryParameters;
+
+            // Should generate exactly one parameter
+            Assert.Single(parameters);
+            Assert.Equal("subject", parameters[0].Item1);
+
+            // The value should be the full reference "Patient/searchpatient3", not truncated to "Patient"
+            Assert.Equal("Patient/searchpatient3", parameters[0].Item2);
+        }
+
+        [Fact]
+        public void ReferenceSearchParameter_WithDifferentExpressionTypes_ShouldPreserveFullValue()
+        {
+            // Test various expression types that might contain reference values
+            var testCases = new[]
+            {
+                ("Patient/test123", "Patient/test123"),
+                ("Organization/org456", "Organization/org456"),
+                ("Practitioner/prac789", "Practitioner/prac789"),
+                ("Device/device001", "Device/device001"),
+            };
+
+            foreach (var (input, expected) in testCases)
+            {
+                // Arrange
+                var extractor = new ExpressionToQueryParameterExtractor("Encounter");
+                var subjectSearchParam = new SearchParameterInfo("subject", "subject", SearchParamType.Reference, null, null, "Encounter.subject", null);
+
+                var referenceExpr = SearchParamExpression.StringEquals(FieldName.ReferenceResourceId, 0, input, false);
+                var searchParamExpr = SearchParamExpression.SearchParameter(subjectSearchParam, referenceExpr);
+
+                // Act
+                searchParamExpr.AcceptVisitor(extractor, null);
+
+                // Assert
+                var parameters = extractor.QueryParameters;
+                Assert.Single(parameters);
+                Assert.Equal("subject", parameters[0].Item1);
+                Assert.Equal(expected, parameters[0].Item2);
+            }
+        }
     }
 }

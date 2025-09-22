@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
+using Microsoft.Health.Fhir.ValueSets;
 
 namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
 {
@@ -56,6 +57,13 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
             // Extract the parameter name and convert the expression to a query value
             var parameterName = expression.Parameter.Code;
             var parameterValue = ConvertExpressionToQueryValue(expression.Expression);
+
+            // Special handling for reference parameters that might have been split into components
+            if (expression.Parameter.Type == SearchParamType.Reference && expression.Expression is MultiaryExpression multiaryExpr && multiaryExpr.MultiaryOperation == MultiaryOperator.And)
+            {
+                // Try to reconstruct reference from ReferenceResourceType and ReferenceResourceId
+                parameterValue = ReconstructReferenceValue(multiaryExpr);
+            }
 
             // Check for special expression types that require parameter name modifiers
             if (expression.Expression is NotExpression notExpr)
@@ -362,7 +370,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
                 InExpression<double> inExpr => string.Join(",", inExpr.Values),
                 InExpression<float> inExpr => string.Join(",", inExpr.Values),
                 SearchParameterExpression searchParam => ConvertSearchParameterExpression(searchParam),
-                _ => expression.ToString() // Fallback to expression's ToString()
+                _ => ConvertGenericExpression(expression) // Enhanced fallback for reference expressions
             };
         }
 
@@ -439,6 +447,114 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
             // Union expressions typically represent OR operations in FHIR
             // Join the sub-expressions with commas
             return string.Join(",", expression.Expressions.Select(ConvertExpressionToQueryValue));
+        }
+
+        /// <summary>
+        /// Enhanced fallback method for converting expressions to query values, with special handling for reference expressions.
+        /// </summary>
+        private static string ConvertGenericExpression(Expression expression)
+        {
+            // Try to extract value using reflection for known expression types that contain Value properties
+            var expressionType = expression.GetType();
+
+            // Look for Value property (common in reference and other expressions)
+            var valueProperty = expressionType.GetProperty("Value");
+            if (valueProperty != null)
+            {
+                var value = valueProperty.GetValue(expression);
+                if (value != null)
+                {
+                    // Handle reference values that might be Resource objects or strings
+                    if (value is string stringValue)
+                    {
+                        return stringValue;
+                    }
+                    else if (value.GetType().Name.Contains("Resource", StringComparison.OrdinalIgnoreCase) || value.ToString().Contains('/', StringComparison.Ordinal))
+                    {
+                        // This looks like a reference - preserve the full value
+                        return value.ToString();
+                    }
+                    else
+                    {
+                        return value.ToString();
+                    }
+                }
+            }
+
+            // Look for Values property (for collection-based expressions)
+            var valuesProperty = expressionType.GetProperty("Values");
+            if (valuesProperty != null && valuesProperty.PropertyType.IsGenericType)
+            {
+                var values = valuesProperty.GetValue(expression);
+                if (values is System.Collections.IEnumerable enumerable)
+                {
+                    var stringValues = new List<string>();
+                    foreach (var item in enumerable)
+                    {
+                        if (item != null)
+                        {
+                            stringValues.Add(item.ToString());
+                        }
+                    }
+                    return string.Join(",", stringValues);
+                }
+            }
+
+            // Check if this might be a reference expression by looking at the string representation
+            var stringRepresentation = expression.ToString();
+
+            // If the string contains reference patterns, preserve them
+            if (stringRepresentation.Contains('/', StringComparison.Ordinal) &&
+                (stringRepresentation.Contains("Patient/", StringComparison.Ordinal) ||
+                 stringRepresentation.Contains("Organization/", StringComparison.Ordinal) ||
+                 stringRepresentation.Contains("Practitioner/", StringComparison.Ordinal) ||
+                 stringRepresentation.Contains("Device/", StringComparison.Ordinal) ||
+                 stringRepresentation.Contains("Location/", StringComparison.Ordinal)))
+            {
+                return stringRepresentation;
+            }
+
+            // Default fallback
+            return stringRepresentation;
+        }
+
+        /// <summary>
+        /// Reconstructs a reference value from ReferenceResourceType and ReferenceResourceId components.
+        /// </summary>
+        private static string ReconstructReferenceValue(MultiaryExpression multiaryExpression)
+        {
+            string resourceType = null;
+            string resourceId = null;
+
+            foreach (var expr in multiaryExpression.Expressions)
+            {
+                if (expr is StringExpression stringExpr)
+                {
+                    // Use reflection to get the FieldName property
+                    var fieldNameProperty = stringExpr.GetType().GetProperty("FieldName");
+                    if (fieldNameProperty?.GetValue(stringExpr) is FieldName fieldName)
+                    {
+                        switch (fieldName)
+                        {
+                            case FieldName.ReferenceResourceType:
+                                resourceType = stringExpr.Value;
+                                break;
+                            case FieldName.ReferenceResourceId:
+                                resourceId = stringExpr.Value;
+                                break;
+                        }
+                    }
+                }
+            }
+
+            // If we found both components, reconstruct the full reference
+            if (!string.IsNullOrEmpty(resourceType) && !string.IsNullOrEmpty(resourceId))
+            {
+                return $"{resourceType}/{resourceId}";
+            }
+
+            // If we couldn't reconstruct, fall back to the original conversion logic
+            return ConvertMultiaryExpression(multiaryExpression);
         }
 
         /// <summary>
