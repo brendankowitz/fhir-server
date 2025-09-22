@@ -132,8 +132,29 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
             var serverCapabilities = new List<ServerCapabilityResult>();
 
             // Get capability statements from all enabled servers
-            var capabilityTasks = enabledServers.Select(server =>
-                _serverOrchestrator.GetCapabilityStatementAsync(server, cancellationToken));
+            var capabilityTasks = enabledServers.Select(async server =>
+            {
+                try
+                {
+                    var healthResult = await _serverOrchestrator.CheckHealthAsync(server, cancellationToken);
+                    return new ServerCapabilityResult
+                    {
+                        ServerId = server.Id,
+                        IsSuccess = healthResult.IsHealthy,
+                        CapabilityStatement = healthResult.IsHealthy ? CreateBasicCapabilityStatement() : null,
+                        ErrorMessage = healthResult.ErrorMessage
+                    };
+                }
+                catch (Exception ex)
+                {
+                    return new ServerCapabilityResult
+                    {
+                        ServerId = server.Id,
+                        IsSuccess = false,
+                        ErrorMessage = ex.Message
+                    };
+                }
+            });
 
             var results = await Task.WhenAll(capabilityTasks);
             serverCapabilities.AddRange(results.Where(r => r.IsSuccess));

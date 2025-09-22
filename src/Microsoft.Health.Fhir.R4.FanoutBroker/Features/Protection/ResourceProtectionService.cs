@@ -17,21 +17,29 @@ using Microsoft.Health.Fhir.FanoutBroker.Models;
 namespace Microsoft.Health.Fhir.FanoutBroker.Features.Protection
 {
     /// <summary>
-    /// Implementation of resource protection service that enforces configured limits.
+    /// Comprehensive implementation of resource protection service with memory monitoring,
+    /// rate limiting, and resource validation.
     /// </summary>
-    public class ResourceProtectionService : IResourceProtectionService
+    public class ResourceProtectionService : IResourceProtectionService, IDisposable
     {
         private readonly IOptions<FanoutBrokerConfiguration> _configuration;
         private readonly ILogger<ResourceProtectionService> _logger;
 
-        // Concurrent tracking of active operations
-        private readonly ConcurrentDictionary<string, SearchOperationToken> _activeOperations = new();
+        // Memory monitoring
+        private readonly Timer _memoryMonitorTimer;
+        private long _currentMemoryUsageMB;
+        private bool _isMemoryPressureHigh;
 
-        // Rate limiting per client
-        private readonly ConcurrentDictionary<string, ClientRateLimit> _clientRateLimits = new();
+        // Concurrency tracking
+        private readonly ConcurrentDictionary<string, SearchOperationToken> _activeOperations;
+        private volatile int _activeSearchCount;
 
-        // Process for memory monitoring
-        private readonly Process _currentProcess = Process.GetCurrentProcess();
+        // Rate limiting (simple sliding window)
+        private readonly ConcurrentDictionary<string, ClientRateLimit> _clientRateLimits;
+
+        // Garbage collection monitoring
+        private long _lastGen2Collections;
+        private readonly object _lockObject = new object();
 
         public ResourceProtectionService(
             IOptions<FanoutBrokerConfiguration> configuration,
@@ -39,6 +47,15 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Protection
         {
             _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+
+            _activeOperations = new ConcurrentDictionary<string, SearchOperationToken>();
+            _clientRateLimits = new ConcurrentDictionary<string, ClientRateLimit>();
+
+            // Initialize memory monitoring timer (check every 10 seconds)
+            _memoryMonitorTimer = new Timer(MonitorMemoryUsage, null, TimeSpan.Zero, TimeSpan.FromSeconds(10));
+
+            _logger.LogInformation("Resource protection service initialized with MaxMemoryUsageMB: {MaxMemory}, MaxConcurrentSearches: {MaxConcurrent}",
+                _configuration.Value.MaxMemoryUsageMB, _configuration.Value.MaxConcurrentSearches);
         }
 
         public Task<ResourceProtectionResult> ValidateSearchRequestAsync(
@@ -66,10 +83,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Protection
             }
 
             // Check concurrent operations
-            if (_activeOperations.Count >= config.MaxConcurrentSearches)
+            if (_activeSearchCount >= config.MaxConcurrentSearches)
             {
                 _logger.LogWarning("Search request rejected due to maximum concurrent operations limit: {CurrentOps}/{MaxOps}",
-                    _activeOperations.Count, config.MaxConcurrentSearches);
+                    _activeSearchCount, config.MaxConcurrentSearches);
                 return Task.FromResult(new ResourceProtectionResult
                 {
                     IsAllowed = false,
@@ -113,33 +130,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Protection
 
         public bool IsMemoryUsageAcceptable()
         {
-            try
-            {
-                var config = _configuration.Value;
-                if (!config.EnableResourceProtection)
-                {
-                    return true;
-                }
-
-                // Get current memory usage in MB
-                _currentProcess.Refresh();
-                var memoryUsageMB = _currentProcess.WorkingSet64 / (1024 * 1024);
-
-                var isAcceptable = memoryUsageMB <= config.MaxMemoryUsageMB;
-
-                if (!isAcceptable)
-                {
-                    _logger.LogWarning("Memory usage threshold exceeded: {CurrentMB}MB / {MaxMB}MB",
-                        memoryUsageMB, config.MaxMemoryUsageMB);
-                }
-
-                return isAcceptable;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error checking memory usage, allowing request");
-                return true; // Fail open for availability
-            }
+            return !_isMemoryPressureHigh && _currentMemoryUsageMB < _configuration.Value.MaxMemoryUsageMB;
         }
 
         public bool ValidateResultCount(int currentResultCount, int estimatedAdditionalResults = 0)
@@ -191,26 +182,24 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Protection
             }
 
             // Check if we can accept another operation
-            if (_activeOperations.Count >= config.MaxConcurrentSearches)
+            if (_activeSearchCount >= config.MaxConcurrentSearches)
             {
                 _logger.LogWarning("Cannot begin search operation - maximum concurrent operations reached: {Count}/{Max}",
-                    _activeOperations.Count, config.MaxConcurrentSearches);
+                    _activeSearchCount, config.MaxConcurrentSearches);
                 return null;
             }
 
             var token = new SearchOperationToken();
-            if (_activeOperations.TryAdd(token.OperationId, token))
-            {
-                _logger.LogDebug("Search operation started: {OperationId}, Active operations: {Count}",
-                    token.OperationId, _activeOperations.Count);
+            _activeOperations[token.OperationId] = token;
 
-                // Clean up old operations that might have been abandoned
-                await CleanupAbandonedOperationsAsync();
+            var newCount = Interlocked.Increment(ref _activeSearchCount);
+            _logger.LogDebug("Search operation started: {OperationId}, Active operations: {Count}",
+                token.OperationId, newCount);
 
-                return token;
-            }
+            // Clean up old operations that might have been abandoned
+            await CleanupAbandonedOperationsAsync();
 
-            return null;
+            return token;
         }
 
         public void EndSearchOperation(SearchOperationToken token)
@@ -220,12 +209,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Protection
                 return;
             }
 
-            if (_activeOperations.TryRemove(token.OperationId, out var removedToken))
-            {
-                var duration = DateTimeOffset.UtcNow - removedToken.StartTime;
-                _logger.LogDebug("Search operation completed: {OperationId}, Duration: {Duration}ms, Active operations: {Count}",
-                    token.OperationId, duration.TotalMilliseconds, _activeOperations.Count);
-            }
+            _activeOperations.TryRemove(token.OperationId, out _);
+            var newCount = Interlocked.Decrement(ref _activeSearchCount);
+
+            var duration = DateTimeOffset.UtcNow - token.StartTime;
+            _logger.LogDebug("Search operation completed: {OperationId}, Duration: {Duration}ms, Active operations: {Count}",
+                token.OperationId, duration.TotalMilliseconds, newCount);
         }
 
         private async Task CleanupAbandonedOperationsAsync()
@@ -275,6 +264,59 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Protection
                     return true;
                 }
             }
+        }
+
+        private void MonitorMemoryUsage(object state)
+        {
+            try
+            {
+                // Get current memory usage
+                using var currentProcess = Process.GetCurrentProcess();
+                var workingSetMB = currentProcess.WorkingSet64 / (1024 * 1024);
+                var privateMemoryMB = currentProcess.PrivateMemorySize64 / (1024 * 1024);
+
+                _currentMemoryUsageMB = Math.Max(workingSetMB, privateMemoryMB);
+
+                // Check for memory pressure
+                var wasHighPressure = _isMemoryPressureHigh;
+                _isMemoryPressureHigh = _currentMemoryUsageMB > _configuration.Value.MaxMemoryUsageMB;
+
+                // Monitor GC pressure
+                var currentGen2Collections = GC.CollectionCount(2);
+                var gen2Delta = currentGen2Collections - _lastGen2Collections;
+                _lastGen2Collections = currentGen2Collections;
+
+                // Log memory status changes
+                if (_isMemoryPressureHigh != wasHighPressure)
+                {
+                    if (_isMemoryPressureHigh)
+                    {
+                        _logger.LogWarning("Memory pressure HIGH: {CurrentMemoryMB}MB > {MaxMemoryMB}MB, Gen2 GC: +{Gen2Delta}",
+                            _currentMemoryUsageMB, _configuration.Value.MaxMemoryUsageMB, gen2Delta);
+                    }
+                    else
+                    {
+                        _logger.LogInformation("Memory pressure NORMAL: {CurrentMemoryMB}MB < {MaxMemoryMB}MB",
+                            _currentMemoryUsageMB, _configuration.Value.MaxMemoryUsageMB);
+                    }
+                }
+
+                // Trigger garbage collection if memory is very high
+                if (_currentMemoryUsageMB > _configuration.Value.MaxMemoryUsageMB * 1.2)
+                {
+                    _logger.LogWarning("Triggering garbage collection due to very high memory usage: {MemoryMB}MB", _currentMemoryUsageMB);
+                    GC.Collect(2, GCCollectionMode.Forced);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error during memory monitoring");
+            }
+        }
+
+        public void Dispose()
+        {
+            _memoryMonitorTimer?.Dispose();
         }
     }
 }

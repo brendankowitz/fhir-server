@@ -40,6 +40,7 @@ using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Conformance;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Health;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Protection;
+using Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Search;
 using Microsoft.Health.Fhir.FanoutBroker.Models;
 using Microsoft.Health.Fhir.FanoutBroker.Modules;
@@ -82,9 +83,11 @@ namespace Microsoft.Health.Fhir.FanoutBroker
             services.AddScoped<IChainedSearchProcessor, ChainedSearchProcessor>();
             services.AddScoped<IIncludeProcessor, IncludeProcessor>();
             services.AddScoped<IConformanceProvider, FanoutCapabilityStatementProvider>();
+            services.AddScoped<IFanoutCapabilityStatementProvider, FanoutCapabilityStatementProvider>();
             services.AddScoped<ISearchService, FanoutSearchService>();
             services.AddScoped<IConfigurationValidationService, ConfigurationValidationService>();
             services.AddScoped<IResourceProtectionService, ResourceProtectionService>();
+            services.AddScoped<IQueryOptimizationService, QueryOptimizationService>();
 
             // Add resolution strategy services
             services.AddScoped<IResolutionStrategyFactory, ResolutionStrategyFactory>();

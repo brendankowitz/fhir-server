@@ -19,11 +19,10 @@ using Microsoft.Health.Fhir.Client;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Models;
+using Microsoft.Health.Fhir.FanoutBroker.Features.CircuitBreaker;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors;
 using Microsoft.Health.Fhir.FanoutBroker.Models;
 using Microsoft.Health.Fhir.ValueSets;
-using Polly;
-using Polly.CircuitBreaker;
 
 namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
 {
@@ -34,27 +33,28 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
     {
         private readonly IOptions<FanoutBrokerConfiguration> _configuration;
         private readonly IHttpClientFactory _httpClientFactory;
+        private readonly ICircuitBreakerFactory _circuitBreakerFactory;
         private readonly ILogger<FhirServerOrchestrator> _logger;
         private readonly IResourceDeserializer _resourceDeserializer;
         private readonly FhirJsonSerializer _jsonSerializer;
         private readonly Dictionary<string, IFhirClient> _fhirClients;
-        private readonly Dictionary<string, IAsyncPolicy> _circuitBreakerPolicies;
         private readonly object _clientLock = new object();
 
         public FhirServerOrchestrator(
             IOptions<FanoutBrokerConfiguration> configuration,
             IHttpClientFactory httpClientFactory,
+            ICircuitBreakerFactory circuitBreakerFactory,
             ILogger<FhirServerOrchestrator> logger,
             IResourceDeserializer resourceDeserializer,
             FhirJsonSerializer jsonSerializer)
         {
             _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
             _httpClientFactory = httpClientFactory ?? throw new ArgumentNullException(nameof(httpClientFactory));
+            _circuitBreakerFactory = circuitBreakerFactory ?? throw new ArgumentNullException(nameof(circuitBreakerFactory));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _resourceDeserializer = resourceDeserializer ?? throw new ArgumentNullException(nameof(resourceDeserializer));
             _jsonSerializer = jsonSerializer ?? throw new ArgumentNullException(nameof(jsonSerializer));
             _fhirClients = new Dictionary<string, IFhirClient>();
-            _circuitBreakerPolicies = new Dictionary<string, IAsyncPolicy>();
         }
 
         /// <inheritdoc />
@@ -81,7 +81,9 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
             try
             {
                 var fhirClient = GetOrCreateFhirClient(server);
-                var circuitBreakerPolicy = GetOrCreateCircuitBreakerPolicy(server);
+                var circuitBreaker = _configuration.Value.EnableCircuitBreaker
+                    ? _circuitBreakerFactory.GetCircuitBreaker(server.Id)
+                    : null;
 
                 // Apply timeout protection
                 var timeoutSeconds = server.TimeoutSeconds ?? _configuration.Value.QueryTimeoutSeconds;
@@ -89,35 +91,37 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
                 using var combinedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
                 // Execute search with circuit breaker and timeout protection
-                SearchResult searchResult = await circuitBreakerPolicy.ExecuteAsync(async () =>
-                {
-                    var queryString = BuildQueryString(searchOptions);
-                    var resourceType = GetResourceTypeFromSearchOptions(searchOptions);
-                    var requestUrl = string.IsNullOrEmpty(resourceType)
-                        ? $"?{queryString}"
-                        : $"{resourceType}?{queryString}";
+                SearchResult searchResult = circuitBreaker != null
+                    ? await circuitBreaker.ExecuteAsync(async (ct) =>
+                        {
+                            var queryString = BuildQueryString(searchOptions);
+                            var resourceType = GetResourceTypeFromSearchOptions(searchOptions);
+                            var requestUrl = string.IsNullOrEmpty(resourceType)
+                                ? $"?{queryString}"
+                                : $"{resourceType}?{queryString}";
 
-                    var fullUrl = $"{server.BaseUrl.TrimEnd('/')}/{requestUrl.TrimStart('/')}";
+                            var fullUrl = $"{server.BaseUrl.TrimEnd('/')}/{requestUrl.TrimStart('/')}";
 
-                    _logger.LogInformation("📤 Fanout Query to {ServerId}: {FullUrl}", server.Id, fullUrl);
-                    _logger.LogDebug("Query details - ResourceType: {ResourceType}, QueryString: {QueryString}, Timeout: {TimeoutSeconds}s",
-                        resourceType ?? "system-level", queryString, timeoutSeconds);
+                            _logger.LogInformation("📤 Fanout Query to {ServerId}: {FullUrl}", server.Id, fullUrl);
+                            _logger.LogDebug("Query details - ResourceType: {ResourceType}, QueryString: {QueryString}, Timeout: {TimeoutSeconds}s",
+                                resourceType ?? "system-level", queryString, timeoutSeconds);
 
-                    var response = await fhirClient.SearchAsync(requestUrl, null, combinedCts.Token);
+                            var response = await fhirClient.SearchAsync(requestUrl, null, ct);
 
-                    if (response.Resource is Bundle bundle)
-                    {
-                        return ConvertBundleToSearchResult(bundle, server);
-                    }
+                            if (response.Resource is Bundle bundle)
+                            {
+                                return ConvertBundleToSearchResult(bundle, server);
+                            }
 
-                    throw new InvalidOperationException("Search response is not a Bundle");
-                });
+                            throw new InvalidOperationException("Search response is not a Bundle");
+                        }, combinedCts.Token)
+                    : await ExecuteSearchDirectly(fhirClient, searchOptions, server, timeoutSeconds, combinedCts.Token);
 
                 result.SearchResult = searchResult;
                 result.IsSuccess = true;
                 result.StatusCode = 200;
             }
-            catch (BrokenCircuitException ex)
+            catch (CircuitBreakerOpenException ex)
             {
                 _logger.LogWarning("Circuit breaker is open for server {ServerId}: {Message}",
                     server.Id, ex.Message);
@@ -317,43 +321,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
             }
         }
 
-        private IAsyncPolicy GetOrCreateCircuitBreakerPolicy(FhirServerEndpoint server)
-        {
-            if (!_configuration.Value.EnableCircuitBreaker)
-            {
-                return Policy.NoOpAsync();
-            }
-
-            lock (_clientLock)
-            {
-                if (_circuitBreakerPolicies.TryGetValue(server.Id, out var existingPolicy))
-                {
-                    return existingPolicy;
-                }
-
-                var policy = Policy
-                    .Handle<Exception>()
-                    .CircuitBreakerAsync(
-                        exceptionsAllowedBeforeBreaking: _configuration.Value.CircuitBreakerFailureThreshold,
-                        durationOfBreak: TimeSpan.FromSeconds(_configuration.Value.CircuitBreakerTimeoutSeconds),
-                        onBreak: (ex, duration) =>
-                        {
-                            _logger.LogWarning("Circuit breaker opened for server {ServerId} for {Duration}s due to: {Exception}",
-                                server.Id, duration.TotalSeconds, ex.Message);
-                        },
-                        onReset: () =>
-                        {
-                            _logger.LogInformation("Circuit breaker reset for server {ServerId}", server.Id);
-                        },
-                        onHalfOpen: () =>
-                        {
-                            _logger.LogInformation("Circuit breaker half-open for server {ServerId}", server.Id);
-                        });
-
-                _circuitBreakerPolicies[server.Id] = policy;
-                return policy;
-            }
-        }
 
         private string BuildQueryString(SearchOptions searchOptions)
         {
@@ -736,6 +703,38 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
             // No resource type found - this is likely a system-level search
             _logger.LogDebug("🔍 No resource type found - system-level search");
             return null;
+        }
+
+        /// <summary>
+        /// Executes search directly without circuit breaker protection.
+        /// </summary>
+        private async Task<SearchResult> ExecuteSearchDirectly(
+            IFhirClient fhirClient,
+            SearchOptions searchOptions,
+            FhirServerEndpoint server,
+            int timeoutSeconds,
+            CancellationToken cancellationToken)
+        {
+            var queryString = BuildQueryString(searchOptions);
+            var resourceType = GetResourceTypeFromSearchOptions(searchOptions);
+            var requestUrl = string.IsNullOrEmpty(resourceType)
+                ? $"?{queryString}"
+                : $"{resourceType}?{queryString}";
+
+            var fullUrl = $"{server.BaseUrl.TrimEnd('/')}/{requestUrl.TrimStart('/')}";
+
+            _logger.LogInformation("📤 Fanout Query to {ServerId}: {FullUrl}", server.Id, fullUrl);
+            _logger.LogDebug("Query details - ResourceType: {ResourceType}, QueryString: {QueryString}, Timeout: {TimeoutSeconds}s",
+                resourceType ?? "system-level", queryString, timeoutSeconds);
+
+            var response = await fhirClient.SearchAsync(requestUrl, null, cancellationToken);
+
+            if (response.Resource is Bundle bundle)
+            {
+                return ConvertBundleToSearchResult(bundle, server);
+            }
+
+            throw new InvalidOperationException("Search response is not a Bundle");
         }
     }
 }

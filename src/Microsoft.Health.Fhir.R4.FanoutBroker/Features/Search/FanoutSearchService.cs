@@ -19,6 +19,7 @@ using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Protection;
+using Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors;
 using Microsoft.Health.Fhir.FanoutBroker.Models;
 
@@ -36,6 +37,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         private readonly IChainedSearchProcessor _chainedSearchProcessor;
         private readonly IIncludeProcessor _includeProcessor;
         private readonly IResourceProtectionService _resourceProtectionService;
+        private readonly IQueryOptimizationService _queryOptimizationService;
         private readonly IResolutionStrategyFactory _resolutionStrategyFactory;
         private readonly IExpressionResolutionStrategyFactory _expressionResolutionStrategyFactory;
         private readonly IOptions<FanoutBrokerConfiguration> _configuration;
@@ -49,6 +51,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             IChainedSearchProcessor chainedSearchProcessor,
             IIncludeProcessor includeProcessor,
             IResourceProtectionService resourceProtectionService,
+            IQueryOptimizationService queryOptimizationService,
             IResolutionStrategyFactory resolutionStrategyFactory,
             IExpressionResolutionStrategyFactory expressionResolutionStrategyFactory,
             IOptions<FanoutBrokerConfiguration> configuration,
@@ -61,6 +64,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             _chainedSearchProcessor = EnsureArg.IsNotNull(chainedSearchProcessor, nameof(chainedSearchProcessor));
             _includeProcessor = EnsureArg.IsNotNull(includeProcessor, nameof(includeProcessor));
             _resourceProtectionService = EnsureArg.IsNotNull(resourceProtectionService, nameof(resourceProtectionService));
+            _queryOptimizationService = EnsureArg.IsNotNull(queryOptimizationService, nameof(queryOptimizationService));
             _resolutionStrategyFactory = EnsureArg.IsNotNull(resolutionStrategyFactory, nameof(resolutionStrategyFactory));
             _expressionResolutionStrategyFactory = EnsureArg.IsNotNull(expressionResolutionStrategyFactory, nameof(expressionResolutionStrategyFactory));
             _configuration = EnsureArg.IsNotNull(configuration, nameof(configuration));
@@ -308,7 +312,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         }
 
         /// <summary>
-        /// Internal search method that handles the actual fanout logic.
+        /// Internal search method that handles the actual fanout logic with query optimization.
         /// </summary>
         private async System.Threading.Tasks.Task<SearchResult> SearchInternalAsync(string resourceType, SearchOptions searchOptions, IReadOnlyList<Tuple<string, string>> queryParameters, CancellationToken cancellationToken)
         {
@@ -320,8 +324,35 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 _logger.LogInformation("Multi-resource type search for types: {ResourceTypes}", string.Join(", ", resourceTypes));
             }
 
-            // Determine execution strategy based on search options and expression analysis
+            // Perform query cost analysis
+            var costAnalysis = await _queryOptimizationService.AnalyzeQueryCostAsync(searchOptions, resourceType);
+
+            _logger.LogDebug("Query cost analysis - Cost: {Cost}, Estimated time: {Time}ms, Expensive: {IsExpensive}",
+                costAnalysis.EstimatedCost, costAnalysis.EstimatedExecutionTimeMs, costAnalysis.IsExpensiveQuery);
+
+            if (costAnalysis.IsExpensiveQuery)
+            {
+                _logger.LogInformation("Expensive query detected. Cost factors: {Factors}. Optimizations: {Optimizations}",
+                    string.Join(", ", costAnalysis.CostFactors),
+                    string.Join(", ", costAnalysis.OptimizationRecommendations));
+            }
+
+            // Determine execution strategy based on search options, expression analysis, and cost
             var strategy = _strategyAnalyzer.DetermineStrategy(searchOptions);
+
+            // Override strategy based on cost analysis if needed
+            if (costAnalysis.IsExpensiveQuery && strategy == ExecutionStrategy.Parallel)
+            {
+                var enabledServers = _serverOrchestrator.GetEnabledServers();
+                var recommendedStrategy = await _queryOptimizationService.RecommendExecutionStrategyAsync(
+                    searchOptions, resourceType, enabledServers);
+
+                if (recommendedStrategy == QueryExecutionStrategy.SequentialFallback)
+                {
+                    strategy = ExecutionStrategy.Sequential;
+                    _logger.LogInformation("Overriding execution strategy to Sequential due to expensive query cost analysis");
+                }
+            }
 
             _logger.LogInformation("Using {Strategy} execution strategy for fanout search", strategy);
 
@@ -353,11 +384,26 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         }
 
         /// <summary>
-        /// Executes search queries in parallel across all enabled FHIR servers.
+        /// Executes search queries in parallel across all enabled FHIR servers using query optimization.
         /// </summary>
         private async System.Threading.Tasks.Task<SearchResult> ExecuteParallelSearchAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
         {
             var enabledServers = _serverOrchestrator.GetEnabledServers();
+            var resourceType = GetResourceType(searchOptions);
+
+            // Perform query optimization to select optimal servers
+            var optimizationPlan = await _queryOptimizationService.OptimizeServerSelectionAsync(
+                enabledServers, searchOptions, resourceType, cancellationToken);
+
+            _logger.LogInformation("Query optimization selected {SelectedCount}/{TotalCount} servers using {Strategy} strategy with {Confidence}% confidence",
+                optimizationPlan.SelectedServers.Count, enabledServers.Count, optimizationPlan.ExecutionStrategy, optimizationPlan.ConfidenceLevel);
+
+            if (optimizationPlan.ExcludedServers.Any())
+            {
+                _logger.LogDebug("Excluded servers: {ExcludedServers}",
+                    string.Join(", ", optimizationPlan.ExcludedServers.Select(e => $"{e.Server.Id} ({e.ExclusionReason})")));
+            }
+
             var searchTasks = new List<System.Threading.Tasks.Task<ServerSearchResult>>();
 
             // Parse continuation token if present
@@ -367,8 +413,11 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 fanoutToken = FanoutContinuationToken.FromBase64String(searchOptions.ContinuationToken);
             }
 
-            // Create search tasks for each server
-            foreach (var server in enabledServers)
+            // Create search tasks for optimally selected servers
+            var serversToQuery = optimizationPlan.SelectedServers.Any() ? optimizationPlan.SelectedServers : enabledServers;
+            var startTime = DateTimeOffset.UtcNow;
+
+            foreach (var server in serversToQuery)
             {
                 var serverToken = fanoutToken?.Servers?.FirstOrDefault(s => s.Endpoint == server.Id)?.Token;
                 var serverSearchOptions = CreateServerSearchOptions(searchOptions, serverToken);
@@ -379,6 +428,29 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             // Wait for all searches to complete
             var searchResults = await System.Threading.Tasks.Task.WhenAll(searchTasks);
+            var totalExecutionTime = (DateTimeOffset.UtcNow - startTime).TotalMilliseconds;
+
+            // Record query metrics for each server (fire and forget)
+            _ = Task.Run(async () =>
+            {
+                foreach (var result in searchResults)
+                {
+                    try
+                    {
+                        await _queryOptimizationService.RecordQueryMetricsAsync(
+                            result.ServerId,
+                            searchOptions,
+                            resourceType,
+                            (long)(totalExecutionTime / searchResults.Length), // Approximate per-server time
+                            result.SearchResult?.Results?.Count() ?? 0,
+                            result.IsSuccess);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to record query metrics for server {ServerId}", result.ServerId);
+                    }
+                }
+            }, cancellationToken);
 
             // Filter out failed results
             var successfulResults = searchResults.Where(r => r.IsSuccess).ToList();
