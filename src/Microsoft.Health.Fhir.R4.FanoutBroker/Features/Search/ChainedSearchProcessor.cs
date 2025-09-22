@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -19,6 +20,20 @@ using Microsoft.Health.Fhir.FanoutBroker.Models;
 
 namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 {
+    /// <summary>
+    /// Updated interface for chained search processing at the HTTP query level.
+    /// </summary>
+    [SuppressMessage("StyleCop.CSharp.DocumentationRules", "SA1649:FileNameMustMatchTypeName", Justification = "Interface and implementation belong together in this file")]
+    public interface IChainedSearchProcessor
+    {
+        Task<List<Tuple<string, string>>> ProcessChainedSearchAsync(
+            string resourceType,
+            IReadOnlyList<Tuple<string, string>> queryParameters,
+            CancellationToken cancellationToken);
+
+        IReadOnlyList<Tuple<string, string>> DetectChainedParameters(IReadOnlyList<Tuple<string, string>> queryParameters);
+    }
+
     /// <summary>
     /// Processes chained search expressions across multiple FHIR servers with timeout protection.
     /// This implementation works at the HTTP/query level rather than integrating deeply with the FHIR search engine.
@@ -607,19 +622,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                     paramName, processingTimeMs);
             }
         }
-    }
-
-    /// <summary>
-    /// Updated interface for chained search processing at the HTTP query level.
-    /// </summary>
-    public interface IChainedSearchProcessor
-    {
-        Task<List<Tuple<string, string>>> ProcessChainedSearchAsync(
-            string resourceType,
-            IReadOnlyList<Tuple<string, string>> queryParameters,
-            CancellationToken cancellationToken);
-
-        IReadOnlyList<Tuple<string, string>> DetectChainedParameters(IReadOnlyList<Tuple<string, string>> queryParameters);
     }
 
     /// <summary>

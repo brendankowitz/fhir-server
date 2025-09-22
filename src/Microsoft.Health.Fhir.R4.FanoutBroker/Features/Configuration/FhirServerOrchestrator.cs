@@ -321,7 +321,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
             }
         }
 
-
         private string BuildQueryString(SearchOptions searchOptions)
         {
             var queryParams = new List<string>();

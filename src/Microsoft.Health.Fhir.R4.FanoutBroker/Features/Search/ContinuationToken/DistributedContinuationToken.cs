@@ -16,6 +16,11 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.ContinuationToken
     /// </summary>
     public class DistributedContinuationToken
     {
+        private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+        };
+
         /// <summary>
         /// Per-server continuation tokens.
         /// </summary>
@@ -59,10 +64,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.ContinuationToken
         {
             try
             {
-                var json = JsonSerializer.Serialize(this, new JsonSerializerOptions
-                {
-                    PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
-                });
+                var json = JsonSerializer.Serialize(this, JsonOptions);
                 return Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(json));
             }
             catch (Exception ex)
@@ -82,10 +84,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.ContinuationToken
             try
             {
                 var json = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(token));
-                return JsonSerializer.Deserialize<DistributedContinuationToken>(json, new JsonSerializerOptions
-                {
-                    PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
-                });
+                return JsonSerializer.Deserialize<DistributedContinuationToken>(json, JsonOptions);
             }
             catch (Exception ex)
             {

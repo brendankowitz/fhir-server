@@ -4,6 +4,7 @@
 // -------------------------------------------------------------------------------------------------
 
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Health.Fhir.FanoutBroker.Models;
@@ -49,11 +50,15 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
         /// <summary>
         /// List of validation errors, if any.
         /// </summary>
+        [SuppressMessage("Microsoft.Design", "CA1002:DoNotExposeGenericLists", Justification = "Model class requires List<T> for simple string collection")]
+        [SuppressMessage("Microsoft.Design", "CA2227:CollectionPropertiesShouldBeReadOnly", Justification = "Model class requires setter for initialization")]
         public List<string> ValidationErrors { get; set; } = new List<string>();
 
         /// <summary>
         /// List of validation warnings, if any.
         /// </summary>
+        [SuppressMessage("Microsoft.Design", "CA1002:DoNotExposeGenericLists", Justification = "Model class requires List<T> for simple string collection")]
+        [SuppressMessage("Microsoft.Design", "CA2227:CollectionPropertiesShouldBeReadOnly", Justification = "Model class requires setter for initialization")]
         public List<string> ValidationWarnings { get; set; } = new List<string>();
 
         /// <summary>
@@ -85,6 +90,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
         /// <summary>
         /// Detailed results for each server.
         /// </summary>
+        [SuppressMessage("Microsoft.Design", "CA1002:DoNotExposeGenericLists", Justification = "Model class requires List<T> for simple validation results")]
+        [SuppressMessage("Microsoft.Design", "CA2227:CollectionPropertiesShouldBeReadOnly", Justification = "Model class requires setter for initialization")]
         public List<ServerValidationDetail> ServerDetails { get; set; } = new List<ServerValidationDetail>();
 
         /// <summary>
@@ -111,6 +118,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
         /// <summary>
         /// Server base URL.
         /// </summary>
+        [SuppressMessage("Microsoft.Design", "CA1056:UriPropertiesShouldNotBeStrings", Justification = "Model property needs string for validation results display")]
         public string BaseUrl { get; set; }
 
         /// <summary>
@@ -136,11 +144,15 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
         /// <summary>
         /// Any validation errors for this server.
         /// </summary>
+        [SuppressMessage("Microsoft.Design", "CA1002:DoNotExposeGenericLists", Justification = "Model class requires List<T> for simple string collection")]
+        [SuppressMessage("Microsoft.Design", "CA2227:CollectionPropertiesShouldBeReadOnly", Justification = "Model class requires setter for initialization")]
         public List<string> ValidationErrors { get; set; } = new List<string>();
 
         /// <summary>
         /// Any validation warnings for this server.
         /// </summary>
+        [SuppressMessage("Microsoft.Design", "CA1002:DoNotExposeGenericLists", Justification = "Model class requires List<T> for simple string collection")]
+        [SuppressMessage("Microsoft.Design", "CA2227:CollectionPropertiesShouldBeReadOnly", Justification = "Model class requires setter for initialization")]
         public List<string> ValidationWarnings { get; set; } = new List<string>();
     }
 }

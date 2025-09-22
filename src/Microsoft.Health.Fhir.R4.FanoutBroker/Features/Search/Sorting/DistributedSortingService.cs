@@ -12,6 +12,8 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
+using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Search.ContinuationToken;
 using Microsoft.Health.Fhir.FanoutBroker.Models;
@@ -46,10 +48,9 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Sorting
             _logger.LogInformation("Executing first page of sorted search across {ServerCount} servers", servers.Count);
 
             // Request N results from each server simultaneously
-            var requestedCount = searchOptions.MaxItemCount ?? _configuration.Value.MaxResultsPerServer;
+            var requestedCount = searchOptions.MaxItemCount > 0 ? searchOptions.MaxItemCount : _configuration.Value.MaxResultsPerServer;
             var serverTasks = servers.Select(server =>
-                _serverOrchestrator.SearchAsync(server, searchOptions, cancellationToken)
-            ).ToArray();
+                _serverOrchestrator.SearchAsync(server, searchOptions, cancellationToken)).ToArray();
 
             var serverResults = await Task.WhenAll(serverTasks);
             var successfulResults = serverResults.Where(r => r.IsSuccess).ToList();
@@ -67,16 +68,23 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Sorting
             var mergedResult = MergeAndSortResults(successfulResults, searchOptions, requestedCount);
 
             // Create distributed continuation token for next page
-            var continuationToken = CreateContinuationToken(successfulResults, searchOptions, mergedResult.Results);
-            if (continuationToken != null)
+            var continuationToken = CreateContinuationToken(successfulResults, searchOptions, mergedResult.Results.ToList());
+            var serializedToken = continuationToken?.Serialize();
+
+            // Create new SearchResult with continuation token
+            var finalResult = new SearchResult(
+                mergedResult.Results,
+                serializedToken,
+                mergedResult.SortOrder,
+                mergedResult.UnsupportedSearchParameters)
             {
-                mergedResult.ContinuationToken = continuationToken.Serialize();
-            }
+                TotalCount = mergedResult.TotalCount
+            };
 
             _logger.LogInformation("First page sorted search completed: {ResultCount} results, continuation: {HasContinuation}",
-                mergedResult.Results.Count, !string.IsNullOrEmpty(mergedResult.ContinuationToken));
+                finalResult.Results.Count(), !string.IsNullOrEmpty(finalResult.ContinuationToken));
 
-            return mergedResult;
+            return finalResult;
         }
 
         /// <inheritdoc />
@@ -125,19 +133,29 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Sorting
             var mergedResult = MergeAndSortResults(successfulResults, searchOptions, requestedCount);
 
             // Update distributed continuation token
-            var updatedToken = CreateContinuationToken(successfulResults, searchOptions, mergedResult.Results);
+            var updatedToken = CreateContinuationToken(successfulResults, searchOptions, mergedResult.Results.ToList());
             if (updatedToken != null)
             {
                 // Preserve the original sort criteria and page size
                 updatedToken.SortCriteria = distributedToken.SortCriteria;
                 updatedToken.PageSize = distributedToken.PageSize;
-                mergedResult.ContinuationToken = updatedToken.Serialize();
             }
+            var serializedToken = updatedToken?.Serialize();
+
+            // Create new SearchResult with continuation token
+            var finalResult = new SearchResult(
+                mergedResult.Results,
+                serializedToken,
+                mergedResult.SortOrder,
+                mergedResult.UnsupportedSearchParameters)
+            {
+                TotalCount = mergedResult.TotalCount
+            };
 
             _logger.LogInformation("Subsequent page sorted search completed: {ResultCount} results, continuation: {HasContinuation}",
-                mergedResult.Results.Count, !string.IsNullOrEmpty(mergedResult.ContinuationToken));
+                finalResult.Results.Count(), !string.IsNullOrEmpty(finalResult.ContinuationToken));
 
-            return mergedResult;
+            return finalResult;
         }
 
         /// <inheritdoc />
@@ -210,11 +228,13 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Sorting
                 return null; // No more pages available
             }
 
+            var sortCriteria = searchOptions.Sort?.Select(s =>
+                $"{(s.sortOrder == SortOrder.Descending ? "-" : string.Empty)}{s.searchParameterInfo.Name}") ?? System.Array.Empty<string>();
+
             var distributedToken = new DistributedContinuationToken
             {
-                PageSize = searchOptions.MaxItemCount ?? _configuration.Value.MaxResultsPerServer,
-                SortCriteria = string.Join(",", searchOptions.Sort?.Select(s =>
-                    $"{(s.sortOrder == SortOrder.Descending ? "-" : "")}{s.searchParameterInfo.Name}") ?? new string[0])
+                PageSize = searchOptions.MaxItemCount > 0 ? searchOptions.MaxItemCount : _configuration.Value.MaxResultsPerServer,
+                SortCriteria = string.Join(",", sortCriteria)
             };
 
             // Add server continuation tokens
@@ -230,7 +250,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Sorting
             // Extract last sort values from the returned results for proper continuation
             if (returnedResults.Any() && searchOptions.Sort?.Any() == true)
             {
-                var lastResult = returnedResults.Last();
+                var lastResult = returnedResults[returnedResults.Count - 1];
                 foreach (var sortParam in searchOptions.Sort)
                 {
                     var sortValue = ExtractSortValue(lastResult, sortParam.searchParameterInfo.Name);
@@ -290,7 +310,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Sorting
                 // This is a simplified implementation - a real implementation would use
                 // proper FHIR path evaluation based on the search parameter definition
 
-                if (entry?.Resource?.RawResource?.Data == null)
+                if (entry.Resource?.RawResource?.Data == null)
                     return null;
 
                 // Common sort parameters

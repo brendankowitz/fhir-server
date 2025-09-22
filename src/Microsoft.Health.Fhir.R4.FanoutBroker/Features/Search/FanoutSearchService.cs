@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -431,7 +432,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             var totalExecutionTime = (DateTimeOffset.UtcNow - startTime).TotalMilliseconds;
 
             // Record query metrics for each server (fire and forget)
-            _ = Task.Run(async () =>
+            _ = System.Threading.Tasks.Task.Run(async () =>
             {
                 foreach (var result in searchResults)
                 {
@@ -568,6 +569,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             return serverOptions;
         }
 
+        [SuppressMessage("Microsoft.Design", "CA1822:MarkMembersAsStatic", Justification = "Service method should remain instance method for consistency with service pattern")]
         private int DetermineStartingServerIndex(FanoutContinuationToken fanoutToken, List<FhirServerEndpoint> servers)
         {
             if (fanoutToken?.Servers == null || !fanoutToken.Servers.Any())

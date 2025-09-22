@@ -12,6 +12,24 @@ using Microsoft.Health.Fhir.Core.Features.Search;
 namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 {
     /// <summary>
+    /// Resolution modes for chained searches and includes.
+    /// </summary>
+    public enum ResolutionMode
+    {
+        /// <summary>
+        /// Assumes resources and their references are co-located on the same servers.
+        /// Optimal performance for legacy deployments.
+        /// </summary>
+        Passthrough,
+
+        /// <summary>
+        /// Executes comprehensive cross-shard resolution for distributed scenarios.
+        /// Higher latency but complete results.
+        /// </summary>
+        Distributed,
+    }
+
+    /// <summary>
     /// Represents different resolution strategies for handling chained searches and includes
     /// across multiple FHIR servers with different data distribution patterns.
     /// </summary>
@@ -42,23 +60,5 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             IReadOnlyList<Tuple<string, string>> queryParameters,
             SearchResult mainSearchResult,
             CancellationToken cancellationToken);
-    }
-
-    /// <summary>
-    /// Resolution modes for chained searches and includes.
-    /// </summary>
-    public enum ResolutionMode
-    {
-        /// <summary>
-        /// Assumes resources and their references are co-located on the same servers.
-        /// Optimal performance for legacy deployments.
-        /// </summary>
-        Passthrough,
-
-        /// <summary>
-        /// Executes comprehensive cross-shard resolution for distributed scenarios.
-        /// Higher latency but complete coverage across all servers.
-        /// </summary>
-        Distributed
     }
 }

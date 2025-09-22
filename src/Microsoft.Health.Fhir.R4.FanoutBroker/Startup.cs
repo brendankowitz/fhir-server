@@ -36,12 +36,15 @@ using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
 using Microsoft.Health.Fhir.Core.Features.Validation;
 using Microsoft.Health.Fhir.Core.Messages.Bundle;
 using Microsoft.Health.Fhir.Core.Models;
+using Microsoft.Health.Fhir.FanoutBroker.Extensions;
+using Microsoft.Health.Fhir.FanoutBroker.Features.CircuitBreaker;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Conformance;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Health;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Protection;
 using Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Search;
+using Microsoft.Health.Fhir.FanoutBroker.Features.Search.Sorting;
 using Microsoft.Health.Fhir.FanoutBroker.Models;
 using Microsoft.Health.Fhir.FanoutBroker.Modules;
 
@@ -76,28 +79,11 @@ namespace Microsoft.Health.Fhir.FanoutBroker
             services.AddHttpClient();
             services.AddLogging();
 
-            // Add fanout-specific services
-            services.AddScoped<IExecutionStrategyAnalyzer, ExecutionStrategyAnalyzer>();
-            services.AddScoped<IFhirServerOrchestrator, FhirServerOrchestrator>();
-            services.AddScoped<IResultAggregator, ResultAggregator>();
-            services.AddScoped<IChainedSearchProcessor, ChainedSearchProcessor>();
-            services.AddScoped<IIncludeProcessor, IncludeProcessor>();
+            // Add all fanout broker services
+            services.AddFanoutBrokerServices();
+
+            // Add conformance provider (additional interface registration)
             services.AddScoped<IConformanceProvider, FanoutCapabilityStatementProvider>();
-            services.AddScoped<IFanoutCapabilityStatementProvider, FanoutCapabilityStatementProvider>();
-            services.AddScoped<ISearchService, FanoutSearchService>();
-            services.AddScoped<IConfigurationValidationService, ConfigurationValidationService>();
-            services.AddScoped<IResourceProtectionService, ResourceProtectionService>();
-            services.AddScoped<IQueryOptimizationService, QueryOptimizationService>();
-
-            // Add resolution strategy services
-            services.AddScoped<IResolutionStrategyFactory, ResolutionStrategyFactory>();
-            services.AddScoped<PassthroughResolutionStrategy>();
-            services.AddScoped<DistributedResolutionStrategy>();
-
-            // Add expression-based resolution strategy services
-            services.AddScoped<IExpressionResolutionStrategyFactory, ExpressionResolutionStrategyFactory>();
-            services.AddScoped<ExpressionDistributedResolutionStrategy>();
-            services.AddScoped<ExpressionPassthroughResolutionStrategy>();
             services.AddSingleton<IResourceDeserializer, ResourceDeserializer>();
             AddSerializers(services);
 
@@ -156,6 +142,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker
             services.AddSingleton(jsonSerializer);
             services.AddSingleton(xmlParser);
             services.AddSingleton(xmlSerializer);
+
             // services.AddSingleton<BundleSerializer>();
 
             FhirPathCompiler.DefaultSymbolTable.AddFhirExtensions();

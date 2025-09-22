@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Search.ContinuationToken;
 using Microsoft.Health.Fhir.FanoutBroker.Models;
 

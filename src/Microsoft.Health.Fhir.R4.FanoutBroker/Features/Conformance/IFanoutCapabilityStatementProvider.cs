@@ -4,6 +4,7 @@
 // -------------------------------------------------------------------------------------------------
 
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
 using Hl7.Fhir.Model;
@@ -62,6 +63,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
         /// <summary>
         /// Server base URL.
         /// </summary>
+        [SuppressMessage("Microsoft.Design", "CA1056:UriPropertiesShouldNotBeStrings", Justification = "Model property needs string for result display")]
         public string ServerBaseUrl { get; set; }
 
         /// <summary>

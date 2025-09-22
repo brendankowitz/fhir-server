@@ -291,6 +291,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to generate self link for bundle");
+
                 // Continue execution - self link generation failure shouldn't break the response
             }
 
@@ -316,6 +317,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Controllers
                 {
                     _logger.LogWarning(ex, "Failed to generate next link for bundle with continuation token: {Token}",
                         searchResult.ContinuationToken);
+
                     // Continue execution - next link generation failure shouldn't break the response
                 }
             }

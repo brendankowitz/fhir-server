@@ -39,7 +39,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Protection
 
         // Garbage collection monitoring
         private long _lastGen2Collections;
-        private readonly object _lockObject = new object();
 
         public ResourceProtectionService(
             IOptions<FanoutBrokerConfiguration> configuration,
@@ -316,7 +315,16 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Protection
 
         public void Dispose()
         {
-            _memoryMonitorTimer?.Dispose();
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _memoryMonitorTimer?.Dispose();
+            }
         }
     }
 }

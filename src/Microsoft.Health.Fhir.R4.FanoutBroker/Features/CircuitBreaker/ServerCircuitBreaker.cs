@@ -15,10 +15,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.CircuitBreaker
     /// <summary>
     /// Circuit breaker implementation for protecting against cascade failures.
     /// </summary>
-    public class CircuitBreaker : ICircuitBreaker
+    public class ServerCircuitBreaker : ICircuitBreaker
     {
         private readonly IOptions<FanoutBrokerConfiguration> _configuration;
-        private readonly ILogger<CircuitBreaker> _logger;
+        private readonly ILogger<ServerCircuitBreaker> _logger;
         private readonly object _lock = new object();
 
         private CircuitBreakerState _state = CircuitBreakerState.Closed;
@@ -26,10 +26,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.CircuitBreaker
         private DateTimeOffset? _lastFailureTime;
         private DateTimeOffset? _nextAttemptTime;
 
-        public CircuitBreaker(
+        public ServerCircuitBreaker(
             string serverId,
             IOptions<FanoutBrokerConfiguration> configuration,
-            ILogger<CircuitBreaker> logger)
+            ILogger<ServerCircuitBreaker> logger)
         {
             ServerId = serverId ?? throw new ArgumentNullException(nameof(serverId));
             _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
@@ -78,8 +78,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.CircuitBreaker
         /// <inheritdoc />
         public async Task<T> ExecuteAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default)
         {
-            if (operation == null)
-                throw new ArgumentNullException(nameof(operation));
+            ArgumentNullException.ThrowIfNull(operation);
 
             // Check if circuit breaker should allow the request
             if (!ShouldAllowRequest())
@@ -180,6 +179,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.CircuitBreaker
                             _logger.LogInformation("Circuit breaker for server {ServerId} transitioning from Open to HalfOpen for test request", ServerId);
                             return true;
                         }
+
                         return false;
 
                     case CircuitBreakerState.HalfOpen:

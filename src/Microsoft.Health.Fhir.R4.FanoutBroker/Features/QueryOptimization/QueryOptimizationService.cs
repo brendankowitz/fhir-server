@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Conformance;
 using Microsoft.Health.Fhir.FanoutBroker.Models;
@@ -21,7 +22,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
     /// <summary>
     /// Advanced query optimization service with cost analysis and server capability awareness.
     /// </summary>
-    public class QueryOptimizationService : IQueryOptimizationService
+    public class QueryOptimizationService : IQueryOptimizationService, IDisposable
     {
         private readonly IFanoutCapabilityStatementProvider _capabilityProvider;
         private readonly IOptions<FanoutBrokerConfiguration> _configuration;
@@ -84,7 +85,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
             }
 
             // Analyze result count
-            var maxResults = searchOptions.MaxItemCount ?? 50;
+            var maxResults = searchOptions.MaxItemCount > 0 ? searchOptions.MaxItemCount : 50;
             if (maxResults > 100)
             {
                 analysis.EstimatedCost += (maxResults - 100) / 10;
@@ -252,15 +253,15 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
             await Task.CompletedTask; // For potential async persistence in the future
         }
 
-        public async Task<ServerPerformanceMetrics> GetServerPerformanceAsync(string serverId)
+        public Task<ServerPerformanceMetrics> GetServerPerformanceAsync(string serverId)
         {
             if (_serverMetrics.TryGetValue(serverId, out var metrics))
             {
-                return metrics;
+                return Task.FromResult(metrics);
             }
 
             // Return default metrics for unknown servers
-            return new ServerPerformanceMetrics
+            return Task.FromResult(new ServerPerformanceMetrics
             {
                 ServerId = serverId,
                 AverageResponseTimeMs = 1000, // Default assumption
@@ -269,7 +270,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
                 IsHealthy = true,
                 PerformanceRating = 5, // Neutral rating
                 LastUpdated = DateTimeOffset.UtcNow
-            };
+            });
         }
 
         public async Task<QueryExecutionStrategy> RecommendExecutionStrategyAsync(
@@ -341,7 +342,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
                 p.Item1.Equals("_revinclude", StringComparison.OrdinalIgnoreCase)) == true;
         }
 
-        private async Task<List<QueryMetric>> GetHistoricalMetricsAsync(string resourceType, SearchOptions searchOptions)
+        private Task<List<QueryMetric>> GetHistoricalMetricsAsync(string resourceType, SearchOptions searchOptions)
         {
             var queryHash = CalculateQueryHash(searchOptions, resourceType);
             var historyKey = $"{resourceType}:{queryHash}";
@@ -349,11 +350,11 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
             if (_queryHistory.TryGetValue(historyKey, out var history))
             {
                 // Return recent successful queries
-                return history.Where(m => m.WasSuccessful && m.Timestamp > DateTimeOffset.UtcNow.AddDays(-7))
-                             .ToList();
+                return Task.FromResult(history.Where(m => m.WasSuccessful && m.Timestamp > DateTimeOffset.UtcNow.AddDays(-7))
+                             .ToList());
             }
 
-            return new List<QueryMetric>();
+            return Task.FromResult(new List<QueryMetric>());
         }
 
         private bool SupportsQuery(Hl7.Fhir.Model.CapabilityStatement capabilityStatement, string resourceType, SearchOptions searchOptions)
@@ -480,7 +481,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
 
             hashComponents.Add($"count:{searchOptions.MaxItemCount}");
 
-            return string.Join("|", hashComponents.OrderBy(h => h)).GetHashCode().ToString();
+            return string.Join("|", hashComponents.OrderBy(h => h)).GetHashCode(StringComparison.Ordinal).ToString();
         }
 
         private ServerPerformanceMetrics CreateInitialServerMetrics(string serverId, QueryMetric metric)
@@ -588,7 +589,16 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
 
         public void Dispose()
         {
-            _metricsCleanupTimer?.Dispose();
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _metricsCleanupTimer?.Dispose();
+            }
         }
     }
 

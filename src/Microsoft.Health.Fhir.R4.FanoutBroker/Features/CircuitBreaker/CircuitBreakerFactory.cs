@@ -18,12 +18,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.CircuitBreaker
     public class CircuitBreakerFactory : ICircuitBreakerFactory
     {
         private readonly IOptions<FanoutBrokerConfiguration> _configuration;
-        private readonly ILogger<CircuitBreaker> _circuitBreakerLogger;
+        private readonly ILogger<ServerCircuitBreaker> _circuitBreakerLogger;
         private readonly ConcurrentDictionary<string, ICircuitBreaker> _circuitBreakers = new();
 
         public CircuitBreakerFactory(
             IOptions<FanoutBrokerConfiguration> configuration,
-            ILogger<CircuitBreaker> circuitBreakerLogger)
+            ILogger<ServerCircuitBreaker> circuitBreakerLogger)
         {
             _configuration = configuration ?? throw new System.ArgumentNullException(nameof(configuration));
             _circuitBreakerLogger = circuitBreakerLogger ?? throw new System.ArgumentNullException(nameof(circuitBreakerLogger));
@@ -36,7 +36,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.CircuitBreaker
                 throw new System.ArgumentException("Server ID cannot be null or empty", nameof(serverId));
 
             return _circuitBreakers.GetOrAdd(serverId, id =>
-                new CircuitBreaker(id, _configuration, _circuitBreakerLogger));
+                new ServerCircuitBreaker(id, _configuration, _circuitBreakerLogger));
         }
 
         /// <inheritdoc />

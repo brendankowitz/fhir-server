@@ -428,7 +428,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 chainInfo.ReferenceParameter, chainInfo.TargetResourceType, chainInfo.TargetParameter, chainParam.Item2);
 
             // Create sub-query parameters for the target resource
-            var subQueryParams = new[] { Tuple.Create(chainInfo.TargetParameter, chainParam.Item2) };
+            var subQueryParams = new List<Tuple<string, string>>
+            {
+                Tuple.Create(chainInfo.TargetParameter, chainParam.Item2),
+                // Add resource type hint to ensure correct URL construction (e.g., /Patient?birthdate=... not /?_type=Patient&birthdate=...)
+                Tuple.Create("resourceTypeHint", chainInfo.TargetResourceType)
+            };
 
             // Create search options for the sub-query
             var searchOptions = _searchOptionsFactory.Create(

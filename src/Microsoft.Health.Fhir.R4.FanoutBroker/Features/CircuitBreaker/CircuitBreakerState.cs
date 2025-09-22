@@ -23,6 +23,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.CircuitBreaker
         /// <summary>
         /// Circuit is half-open, allowing a limited number of test requests.
         /// </summary>
-        HalfOpen
+        HalfOpen,
     }
 }

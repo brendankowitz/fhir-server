@@ -23,7 +23,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
     /// Provides capability statement for the fanout broker service by intersecting
     /// capabilities from target FHIR servers.
     /// </summary>
-    public class FanoutCapabilityStatementProvider : IProvideCapability, IConformanceProvider
+    public class FanoutCapabilityStatementProvider : IProvideCapability, IConformanceProvider, IFanoutCapabilityStatementProvider
     {
         private readonly IFhirServerOrchestrator _serverOrchestrator;
         private readonly IOptions<FanoutBrokerConfiguration> _configuration;
@@ -233,6 +233,113 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Conformance
                 serverCount, resourceCapabilities.Count, string.Join(", ", supportMatrix.Select(kv => $"{kv.Key}:{kv.Value}")));
 
             return intersected;
+        }
+
+        /// <inheritdoc />
+        public async Task<IDictionary<string, ServerCapabilityResult>> GetServerCapabilitiesAsync(CancellationToken cancellationToken = default)
+        {
+            var enabledServers = _serverOrchestrator.GetEnabledServers();
+            var serverCapabilities = new Dictionary<string, ServerCapabilityResult>();
+
+            var capabilityTasks = enabledServers.Select(async server =>
+            {
+                try
+                {
+                    var capability = await _serverOrchestrator.GetCapabilityStatementAsync(server, cancellationToken);
+                    return new KeyValuePair<string, ServerCapabilityResult>(server.Id, new ServerCapabilityResult
+                    {
+                        ServerId = capability.ServerId,
+                        ServerBaseUrl = server.BaseUrl,
+                        IsSuccess = capability.IsSuccess,
+                        CapabilityStatement = capability.CapabilityStatement,
+                        ErrorMessage = capability.ErrorMessage,
+                        ResponseTimeMs = capability.ResponseTimeMs
+                    });
+                }
+                catch (Exception ex)
+                {
+                    return new KeyValuePair<string, ServerCapabilityResult>(server.Id, new ServerCapabilityResult
+                    {
+                        ServerId = server.Id,
+                        ServerBaseUrl = server.BaseUrl,
+                        IsSuccess = false,
+                        ErrorMessage = ex.Message
+                    });
+                }
+            });
+
+            var results = await Task.WhenAll(capabilityTasks);
+            foreach (var result in results)
+            {
+                serverCapabilities[result.Key] = result.Value;
+            }
+
+            return serverCapabilities;
+        }
+
+        /// <inheritdoc />
+        public async Task<bool> IsSearchParameterSupportedAsync(string resourceType, string searchParameter, CancellationToken cancellationToken = default)
+        {
+            var serverCapabilities = await GetServerCapabilitiesAsync(cancellationToken);
+
+            foreach (var capability in serverCapabilities.Values)
+            {
+                if (!capability.IsSuccess)
+                {
+                    continue;
+                }
+
+                var resourceCapability = capability.CapabilityStatement?.Rest?.FirstOrDefault()?.Resource?
+                    .FirstOrDefault(r => r.Type?.ToString().Equals(resourceType, StringComparison.OrdinalIgnoreCase) == true);
+
+                if (resourceCapability?.SearchParam?.Any(sp => sp.Name.Equals(searchParameter, StringComparison.OrdinalIgnoreCase)) != true)
+                {
+                    return false; // At least one server doesn't support this parameter
+                }
+            }
+
+            return true; // All servers support this parameter
+        }
+
+        /// <inheritdoc />
+        public async Task<IReadOnlyList<string>> GetSupportedResourceTypesAsync(CancellationToken cancellationToken = default)
+        {
+            var serverCapabilities = await GetServerCapabilitiesAsync(cancellationToken);
+            var supportedTypes = new HashSet<string>();
+            var serverCount = serverCapabilities.Values.Count(c => c.IsSuccess);
+
+            if (serverCount == 0)
+            {
+                return new List<string>();
+            }
+
+            // Count how many servers support each resource type
+            var resourceTypeSupport = new Dictionary<string, int>();
+
+            foreach (var capability in serverCapabilities.Values)
+            {
+                if (!capability.IsSuccess)
+                {
+                    continue;
+                }
+
+                var resourceTypes = capability.CapabilityStatement?.Rest?.FirstOrDefault()?.Resource?
+                    .Select(r => r.Type?.ToString())
+                    .Where(t => !string.IsNullOrEmpty(t))
+                    .ToList() ?? new List<string>();
+
+                foreach (var resourceType in resourceTypes)
+                {
+                    resourceTypeSupport.TryGetValue(resourceType, out var count);
+                    resourceTypeSupport[resourceType] = count + 1;
+                }
+            }
+
+            // Return resource types supported by all servers
+            return resourceTypeSupport
+                .Where(kvp => kvp.Value == serverCount)
+                .Select(kvp => kvp.Key)
+                .ToList();
         }
 
         private CapabilityStatement.ResourceComponent IntersectResourceCapabilities(

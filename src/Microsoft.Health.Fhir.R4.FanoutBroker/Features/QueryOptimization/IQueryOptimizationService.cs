@@ -3,7 +3,9 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
+using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Health.Fhir.Core.Features.Search;
@@ -11,6 +13,37 @@ using Microsoft.Health.Fhir.FanoutBroker.Models;
 
 namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
 {
+    /// <summary>
+    /// Query execution strategy options.
+    /// </summary>
+    public enum QueryExecutionStrategy
+    {
+        /// <summary>
+        /// Execute on all available servers in parallel.
+        /// </summary>
+        ParallelAll,
+
+        /// <summary>
+        /// Execute on a subset of optimal servers in parallel.
+        /// </summary>
+        ParallelOptimal,
+
+        /// <summary>
+        /// Execute on the single best server.
+        /// </summary>
+        SingleBest,
+
+        /// <summary>
+        /// Execute sequentially with fallback.
+        /// </summary>
+        SequentialFallback,
+
+        /// <summary>
+        /// Route to specific servers based on query characteristics.
+        /// </summary>
+        RoutedByQuery,
+    }
+
     /// <summary>
     /// Service for optimizing query distribution across multiple FHIR servers
     /// based on server capabilities, performance metrics, and query cost analysis.
@@ -100,6 +133,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
         /// <summary>
         /// Factors that contribute to the query cost.
         /// </summary>
+        [SuppressMessage("Microsoft.Design", "CA1002:DoNotExposeGenericLists", Justification = "Model class requires List<T> for JSON serialization")]
+        [SuppressMessage("Microsoft.Design", "CA2227:CollectionPropertiesShouldBeReadOnly", Justification = "Model class requires setter for JSON deserialization")]
         public List<string> CostFactors { get; set; } = new List<string>();
 
         /// <summary>
@@ -110,6 +145,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
         /// <summary>
         /// Optimization recommendations.
         /// </summary>
+        [SuppressMessage("Microsoft.Design", "CA1002:DoNotExposeGenericLists", Justification = "Model class requires List<T> for JSON serialization")]
+        [SuppressMessage("Microsoft.Design", "CA2227:CollectionPropertiesShouldBeReadOnly", Justification = "Model class requires setter for JSON deserialization")]
         public List<string> OptimizationRecommendations { get; set; } = new List<string>();
     }
 
@@ -121,11 +158,15 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
         /// <summary>
         /// Servers selected for execution, ordered by preference.
         /// </summary>
+        [SuppressMessage("Microsoft.Design", "CA1002:DoNotExposeGenericLists", Justification = "Model class requires List<T> for JSON serialization")]
+        [SuppressMessage("Microsoft.Design", "CA2227:CollectionPropertiesShouldBeReadOnly", Justification = "Model class requires setter for JSON deserialization")]
         public List<FhirServerEndpoint> SelectedServers { get; set; } = new List<FhirServerEndpoint>();
 
         /// <summary>
         /// Servers excluded from execution and reasons why.
         /// </summary>
+        [SuppressMessage("Microsoft.Design", "CA1002:DoNotExposeGenericLists", Justification = "Model class requires List<T> for JSON serialization")]
+        [SuppressMessage("Microsoft.Design", "CA2227:CollectionPropertiesShouldBeReadOnly", Justification = "Model class requires setter for JSON deserialization")]
         public List<ExcludedServer> ExcludedServers { get; set; } = new List<ExcludedServer>();
 
         /// <summary>
@@ -146,6 +187,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
         /// <summary>
         /// Reasoning behind the optimization decisions.
         /// </summary>
+        [SuppressMessage("Microsoft.Design", "CA1002:DoNotExposeGenericLists", Justification = "Model class requires List<T> for JSON serialization")]
+        [SuppressMessage("Microsoft.Design", "CA2227:CollectionPropertiesShouldBeReadOnly", Justification = "Model class requires setter for JSON deserialization")]
         public List<string> OptimizationReasoning { get; set; } = new List<string>();
     }
 
@@ -208,42 +251,13 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization
         /// <summary>
         /// Resource types this server handles well.
         /// </summary>
+        [SuppressMessage("Microsoft.Design", "CA1002:DoNotExposeGenericLists", Justification = "Model class requires List<T> for JSON serialization")]
+        [SuppressMessage("Microsoft.Design", "CA2227:CollectionPropertiesShouldBeReadOnly", Justification = "Model class requires setter for JSON deserialization")]
         public List<string> OptimalResourceTypes { get; set; } = new List<string>();
 
         /// <summary>
         /// Last updated timestamp.
         /// </summary>
         public DateTimeOffset LastUpdated { get; set; }
-    }
-
-    /// <summary>
-    /// Query execution strategy options.
-    /// </summary>
-    public enum QueryExecutionStrategy
-    {
-        /// <summary>
-        /// Execute on all available servers in parallel.
-        /// </summary>
-        ParallelAll,
-
-        /// <summary>
-        /// Execute on a subset of optimal servers in parallel.
-        /// </summary>
-        ParallelOptimal,
-
-        /// <summary>
-        /// Execute on the single best server.
-        /// </summary>
-        SingleBest,
-
-        /// <summary>
-        /// Execute sequentially with fallback.
-        /// </summary>
-        SequentialFallback,
-
-        /// <summary>
-        /// Route to specific servers based on query characteristics.
-        /// </summary>
-        RoutedByQuery
     }
 }

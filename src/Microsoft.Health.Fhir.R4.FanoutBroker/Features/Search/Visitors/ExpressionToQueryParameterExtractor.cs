@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
+using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.ValueSets;
 
 namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
@@ -382,7 +383,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
 
         private static string ConvertBinaryExpression(BinaryExpression expression)
         {
-            var value = expression.Value?.ToString() ?? string.Empty;
+            var value = FormatValueForFhir(expression.Value);
 
             return expression.BinaryOperator switch
             {
@@ -393,6 +394,27 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
                 BinaryOperator.LessThanOrEqual => "le" + value,
                 BinaryOperator.NotEqual => "ne" + value,
                 _ => value
+            };
+        }
+
+        /// <summary>
+        /// Formats a value appropriately for FHIR query parameters, handling dates correctly.
+        /// </summary>
+        private static string FormatValueForFhir(object value)
+        {
+            if (value == null)
+                return string.Empty;
+
+            return value switch
+            {
+                // Handle PartialDateTime objects using their proper ToString() method
+                PartialDateTime partialDateTime => partialDateTime.ToString(),
+                // Handle standard .NET date types - format as FHIR date strings
+                DateTime dateTime => dateTime.ToString("yyyy-MM-dd"),
+                DateTimeOffset dateTimeOffset => dateTimeOffset.ToString("yyyy-MM-dd"),
+                DateOnly dateOnly => dateOnly.ToString("yyyy-MM-dd"),
+                // For all other types, use standard string conversion
+                _ => value.ToString()
             };
         }
 
@@ -476,7 +498,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
                     }
                     else
                     {
-                        return value.ToString();
+                        return FormatValueForFhir(value);
                     }
                 }
             }
@@ -493,7 +515,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
                     {
                         if (item != null)
                         {
-                            stringValues.Add(item.ToString());
+                            stringValues.Add(FormatValueForFhir(item));
                         }
                     }
                     return string.Join(",", stringValues);

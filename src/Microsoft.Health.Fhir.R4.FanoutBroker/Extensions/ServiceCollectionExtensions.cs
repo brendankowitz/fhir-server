@@ -4,7 +4,15 @@
 // -------------------------------------------------------------------------------------------------
 
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.FanoutBroker.Features.CircuitBreaker;
+using Microsoft.Health.Fhir.FanoutBroker.Features.Configuration;
+using Microsoft.Health.Fhir.FanoutBroker.Features.Conformance;
 using Microsoft.Health.Fhir.FanoutBroker.Features.Health;
+using Microsoft.Health.Fhir.FanoutBroker.Features.Protection;
+using Microsoft.Health.Fhir.FanoutBroker.Features.QueryOptimization;
+using Microsoft.Health.Fhir.FanoutBroker.Features.Search;
+using Microsoft.Health.Fhir.FanoutBroker.Features.Search.Sorting;
 
 namespace Microsoft.Health.Fhir.FanoutBroker.Extensions
 {
@@ -53,24 +61,45 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Extensions
             // For now, this is a placeholder
             return services;
         }
-    }
 
-    /// <summary>
-    /// Extension methods for configuring the application pipeline for FHIR services.
-    /// </summary>
-    public static class ApplicationBuilderExtensions
-    {
         /// <summary>
-        /// Adds FHIR server middleware to the application pipeline.
+        /// Adds all fanout broker services and components to the service collection.
         /// </summary>
-        /// <param name="app">The application builder.</param>
-        /// <returns>Application builder for chaining.</returns>
-        public static Microsoft.AspNetCore.Builder.IApplicationBuilder UseFhirServer(
-            this Microsoft.AspNetCore.Builder.IApplicationBuilder app)
+        /// <param name="services">The service collection.</param>
+        /// <returns>Service collection for chaining.</returns>
+        public static IServiceCollection AddFanoutBrokerServices(this IServiceCollection services)
         {
-            // In a real implementation, this would add FHIR-specific middleware
-            // For now, this is a placeholder
-            return app;
+            // Core fanout services
+            services.AddScoped<IExecutionStrategyAnalyzer, ExecutionStrategyAnalyzer>();
+            services.AddScoped<IFhirServerOrchestrator, FhirServerOrchestrator>();
+            services.AddScoped<IResultAggregator, ResultAggregator>();
+            services.AddScoped<IChainedSearchProcessor, ChainedSearchProcessor>();
+            services.AddScoped<IIncludeProcessor, IncludeProcessor>();
+            services.AddScoped<IFanoutCapabilityStatementProvider, FanoutCapabilityStatementProvider>();
+            services.AddScoped<ISearchService, FanoutSearchService>();
+            services.AddScoped<IConfigurationValidationService, ConfigurationValidationService>();
+
+            // Resource protection and optimization
+            services.AddScoped<IResourceProtectionService, ResourceProtectionService>();
+            services.AddScoped<IQueryOptimizationService, SimpleQueryOptimizationService>();
+
+            // Circuit breaker services (singleton for shared state)
+            services.AddSingleton<ICircuitBreakerFactory, CircuitBreakerFactory>();
+
+            // Distributed sorting service
+            services.AddScoped<IDistributedSortingService, DistributedSortingService>();
+
+            // Resolution strategy services
+            services.AddScoped<IResolutionStrategyFactory, ResolutionStrategyFactory>();
+            services.AddScoped<PassthroughResolutionStrategy>();
+            services.AddScoped<DistributedResolutionStrategy>();
+
+            // Expression-based resolution strategy services
+            services.AddScoped<IExpressionResolutionStrategyFactory, ExpressionResolutionStrategyFactory>();
+            services.AddScoped<ExpressionDistributedResolutionStrategy>();
+            services.AddScoped<ExpressionPassthroughResolutionStrategy>();
+
+            return services;
         }
     }
 }
