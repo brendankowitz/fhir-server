@@ -10,11 +10,9 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
-using Hl7.Fhir.Model;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Health.Fhir.Core.Extensions;
-using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Models;
@@ -35,7 +33,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         private readonly IFhirServerOrchestrator _serverOrchestrator;
         private readonly IResultAggregator _resultAggregator;
         private readonly ISearchOptionsFactory _searchOptionsFactory;
-        private readonly IChainedSearchProcessor _chainedSearchProcessor;
         private readonly IIncludeProcessor _includeProcessor;
         private readonly IResourceProtectionService _resourceProtectionService;
         private readonly IQueryOptimizationService _queryOptimizationService;
@@ -48,7 +45,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             IFhirServerOrchestrator serverOrchestrator,
             IResultAggregator resultAggregator,
             ISearchOptionsFactory searchOptionsFactory,
-            IChainedSearchProcessor chainedSearchProcessor,
             IIncludeProcessor includeProcessor,
             IResourceProtectionService resourceProtectionService,
             IQueryOptimizationService queryOptimizationService,
@@ -60,7 +56,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             _serverOrchestrator = EnsureArg.IsNotNull(serverOrchestrator, nameof(serverOrchestrator));
             _resultAggregator = EnsureArg.IsNotNull(resultAggregator, nameof(resultAggregator));
             _searchOptionsFactory = EnsureArg.IsNotNull(searchOptionsFactory, nameof(searchOptionsFactory));
-            _chainedSearchProcessor = EnsureArg.IsNotNull(chainedSearchProcessor, nameof(chainedSearchProcessor));
             _includeProcessor = EnsureArg.IsNotNull(includeProcessor, nameof(includeProcessor));
             _resourceProtectionService = EnsureArg.IsNotNull(resourceProtectionService, nameof(resourceProtectionService));
             _queryOptimizationService = EnsureArg.IsNotNull(queryOptimizationService, nameof(queryOptimizationService));
@@ -129,14 +124,17 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             {
                 // If this is an $includes operation, handle it directly
                 if (isIncludesOperation)
-            {
-                return await _includeProcessor.ProcessIncludesOperationAsync(
-                    resourceType,
-                    queryParameters,
-                    cancellationToken);
-            }
+                {
+                    return await _includeProcessor.ProcessIncludesOperationAsync(
+                        resourceType,
+                        queryParameters,
+                        cancellationToken);
+                }
 
-                return await SearchInternalAsync(resourceType, searchOptions, queryParameters, cancellationToken);
+                // IMPORTANT: Delegate to the internal method that has expression-based processing
+                // This ensures that chained searches and includes use distributed resolution when configured
+                _logger.LogDebug("Delegating to expression-based search method for proper distributed resolution");
+                return await SearchInternalDelegateAsync(searchOptions, cancellationToken);
             }
             finally
             {
@@ -144,8 +142,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 _resourceProtectionService.EndSearchOperation(operationToken);
             }
         }
-
-    // Removed legacy CreateBasicSearchOptions fallback – SearchOptionsFactory now fully registered.
 
         /// <inheritdoc />
         public async System.Threading.Tasks.Task<SearchResult> SearchAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
@@ -172,11 +168,38 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             }
 
             // Fall back to parameter-based search for simple queries without expressions
-            var extractedParameters = ExtractQueryParametersFromExpression(searchOptions);
-            var queryParameters = new List<Tuple<string, string>>(extractedParameters);
-            queryParameters.AddRange(searchOptions.UnsupportedSearchParams);
+            // For cases without expressions, create SearchOptions with UnsupportedSearchParams
+            return await SearchInternalAsync(resourceType, searchOptions, cancellationToken);
+        }
 
-            return await SearchInternalAsync(resourceType, searchOptions, queryParameters, cancellationToken);
+        /// <summary>
+        /// Internal search method that bypasses protection service for recursive calls.
+        /// </summary>
+        private async Task<SearchResult> SearchInternalDelegateAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
+        {
+            var resourceType = GetResourceType(searchOptions);
+
+            // Check if this is an $includes operation
+            if (searchOptions.OnlyIds && searchOptions.UnsupportedSearchParams.Any(p => p.Item1.Equals("includesCt", StringComparison.OrdinalIgnoreCase)))
+            {
+                // This is an $includes operation request
+                return await _includeProcessor.ProcessIncludesOperationAsync(
+                    resourceType,
+                    searchOptions.UnsupportedSearchParams,
+                    cancellationToken);
+            }
+
+            // Always use expression-based processing if an expression is available
+            if (searchOptions.Expression != null)
+            {
+                _logger.LogInformation("Using expression-based processing for search. Expression type: {ExpressionType}",
+                    searchOptions.Expression.GetType().Name);
+                return await SearchWithExpressionAsync(searchOptions, cancellationToken);
+            }
+
+            // Fall back to parameter-based search for simple queries without expressions
+            // For cases without expressions, create SearchOptions with UnsupportedSearchParams
+            return await SearchInternalAsync(resourceType, searchOptions, cancellationToken);
         }
 
         /// <summary>
@@ -191,11 +214,11 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             _logger.LogInformation("Starting expression-based fanout search for resource type: {ResourceType}", resourceType);
 
-            // Check if we have an expression to work with
+            // Validate that we have an expression to work with
             if (searchOptions.Expression == null)
             {
-                _logger.LogDebug("No expression available, falling back to parameter-based search");
-                return await SearchAsync(searchOptions, cancellationToken);
+                throw new InvalidOperationException($"Expression-based search requires a search expression. " +
+                    $"Resource type: {resourceType}. Ensure search options are properly constructed with expression metadata.");
             }
 
             // Use expression-based strategy selection
@@ -205,9 +228,18 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
             try
             {
+                // pull out the _include and _revinclude expressions.
+                bool hasIncludeOrRevIncludeExpressions = searchOptions.Expression.ExtractIncludeAndChainedExpressions(
+                    out Expression expressionWithoutIncludes,
+                    out IReadOnlyList<IncludeExpression> includeExpressions,
+                    out IReadOnlyList<IncludeExpression> revIncludeExpressions,
+                    out IReadOnlyList<ChainedExpression> chainedExpressions);
+
                 // Phase 1: Process chained searches using expression metadata
                 var processedExpression = await resolutionStrategy.ProcessChainedSearchAsync(
                     searchOptions.Expression,
+                    expressionWithoutIncludes,
+                    chainedExpressions,
                     cancellationToken);
 
                 // Update search options with processed expression
@@ -223,12 +255,14 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 };
 
                 // Phase 2: Execute the main search with processed expression
-                var mainResult = await SearchInternalAsync(resourceType, updatedSearchOptions,
-                    ExtractQueryParametersFromExpression(updatedSearchOptions), cancellationToken);
+                var mainResult = await SearchInternalAsync(resourceType, updatedSearchOptions, cancellationToken);
 
                 // Phase 3: Process includes using expression metadata
                 var finalResult = await resolutionStrategy.ProcessIncludesAsync(
                     searchOptions.Expression,
+                    expressionWithoutIncludes,
+                    includeExpressions,
+                    revIncludeExpressions,
                     mainResult,
                     cancellationToken);
 
@@ -239,17 +273,18 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error in expression-based search, falling back to parameter-based search");
-
-                // Fallback to traditional parameter-based search
-                return await SearchAsync(searchOptions, cancellationToken);
+                _logger.LogError(ex, "Expression-based search failed for resource type: {ResourceType}", resourceType);
+                throw;
             }
         }
 
         /// <summary>
         /// Internal search method that handles the actual fanout logic with query optimization.
         /// </summary>
-        private async System.Threading.Tasks.Task<SearchResult> SearchInternalAsync(string resourceType, SearchOptions searchOptions, IReadOnlyList<Tuple<string, string>> queryParameters, CancellationToken cancellationToken)
+        private async System.Threading.Tasks.Task<SearchResult> SearchInternalAsync(
+            string resourceType,
+            SearchOptions searchOptions,
+            CancellationToken cancellationToken)
         {
             var resourceTypes = GetResourceTypes(searchOptions);
 
@@ -462,11 +497,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
         private SearchOptions CreateServerSearchOptions(SearchOptions originalOptions, string serverContinuationToken)
         {
-            // Extract query parameters from expression and merge with UnsupportedSearchParams
-            var expressionParameters = ExtractQueryParametersFromExpression(originalOptions);
-            var effectiveParams = new List<Tuple<string, string>>();
-            effectiveParams.AddRange(expressionParameters);
-            effectiveParams.AddRange(originalOptions.UnsupportedSearchParams);
+            // Preserve the original Expression - only convert to QueryString at server request time
+            var effectiveParams = new List<Tuple<string, string>>(originalOptions.UnsupportedSearchParams);
 
             // Add server-specific continuation token as a query parameter if present
             if (!string.IsNullOrEmpty(serverContinuationToken))
@@ -481,14 +513,19 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
                 _logger.LogDebug("Added server-specific continuation token for distributed sorting");
             }
 
-            // Since SearchOptions constructor is internal, we need to create a new instance through the factory
-            // and then manually copy over the relevant settings
-            var serverOptions = _searchOptionsFactory.Create(
-                GetResourceType(originalOptions),
-                effectiveParams,
-                false, // isAsyncOperation
-                ResourceVersionType.Latest,
-                originalOptions.OnlyIds);
+            // Create SearchOptions preserving the Expression
+            // Note: The Expression will be converted to QueryString only when making the actual HTTP request
+            var serverOptions = new SearchOptions
+            {
+                Expression = originalOptions.Expression, // Preserve the processed Expression with resolved IDs
+                Sort = originalOptions.Sort,
+                ContinuationToken = serverContinuationToken, // Use server-specific token
+                UnsupportedSearchParams = effectiveParams.AsReadOnly(),
+                OnlyIds = originalOptions.OnlyIds,
+                IncludeCount = originalOptions.IncludeCount,
+                CountOnly = originalOptions.CountOnly,
+                MaxItemCount = originalOptions.MaxItemCount > 0 ? originalOptions.MaxItemCount : 10 // Default to 10 if invalid
+            };
 
             return serverOptions;
         }

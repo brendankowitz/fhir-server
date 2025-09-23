@@ -47,7 +47,7 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search.Visito
             // Should generate exactly one parameter: subject:Patient.name=Sarah
             Assert.Single(parameters);
             Assert.Equal("subject:Patient.name", parameters[0].Item1);
-            Assert.Equal("Sarah*", parameters[0].Item2);
+            Assert.Equal("Sarah", parameters[0].Item2); // FHIR-compliant: no wildcard asterisk
 
             // Should NOT generate any _type parameters
             Assert.DoesNotContain(parameters, p => p.Item1 == "_type");
@@ -92,7 +92,7 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search.Visito
             // Should still generate exactly one parameter, not duplicates
             Assert.Single(parameters);
             Assert.Equal("subject:Patient.name", parameters[0].Item1);
-            Assert.Equal("Sarah*", parameters[0].Item2);
+            Assert.Equal("Sarah", parameters[0].Item2); // FHIR-compliant: no wildcard asterisk
         }
 
         [Fact]
@@ -255,6 +255,80 @@ namespace Microsoft.Health.Fhir.R4.FanoutBroker.UnitTests.Features.Search.Visito
                 Assert.Equal("subject", parameters[0].Item1);
                 Assert.Equal(expected, parameters[0].Item2);
             }
+        }
+
+        [Fact]
+        public void ReverseChainedExpression_ShouldGenerateCorrectHasSyntax()
+        {
+            // Arrange - Test for the specific issue: Patient?_has:Observation:patient:code=527
+            var extractor = new ExpressionToQueryParameterExtractor("Patient");
+
+            // Create the nested search parameter expression for "code" parameter
+            var codeSearchParam = new SearchParameterInfo("code", "code", SearchParamType.Token, null, null, "Observation.code", null);
+            var codeTokenExpr = SearchParamExpression.StringEquals(FieldName.TokenCode, 0, "527", false);
+            var codeSearchParamExpr = SearchParamExpression.SearchParameter(codeSearchParam, codeTokenExpr);
+
+            // Create the reverse chained expression for "_has:Observation:patient:code"
+            var patientSearchParam = new SearchParameterInfo("patient", "patient", SearchParamType.Reference, null, null, "Observation.patient", null);
+            var reverseChainedExpr = SearchParamExpression.Chained(
+                new[] { "Patient" },          // Source resource types (what we're searching for)
+                patientSearchParam,           // Reference parameter in Observation
+                new[] { "Observation" },      // Target resource types (where the reference lives)
+                true,                         // Reversed = true for _has queries
+                codeSearchParamExpr);
+
+            // Act
+            reverseChainedExpr.AcceptVisitor(extractor, null);
+
+            // Assert
+            var parameters = extractor.QueryParameters;
+
+            // Should generate exactly one parameter: _has:Observation:patient:code=527
+            Assert.Single(parameters);
+            Assert.Equal("_has:Observation:patient:code", parameters[0].Item1);
+            Assert.Equal("527", parameters[0].Item2);
+
+            // Should NOT generate any _type parameters for single resource type context
+            Assert.DoesNotContain(parameters, p => p.Item1 == "_type");
+
+            // Should NOT generate separate code parameters
+            Assert.DoesNotContain(parameters, p => p.Item1 == "code");
+        }
+
+        [Fact]
+        public void ReverseChainedExpression_ForGroupResource_ShouldGenerateCorrectHasSyntax()
+        {
+            // Arrange - Test the same _has query but for Group resource to ensure consistency
+            var extractor = new ExpressionToQueryParameterExtractor("Group");
+
+            // Create the nested search parameter expression for "code" parameter
+            var codeSearchParam = new SearchParameterInfo("code", "code", SearchParamType.Token, null, null, "Group.code", null);
+            var codeTokenExpr = SearchParamExpression.StringEquals(FieldName.TokenCode, 0, "527", false);
+            var codeSearchParamExpr = SearchParamExpression.SearchParameter(codeSearchParam, codeTokenExpr);
+
+            // Create the reverse chained expression (simulating a similar _has query for Group)
+            var memberSearchParam = new SearchParameterInfo("member", "member", SearchParamType.Reference, null, null, "Group.member", null);
+            var reverseChainedExpr = SearchParamExpression.Chained(
+                new[] { "Group" },            // Source resource types
+                memberSearchParam,            // Reference parameter
+                new[] { "Patient" },          // Target resource types
+                true,                         // Reversed = true for _has queries
+                codeSearchParamExpr);
+
+            // Act
+            reverseChainedExpr.AcceptVisitor(extractor, null);
+
+            // Assert
+            var parameters = extractor.QueryParameters;
+
+            // Should generate exactly one parameter with correct _has syntax
+            Assert.Single(parameters);
+            Assert.Equal("_has:Patient:member:code", parameters[0].Item1);
+            Assert.Equal("527", parameters[0].Item2);
+
+            // Should show consistent behavior with Patient resource type
+            Assert.DoesNotContain(parameters, p => p.Item1 == "_type");
+            Assert.DoesNotContain(parameters, p => p.Item1 == "code");
         }
     }
 }

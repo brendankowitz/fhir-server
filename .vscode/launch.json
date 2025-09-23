@@ -146,6 +146,23 @@
             }
         },
         {
+            "name": "FanoutBroker",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "buildFanoutBroker",
+            "program": "${workspaceFolder}/src/Microsoft.Health.Fhir.R4.FanoutBroker/bin/Debug/net9.0/Microsoft.Health.Fhir.R4.FanoutBroker.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}/src/Microsoft.Health.Fhir.R4.FanoutBroker",
+            "stopAtEntry": false,
+            "env": {
+                "ASPNETCORE_ENVIRONMENT": "Development",
+                "FhirServer:Security:Enabled": "false"
+            },
+            "sourceFileMap": {
+                "/Views": "${workspaceFolder}/Views"
+            }
+        },
+        {
             "name": ".NET Core Attach",
             "type": "coreclr",
             "request": "attach",

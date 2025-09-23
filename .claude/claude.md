@@ -1,0 +1,1 @@
+See `.github/copilot-instructions.md` for detailed coding standards and conventions.

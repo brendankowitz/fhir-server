@@ -131,8 +131,46 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
             // Do NOT add target resource types to _resourceTypes collection
             // as they are part of the chained parameter syntax
 
-            // For chained expressions, we need to handle nested SearchParameterExpression specially
-            if (expression.Expression is SearchParameterExpression nestedSearchParam)
+            // Handle reverse chained expressions (_has queries)
+            if (expression.Reversed)
+            {
+                if (expression.Expression is SearchParameterExpression reverseNestedSearchParam)
+                {
+                    // Reconstruct _has:TargetResourceType:ReferenceParam:NestedParam format
+                    var targetResourceType = expression.TargetResourceTypes?.Length > 0
+                        ? expression.TargetResourceTypes[0]
+                        : "Unknown";
+
+                    var hasParamName = $"_has:{targetResourceType}:{expression.ReferenceSearchParameter.Code}:{reverseNestedSearchParam.Parameter.Code}";
+                    var hasValue = ConvertExpressionToQueryValue(reverseNestedSearchParam.Expression);
+
+                    if (!string.IsNullOrEmpty(hasValue))
+                    {
+                        AddParameterIfNotExists(hasParamName, hasValue);
+                    }
+                }
+                else
+                {
+                    // Fallback for non-SearchParameterExpression cases in reverse chains
+                    var targetResourceType = expression.TargetResourceTypes?.Length > 0
+                        ? expression.TargetResourceTypes[0]
+                        : "Unknown";
+
+                    var hasParamName = $"_has:{targetResourceType}:{expression.ReferenceSearchParameter.Code}:_id";
+                    var hasValue = ConvertExpressionToQueryValue(expression.Expression);
+
+                    if (!string.IsNullOrEmpty(hasValue))
+                    {
+                        AddParameterIfNotExists(hasParamName, hasValue);
+                    }
+                }
+
+                // Do NOT call base.VisitChained() to prevent double-processing of nested expressions
+                return null;
+            }
+
+            // Handle forward chained expressions (existing logic)
+            if (expression.Expression is SearchParameterExpression forwardNestedSearchParam)
             {
                 // Reconstruct chained search parameter (e.g., "subject:Patient.name")
                 var chainedParamName = expression.ReferenceSearchParameter.Code;
@@ -151,10 +189,10 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
                 }
 
                 // Add the nested parameter name to create full chained parameter
-                chainedParamName += "." + nestedSearchParam.Parameter.Code;
+                chainedParamName += "." + forwardNestedSearchParam.Parameter.Code;
 
                 // Extract the value from the nested expression
-                var chainedValue = ConvertExpressionToQueryValue(nestedSearchParam.Expression);
+                var chainedValue = ConvertExpressionToQueryValue(forwardNestedSearchParam.Expression);
                 if (!string.IsNullOrEmpty(chainedValue))
                 {
                     AddParameterIfNotExists(chainedParamName, chainedValue);
@@ -303,15 +341,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
 
         public override object VisitCompartment(CompartmentSearchExpression expression, object context)
         {
-            // Handle reverse chained searches with _has syntax
-            // Note: _has searches are complex and may require special handling
-            // For now, reconstruct basic _has syntax
-            if (!string.IsNullOrEmpty(expression.CompartmentType) && !string.IsNullOrEmpty(expression.CompartmentId))
-            {
-                // This is a simplified approach - complex _has queries may need more sophisticated handling
-                var hasParameter = $"_has:{expression.CompartmentType}:patient:{expression.CompartmentId}";
-                AddParameterIfNotExists("_has", hasParameter);
-            }
+            // CompartmentSearchExpression is for FHIR Compartment searches like /Patient/{id}/Observation
+            // NOT for _has reverse chained searches
+            // _has queries should ONLY be handled in VisitChained method with expression.Reversed = true
+
+            // Only handle actual compartment searches here
+            // Do not attempt to reconstruct _has parameters from compartment expressions
 
             return base.VisitCompartment(expression, context);
         }
@@ -424,12 +459,12 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
 
             return expression.StringOperator switch
             {
-                StringOperator.StartsWith => value + "*",
-                StringOperator.EndsWith => "*" + value,
-                StringOperator.Contains => value, // For :contains modifier, use raw value
-                StringOperator.Equals => value,
-                StringOperator.NotStartsWith => "not:" + value + "*",
-                StringOperator.NotEndsWith => "not:*" + value,
+                StringOperator.StartsWith => value, // FHIR partial matching handles this natively
+                StringOperator.EndsWith => value,   // FHIR partial matching handles this natively
+                StringOperator.Contains => value,   // For :contains modifier, use raw value
+                StringOperator.Equals => value,     // For :exact modifier, use raw value
+                StringOperator.NotStartsWith => "not:" + value,
+                StringOperator.NotEndsWith => "not:" + value,
                 StringOperator.NotContains => "not:" + value,
                 _ => value
             };
@@ -476,68 +511,7 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search.Visitors
         /// </summary>
         private static string ConvertGenericExpression(Expression expression)
         {
-            // Try to extract value using reflection for known expression types that contain Value properties
-            var expressionType = expression.GetType();
-
-            // Look for Value property (common in reference and other expressions)
-            var valueProperty = expressionType.GetProperty("Value");
-            if (valueProperty != null)
-            {
-                var value = valueProperty.GetValue(expression);
-                if (value != null)
-                {
-                    // Handle reference values that might be Resource objects or strings
-                    if (value is string stringValue)
-                    {
-                        return stringValue;
-                    }
-                    else if (value.GetType().Name.Contains("Resource", StringComparison.OrdinalIgnoreCase) || value.ToString().Contains('/', StringComparison.Ordinal))
-                    {
-                        // This looks like a reference - preserve the full value
-                        return value.ToString();
-                    }
-                    else
-                    {
-                        return FormatValueForFhir(value);
-                    }
-                }
-            }
-
-            // Look for Values property (for collection-based expressions)
-            var valuesProperty = expressionType.GetProperty("Values");
-            if (valuesProperty != null && valuesProperty.PropertyType.IsGenericType)
-            {
-                var values = valuesProperty.GetValue(expression);
-                if (values is System.Collections.IEnumerable enumerable)
-                {
-                    var stringValues = new List<string>();
-                    foreach (var item in enumerable)
-                    {
-                        if (item != null)
-                        {
-                            stringValues.Add(FormatValueForFhir(item));
-                        }
-                    }
-                    return string.Join(",", stringValues);
-                }
-            }
-
-            // Check if this might be a reference expression by looking at the string representation
-            var stringRepresentation = expression.ToString();
-
-            // If the string contains reference patterns, preserve them
-            if (stringRepresentation.Contains('/', StringComparison.Ordinal) &&
-                (stringRepresentation.Contains("Patient/", StringComparison.Ordinal) ||
-                 stringRepresentation.Contains("Organization/", StringComparison.Ordinal) ||
-                 stringRepresentation.Contains("Practitioner/", StringComparison.Ordinal) ||
-                 stringRepresentation.Contains("Device/", StringComparison.Ordinal) ||
-                 stringRepresentation.Contains("Location/", StringComparison.Ordinal)))
-            {
-                return stringRepresentation;
-            }
-
-            // Default fallback
-            return stringRepresentation;
+            throw new NotSupportedException();
         }
 
         /// <summary>

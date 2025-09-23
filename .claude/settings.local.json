@@ -12,7 +12,8 @@
       "Bash(dotnet run:*)",
       "Bash(timeout:*)",
       "Bash(cat:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "mcp__ide__getDiagnostics"
     ],
     "deny": [],
     "ask": []

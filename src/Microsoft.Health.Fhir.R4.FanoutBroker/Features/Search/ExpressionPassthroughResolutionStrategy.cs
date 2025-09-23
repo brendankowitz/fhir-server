@@ -3,6 +3,7 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
@@ -36,25 +37,30 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 
         /// <inheritdoc />
         public Task<Expression> ProcessChainedSearchAsync(
-            Expression searchExpression,
+            Expression fullSearchExpression,
+            Expression expressionWithoutIncludes,
+            IReadOnlyList<ChainedExpression> chainedExpressions,
             CancellationToken cancellationToken)
         {
-            EnsureArg.IsNotNull(searchExpression, nameof(searchExpression));
+            EnsureArg.IsNotNull(fullSearchExpression, nameof(fullSearchExpression));
 
             _logger.LogDebug("Using passthrough strategy for chained search - returning original expression");
 
             // In passthrough mode, we don't modify the expression
             // The underlying FHIR server will handle chained searches directly
-            return Task.FromResult(searchExpression);
+            return Task.FromResult(fullSearchExpression);
         }
 
         /// <inheritdoc />
         public Task<SearchResult> ProcessIncludesAsync(
-            Expression searchExpression,
+            Expression fullSearchExpression,
+            Expression expressionWithoutIncludes,
+            IReadOnlyList<IncludeExpression> includeExpressions,
+            IReadOnlyList<IncludeExpression> revIncludeExpressions,
             SearchResult mainSearchResult,
             CancellationToken cancellationToken)
         {
-            EnsureArg.IsNotNull(searchExpression, nameof(searchExpression));
+            EnsureArg.IsNotNull(fullSearchExpression, nameof(fullSearchExpression));
             EnsureArg.IsNotNull(mainSearchResult, nameof(mainSearchResult));
 
             _logger.LogDebug("Using passthrough strategy for includes - returning main search result");

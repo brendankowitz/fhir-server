@@ -576,13 +576,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Configuration
                     searchEntryMode = SearchEntryMode.Outcome;
                 }
 
-                // Add server context to fullUrl for traceability
-                if (!string.IsNullOrEmpty(entry.FullUrl) && !entry.FullUrl.StartsWith(server.BaseUrl, StringComparison.OrdinalIgnoreCase))
-                {
-                    _logger.LogDebug("Entry fullUrl '{FullUrl}' does not match server base URL '{BaseUrl}' for resource {ResourceType}/{ResourceId}",
-                        entry.FullUrl, server.BaseUrl, resourceTypeName, resourceId);
-                }
-
                 return new SearchResultEntry(resourceWrapper, searchEntryMode);
             }
             catch (Exception ex)

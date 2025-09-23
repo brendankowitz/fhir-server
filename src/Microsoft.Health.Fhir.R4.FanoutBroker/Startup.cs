@@ -33,6 +33,7 @@ using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Access;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers;
 using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
+using Microsoft.Health.Fhir.Core.Features.Search.Registry;
 using Microsoft.Health.Fhir.Core.Features.Validation;
 using Microsoft.Health.Fhir.Core.Messages.Bundle;
 using Microsoft.Health.Fhir.Core.Models;
@@ -77,6 +78,9 @@ namespace Microsoft.Health.Fhir.FanoutBroker
             // Add core services
             services.AddControllers();
             services.AddHttpClient();
+            services.AddHttpContextAccessor(); // Required for UrlResolver
+            services.AddSingleton<Microsoft.AspNetCore.Mvc.Infrastructure.IActionContextAccessor, Microsoft.AspNetCore.Mvc.Infrastructure.ActionContextAccessor>(); // Required for UrlResolver
+            services.AddSingleton<Microsoft.Health.Fhir.Api.Features.Bundle.IBundleHttpContextAccessor, Microsoft.Health.Fhir.Api.Features.Bundle.BundleHttpContextAccessor>(); // Required for UrlResolver
             services.AddLogging();
 
             // Add all fanout broker services
@@ -122,6 +126,24 @@ namespace Microsoft.Health.Fhir.FanoutBroker
             services.AddScoped();
 
             services.AddTransient(typeof(IScopeProvider<>), typeof(ScopeProvider<>));
+
+            // Add missing factory registrations with stub implementations (for debugging only)
+            services.AddFactory<IScoped<IFhirOperationDataStore>>();
+            services.AddScoped<IFhirOperationDataStore>(_ => null);
+            services.AddTransient<Microsoft.Health.Core.Features.Security.Authorization.IAuthorizationService<Microsoft.Health.Fhir.Core.Features.Security.DataActions>>(_ =>
+                throw new System.NotSupportedException("Authorization service not available in FanoutBroker debug mode"));
+            services.AddTransient<Microsoft.Health.Fhir.Core.Features.Search.IDataStoreSearchParameterValidator>(_ =>
+                throw new System.NotSupportedException("DataStore search parameter validator not available in FanoutBroker debug mode"));
+
+            // Add factory registration for services needed by SearchParameterOperations
+            services.AddFactory<IScoped<ISearchService>>();
+
+            // Note: The following services are already registered by SearchModule as singletons:
+            // - ISearchParameterDefinitionManager (SearchParameterDefinitionManager)
+            // - ISearchParameterOperations (SearchParameterOperations)
+            // - SearchParameterStatusManager
+            // - ISearchParameterSupportResolver (SearchParameterSupportResolver)
+            // - ISearchParameterStatusDataStore (FilebasedSearchParameterStatusDataStore)
 
             // Add health checks
             services.AddHealthChecks()
