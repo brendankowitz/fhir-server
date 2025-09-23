@@ -39,6 +39,8 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         {
             EnsureArg.IsNotNull(searchExpression, nameof(searchExpression));
 
+            _logger.LogInformation("CreateStrategy called with expression type: {ExpressionType}", searchExpression.GetType().Name);
+
             // Analyze expression complexity to determine the best strategy
             var hasChainedSearches = ChainedSearchExtractionVisitor.HasChainedSearches(searchExpression);
             var hasIncludes = IncludeExtractionVisitor.HasIncludes(searchExpression);
@@ -46,22 +48,27 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
             var hasWildcardIncludes = IncludeExtractionVisitor.HasWildcardIncludes(searchExpression);
             var hasCircularIncludes = IncludeExtractionVisitor.HasCircularReferenceIncludes(searchExpression);
 
-            _logger.LogDebug("Expression analysis: ChainedSearches={HasChained}, Includes={HasIncludes}, " +
+            _logger.LogInformation("Expression analysis: ChainedSearches={HasChained}, Includes={HasIncludes}, " +
                             "IterativeIncludes={HasIterative}, WildcardIncludes={HasWildcard}, CircularIncludes={HasCircular}",
                 hasChainedSearches, hasIncludes, hasIterativeIncludes, hasWildcardIncludes, hasCircularIncludes);
+
+            _logger.LogInformation("Configuration: ChainedSearchResolution={ChainedMode}, IncludeResolution={IncludeMode}",
+                _configuration.Value.ChainedSearchResolution, _configuration.Value.IncludeResolution);
 
             // Determine strategy based on configuration and complexity
             var useDistributedStrategy = ShouldUseDistributedStrategy(
                 hasChainedSearches, hasIncludes, hasIterativeIncludes, hasWildcardIncludes, hasCircularIncludes);
 
+            _logger.LogInformation("ShouldUseDistributedStrategy result: {UseDistributed}", useDistributedStrategy);
+
             if (useDistributedStrategy)
             {
-                _logger.LogDebug("Creating ExpressionDistributedResolutionStrategy for complex expression");
+                _logger.LogInformation("Creating ExpressionDistributedResolutionStrategy for complex expression");
                 return _serviceProvider.GetRequiredService<ExpressionDistributedResolutionStrategy>();
             }
             else
             {
-                _logger.LogDebug("Creating ExpressionPassthroughResolutionStrategy for simple expression");
+                _logger.LogInformation("Creating ExpressionPassthroughResolutionStrategy for simple expression");
                 return _serviceProvider.GetRequiredService<ExpressionPassthroughResolutionStrategy>();
             }
         }

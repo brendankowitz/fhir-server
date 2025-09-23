@@ -89,11 +89,6 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Extensions
             // Distributed sorting service
             services.AddScoped<IDistributedSortingService, DistributedSortingService>();
 
-            // Resolution strategy services
-            services.AddScoped<IResolutionStrategyFactory, ResolutionStrategyFactory>();
-            services.AddScoped<PassthroughResolutionStrategy>();
-            services.AddScoped<DistributedResolutionStrategy>();
-
             // Expression-based resolution strategy services
             services.AddScoped<IExpressionResolutionStrategyFactory, ExpressionResolutionStrategyFactory>();
             services.AddScoped<ExpressionDistributedResolutionStrategy>();

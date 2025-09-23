@@ -61,6 +61,9 @@ namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
         {
             EnsureArg.IsNotNull(searchExpression, nameof(searchExpression));
 
+            _logger.LogInformation("ExpressionDistributedResolutionStrategy.ProcessChainedSearchAsync called with expression type: {ExpressionType}",
+                searchExpression.GetType().Name);
+
             var chainVisitor = new ChainedSearchExtractionVisitor();
             chainVisitor.Extract(searchExpression);
 

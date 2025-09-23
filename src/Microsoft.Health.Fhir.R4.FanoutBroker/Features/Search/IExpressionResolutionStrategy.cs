@@ -11,6 +11,24 @@ using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 namespace Microsoft.Health.Fhir.FanoutBroker.Features.Search
 {
     /// <summary>
+    /// Resolution modes for chained searches and includes.
+    /// </summary>
+    public enum ResolutionMode
+    {
+        /// <summary>
+        /// Assumes resources and their references are co-located on the same servers.
+        /// Optimal performance for legacy deployments.
+        /// </summary>
+        Passthrough,
+
+        /// <summary>
+        /// Executes comprehensive cross-shard resolution for distributed scenarios.
+        /// Higher latency but complete results.
+        /// </summary>
+        Distributed,
+    }
+
+    /// <summary>
     /// Interface for expression-based resolution strategies that can handle complex FHIR search scenarios
     /// including iterative includes, wildcard includes, and metadata-driven chained searches.
     /// This provides a more sophisticated approach compared to query parameter-based strategies.
