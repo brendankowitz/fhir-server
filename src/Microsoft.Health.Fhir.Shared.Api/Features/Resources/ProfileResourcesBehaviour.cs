@@ -6,7 +6,7 @@
 using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
-using MediatR;
+using Medino;
 using Microsoft.Health.Core.Features.Security.Authorization;
 using Microsoft.Health.Fhir.Core.Exceptions;
 using Microsoft.Health.Fhir.Core.Features.Security;
@@ -37,19 +37,19 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources
             _profilesResolver = profilesResolver;
         }
 
-        public async Task<UpsertResourceResponse> Handle(ConditionalUpsertResourceRequest request, RequestHandlerDelegate<UpsertResourceResponse> next, CancellationToken cancellationToken)
+        public async Task<UpsertResourceResponse> HandleAsync(ConditionalUpsertResourceRequest request, RequestHandlerDelegate<UpsertResourceResponse> next, CancellationToken cancellationToken)
             => await GenericHandle(request.Resource.InstanceType, request.IsBundleInnerRequest, next, cancellationToken);
 
-        public async Task<UpsertResourceResponse> Handle(ConditionalCreateResourceRequest request, RequestHandlerDelegate<UpsertResourceResponse> next, CancellationToken cancellationToken)
+        public async Task<UpsertResourceResponse> HandleAsync(ConditionalCreateResourceRequest request, RequestHandlerDelegate<UpsertResourceResponse> next, CancellationToken cancellationToken)
             => await GenericHandle(request.Resource.InstanceType, request.IsBundleInnerRequest, next, cancellationToken);
 
-        public async Task<UpsertResourceResponse> Handle(UpsertResourceRequest request, RequestHandlerDelegate<UpsertResourceResponse> next, CancellationToken cancellationToken)
+        public async Task<UpsertResourceResponse> HandleAsync(UpsertResourceRequest request, RequestHandlerDelegate<UpsertResourceResponse> next, CancellationToken cancellationToken)
             => await GenericHandle(request.Resource.InstanceType, request.IsBundleInnerRequest, next, cancellationToken);
 
-        public async Task<UpsertResourceResponse> Handle(CreateResourceRequest request, RequestHandlerDelegate<UpsertResourceResponse> next, CancellationToken cancellationToken)
+        public async Task<UpsertResourceResponse> HandleAsync(CreateResourceRequest request, RequestHandlerDelegate<UpsertResourceResponse> next, CancellationToken cancellationToken)
             => await GenericHandle(request.Resource.InstanceType, request.IsBundleInnerRequest, next, cancellationToken);
 
-        public async Task<DeleteResourceResponse> Handle(DeleteResourceRequest request, RequestHandlerDelegate<DeleteResourceResponse> next, CancellationToken cancellationToken)
+        public async Task<DeleteResourceResponse> HandleAsync(DeleteResourceRequest request, RequestHandlerDelegate<DeleteResourceResponse> next, CancellationToken cancellationToken)
             => await GenericHandle(request.ResourceKey.ResourceType, request.IsBundleInnerRequest, next, cancellationToken);
 
         private async Task<TResponse> GenericHandle<TResponse>(

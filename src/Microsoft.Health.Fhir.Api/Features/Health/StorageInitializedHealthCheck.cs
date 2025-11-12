@@ -7,7 +7,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
-using MediatR;
+using Medino;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Health.Core;
 using Microsoft.Health.Fhir.Core.Extensions;

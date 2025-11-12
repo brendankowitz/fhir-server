@@ -5,7 +5,7 @@
 
 using System.Threading;
 using System.Threading.Tasks;
-using MediatR;
+using Medino;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Health.Fhir.Core.Features.Health;
 

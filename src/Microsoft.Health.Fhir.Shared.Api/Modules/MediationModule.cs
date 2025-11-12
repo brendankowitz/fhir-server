@@ -6,8 +6,8 @@
 using System;
 using System.Linq;
 using EnsureThat;
-using MediatR;
-using MediatR.Pipeline;
+using Medino;
+using Medino.Pipeline;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Health.Extensions.DependencyInjection;
 using Microsoft.Health.Fhir.Core.Features.Conformance;
@@ -26,7 +26,7 @@ namespace Microsoft.Health.Fhir.Api.Modules
         {
             EnsureArg.IsNotNull(services, nameof(services));
 
-            services.AddMediatR(cfg =>
+            services.AddMedino(cfg =>
             {
                 cfg.RegisterServicesFromAssemblies(KnownAssemblies.All);
                 cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(RequestExceptionActionProcessorBehavior<,>));

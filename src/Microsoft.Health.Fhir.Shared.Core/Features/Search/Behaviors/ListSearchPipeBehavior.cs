@@ -9,7 +9,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
-using MediatR;
+using Medino;
 using Microsoft.Health.Extensions.DependencyInjection;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
@@ -50,7 +50,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Behavior
             _referenceSearchValueParser = referenceSearchValueParser;
         }
 
-        public async Task<SearchResourceResponse> Handle(SearchResourceRequest request, RequestHandlerDelegate<SearchResourceResponse> next, CancellationToken cancellationToken)
+        public async Task<SearchResourceResponse> HandleAsync(SearchResourceRequest request, RequestHandlerDelegate<SearchResourceResponse> next, CancellationToken cancellationToken)
         {
             EnsureArg.IsNotNull(request, nameof(request));
 

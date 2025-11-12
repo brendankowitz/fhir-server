@@ -8,7 +8,7 @@ using System.Collections.Generic;
 using System.Threading;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Rest;
-using MediatR;
+using Medino;
 using Microsoft.AspNetCore.Components.Forms;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;

@@ -11,7 +11,7 @@ using System.Net;
 using System.Threading.Tasks;
 using EnsureThat;
 using Hl7.Fhir.Model;
-using MediatR;
+using Medino;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.JsonPatch;
@@ -468,7 +468,7 @@ namespace Microsoft.Health.Fhir.Api.Controllers
 
             SetupConditionalRequestWithQueryOptimizeConcurrency();
 
-            DeleteResourceResponse response = await _mediator.Send(
+            DeleteResourceResponse response = await _mediator.SendAsync(
                 new ConditionalDeleteResourceRequest(
                     typeParameter,
                     conditionalParameters,

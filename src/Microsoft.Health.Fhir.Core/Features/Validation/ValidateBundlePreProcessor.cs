@@ -4,7 +4,7 @@
 // -------------------------------------------------------------------------------------------------
 
 using System.Threading;
-using MediatR.Pipeline;
+using Medino.Pipeline;
 using Microsoft.Health.Fhir.Core.Exceptions;
 using Microsoft.Health.Fhir.Core.Messages.Bundle;
 using Microsoft.Health.Fhir.Core.Models;

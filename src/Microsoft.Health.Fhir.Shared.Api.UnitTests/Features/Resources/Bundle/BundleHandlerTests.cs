@@ -10,7 +10,7 @@ using System.Linq;
 using System.Threading;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
-using MediatR;
+using Medino;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Http.Features.Authentication;
@@ -749,7 +749,7 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Resources.Bundle
                 .Do(RouteAsyncFunction);
 
             BundleMetricsNotification notification = null;
-            await _mediator.Publish(Arg.Do<BundleMetricsNotification>(note => notification = note), Arg.Any<CancellationToken>());
+            await _mediator.PublishAsync(Arg.Do<BundleMetricsNotification>(note => notification = note), Arg.Any<CancellationToken>());
 
             var bundleRequest = new BundleRequest(bundle.ToResourceElement());
             BundleResponse bundleResponse = await _bundleHandler.Handle(bundleRequest, default);
@@ -758,7 +758,7 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Resources.Bundle
             Assert.Equal(type == BundleType.Batch ? BundleType.BatchResponse : BundleType.TransactionResponse, bundleResource.Type);
             Assert.Equal(2, bundleResource.Entry.Count);
 
-            await _mediator.Received().Publish(Arg.Any<BundleMetricsNotification>(), Arg.Any<CancellationToken>());
+            await _mediator.Received().PublishAsync(Arg.Any<BundleMetricsNotification>(), Arg.Any<CancellationToken>());
 
             Assert.Equal(type == BundleType.Batch ? AuditEventSubType.Batch : AuditEventSubType.Transaction, notification.FhirOperation);
             Assert.Equal("https", notification.Protocol); // Verify protocol is set correctly
@@ -816,7 +816,7 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Resources.Bundle
             var bundleRequest = new BundleRequest(bundle.ToResourceElement());
             await Assert.ThrowsAsync<FhirTransactionFailedException>(() => _bundleHandler.Handle(bundleRequest, default));
 
-            await _mediator.DidNotReceive().Publish(Arg.Any<BundleMetricsNotification>(), Arg.Any<CancellationToken>());
+            await _mediator.DidNotReceive().PublishAsync(Arg.Any<BundleMetricsNotification>(), Arg.Any<CancellationToken>());
         }
 
         private void RouteAsyncFunction(CallInfo callInfo)

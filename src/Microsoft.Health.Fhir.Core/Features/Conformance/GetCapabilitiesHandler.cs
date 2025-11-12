@@ -6,7 +6,7 @@
 using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
-using MediatR;
+using Medino;
 using Microsoft.Health.Fhir.Core.Messages.Get;
 
 namespace Microsoft.Health.Fhir.Core.Features.Conformance

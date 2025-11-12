@@ -9,7 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
 using FluentValidation;
-using MediatR.Pipeline;
+using Medino.Pipeline;
 
 namespace Microsoft.Health.Fhir.Core.Features.Validation
 {

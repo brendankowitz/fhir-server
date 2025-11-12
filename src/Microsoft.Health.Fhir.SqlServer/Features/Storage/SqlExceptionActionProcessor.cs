@@ -9,7 +9,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
-using MediatR.Pipeline;
+using Medino.Pipeline;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Microsoft.Health.Fhir.Core.Exceptions;
@@ -29,7 +29,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
             _logger = EnsureArg.IsNotNull(logger, nameof(logger));
         }
 
-        public Task Execute(TRequest request, TException exception, CancellationToken cancellationToken)
+        public Task ExecuteAsync(TRequest request, TException exception, CancellationToken cancellationToken)
         {
             if (exception is SqlException sqlException)
             {
