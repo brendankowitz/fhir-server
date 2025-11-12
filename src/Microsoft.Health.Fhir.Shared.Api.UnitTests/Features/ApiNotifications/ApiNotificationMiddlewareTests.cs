@@ -53,7 +53,7 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Notifications
         }
 
         [Fact]
-        public async Task GivenAuditEventTypeNotNull_WhenInvoked_EmitsMediatRApiAndStorageEvents()
+        public async Task GivenAuditEventTypeNotNull_WhenInvoked_EmitsMedinoApiAndStorageEvents()
         {
             _httpContext.Request.Path = "/Observation";
             _fhirRequestContext.AuditEventType = "read";
@@ -64,7 +64,7 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Notifications
         }
 
         [Fact]
-        public async Task GivenRequestPath_AndNullFhirRequestContext_WhenInvoked_DoesNotFail_AndDoesNotEmitMediatREvents()
+        public async Task GivenRequestPath_AndNullFhirRequestContext_WhenInvoked_DoesNotFail_AndDoesNotEmitMedinoEvents()
         {
             _fhirRequestContextAccessor.RequestContext.Returns((IFhirRequestContext)null);
 
@@ -75,7 +75,7 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Notifications
         }
 
         [Fact]
-        public async Task GivenRequestPath_WhenMediatRFails_NoExceptionIsThrown()
+        public async Task GivenRequestPath_WhenMedinoFails_NoExceptionIsThrown()
         {
             await Task.CompletedTask;
             _mediator.WhenForAnyArgs(async x => await x.Publish(Arg.Any<ApiResponseNotification>(), Arg.Any<CancellationToken>())).Throw(new System.Exception("Failure"));

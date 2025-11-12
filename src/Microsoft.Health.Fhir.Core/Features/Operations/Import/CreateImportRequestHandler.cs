@@ -18,7 +18,7 @@ using Microsoft.Health.JobManagement;
 namespace Microsoft.Health.Fhir.Core.Features.Operations.Import
 {
     /// <summary>
-    /// MediatR request handler. Called when the ImportController creates an Import job.
+    /// Medino request handler. Called when the ImportController creates an Import job.
     /// </summary>
     public class CreateImportRequestHandler : IRequestHandler<CreateImportRequest, CreateImportResponse>
     {

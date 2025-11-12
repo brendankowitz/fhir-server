@@ -34,7 +34,7 @@ namespace Microsoft.Health.Fhir.Shared.Api.UnitTests.Features.Exceptions
         }
 
         [Fact]
-        public async Task GivenAnHttpContextWithException_WhenExecutingExceptionNotificationMiddleware_MediatRShouldEmitNotification()
+        public async Task GivenAnHttpContextWithException_WhenExecutingExceptionNotificationMiddleware_MedinoShouldEmitNotification()
         {
             var exceptionMessage = "Test exception";
             var exceptionNotificationMiddleware = CreateExceptionNotificationMiddleware(innerHttpContext => throw new Exception(exceptionMessage));
@@ -51,7 +51,7 @@ namespace Microsoft.Health.Fhir.Shared.Api.UnitTests.Features.Exceptions
         }
 
         [Fact]
-        public async Task GivenAnHttpContextWithNoException_WhenExecutingExceptionNotificationMiddleware_MediatRShouldNotEmitNotification()
+        public async Task GivenAnHttpContextWithNoException_WhenExecutingExceptionNotificationMiddleware_MedinoShouldNotEmitNotification()
         {
             var exceptionNotificationMiddleware = CreateExceptionNotificationMiddleware(innerHttpContext => Task.CompletedTask);
 
@@ -61,7 +61,7 @@ namespace Microsoft.Health.Fhir.Shared.Api.UnitTests.Features.Exceptions
         }
 
         [Fact]
-        public async Task WhenMediatRFails_OriginalExceptionStillThrown()
+        public async Task WhenMedinoFails_OriginalExceptionStillThrown()
         {
             var exceptionMessage = "Test exception";
             var mediatorExceptionMessage = "Mediator Failure";
