@@ -19,7 +19,8 @@ Welcome to the Microsoft FHIR Server! These guidelines help provide relevant, ac
   - Use camelCase for private fields and local variables, with an underscore prefix (_fieldName).
 - Include XML documentation for all public members
 - On creation of new class, ensure there is a new line between namespace and class declaration
-
+- Never downgrade the version of .NET in the global.json file. The project may target multiple versions, but the global.json should always be the highest version others are listed under /build/dotnetX-compat.
+- Respect all style rules defined in the .editorconfig file.
 ---
 
 ## Testing Requirements
