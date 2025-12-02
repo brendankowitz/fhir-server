@@ -56,6 +56,11 @@
     <PackageReference Include="Microsoft.Health.Core" />
     <PackageReference Include="Microsoft.Health.Extensions.DependencyInjection" />
     <PackageReference Include="Hl7.Fhir.Base" />
+    <PackageReference Include="Ignixa.Abstractions" />
+    <PackageReference Include="Ignixa.Extensions.FirelySdk5" />
+    <PackageReference Include="Ignixa.FhirPath" />
+    <PackageReference Include="Ignixa.Serialization" />
+    <PackageReference Include="Ignixa.Specification" />
     <PackageReference Include="Microsoft.Health.Fhir.Liquid.Converter" />
     <PackageReference Include="Microsoft.Rest.ClientRuntime" />
     <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" />

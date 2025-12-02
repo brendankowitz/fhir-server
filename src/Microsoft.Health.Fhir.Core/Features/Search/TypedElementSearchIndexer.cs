@@ -12,6 +12,7 @@ using EnsureThat;
 using Hl7.Fhir.ElementModel;
 using Hl7.FhirPath;
 using Microsoft.Extensions.Logging;
+using Microsoft.Health.Fhir.Core.Abstractions;
 using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search.Converters;
@@ -30,10 +31,10 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         private readonly ITypedElementToSearchValueConverterManager _fhirElementTypeConverterManager;
         private readonly IReferenceToElementResolver _referenceToElementResolver;
         private readonly IModelInfoProvider _modelInfoProvider;
+        private readonly IFhirPathCompiler _fhirPathCompiler;
         private readonly ILogger<TypedElementSearchIndexer> _logger;
         private readonly ConcurrentDictionary<string, List<string>> _targetTypesLookup = new();
-        private static readonly FhirPathCompiler _compiler = new();
-        private readonly ConcurrentDictionary<string, CompiledExpression> _expressions = new();
+        private readonly ConcurrentDictionary<string, ICompiledExpression> _expressions = new();
 
         /// <summary>
         /// Initializes a new instance of the <see cref="TypedElementSearchIndexer"/> class.
@@ -42,24 +43,28 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         /// <param name="fhirElementTypeConverterManager">The FHIR element type converter manager.</param>
         /// <param name="referenceToElementResolver">Used for parsing reference strings</param>
         /// <param name="modelInfoProvider">Model info provider</param>
+        /// <param name="fhirPathCompiler">The FhirPath compiler for evaluating search parameter expressions</param>
         /// <param name="logger">The logger.</param>
         public TypedElementSearchIndexer(
             ISupportedSearchParameterDefinitionManager searchParameterDefinitionManager,
             ITypedElementToSearchValueConverterManager fhirElementTypeConverterManager,
             IReferenceToElementResolver referenceToElementResolver,
             IModelInfoProvider modelInfoProvider,
+            IFhirPathCompiler fhirPathCompiler,
             ILogger<TypedElementSearchIndexer> logger)
         {
             EnsureArg.IsNotNull(searchParameterDefinitionManager, nameof(searchParameterDefinitionManager));
             EnsureArg.IsNotNull(fhirElementTypeConverterManager, nameof(fhirElementTypeConverterManager));
             EnsureArg.IsNotNull(referenceToElementResolver, nameof(referenceToElementResolver));
             EnsureArg.IsNotNull(modelInfoProvider, nameof(modelInfoProvider));
+            EnsureArg.IsNotNull(fhirPathCompiler, nameof(fhirPathCompiler));
             EnsureArg.IsNotNull(logger, nameof(logger));
 
             _searchParameterDefinitionManager = searchParameterDefinitionManager;
             _fhirElementTypeConverterManager = fhirElementTypeConverterManager;
             _referenceToElementResolver = referenceToElementResolver;
             _modelInfoProvider = modelInfoProvider;
+            _fhirPathCompiler = fhirPathCompiler;
             _logger = logger;
         }
 
@@ -105,7 +110,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 
             SearchParameterInfo compositeSearchParameterInfo = searchParameter;
 
-            CompiledExpression expression = _expressions.GetOrAdd(searchParameter.Expression, s => _compiler.Compile(s));
+            ICompiledExpression expression = _expressions.GetOrAdd(searchParameter.Expression, s => _fhirPathCompiler.Compile(s));
 
             IEnumerable<ITypedElement> rootObjects = expression.Invoke(resource, context);
 
@@ -206,7 +211,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 
             try
             {
-                CompiledExpression expression = _expressions.GetOrAdd(fhirPathExpression, s => _compiler.Compile(s));
+                ICompiledExpression expression = _expressions.GetOrAdd(fhirPathExpression, s => _fhirPathCompiler.Compile(s));
 
                 extractedValues = expression.Invoke(element, context);
             }
