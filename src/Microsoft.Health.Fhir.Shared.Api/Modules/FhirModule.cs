@@ -37,6 +37,8 @@ using Microsoft.Health.Fhir.Core.Messages.CapabilityStatement;
 using Microsoft.Health.Fhir.Core.Messages.Search;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Shared.Core.Features.Conformance;
+using Microsoft.Health.Fhir.Core.Abstractions;
+using Microsoft.Health.Fhir.Shared.Core.Adapters;
 
 namespace Microsoft.Health.Fhir.Api.Modules
 {
@@ -63,6 +65,18 @@ namespace Microsoft.Health.Fhir.Api.Modules
             services.AddSingleton(xmlParser);
             services.AddSingleton(xmlSerializer);
             services.AddSingleton<BundleSerializer>();
+
+            // Register SDK abstraction interfaces with Firely implementations
+            // These abstractions will allow migration to Ignixa SDK in future phases
+            services.AddSingleton<IFhirPathCompiler, FirelyFhirPathCompiler>();
+            services.AddSingleton<IFhirSerializer>(provider =>
+                new FirelyFhirJsonSerializer(
+                    provider.GetRequiredService<FhirJsonParser>(),
+                    provider.GetRequiredService<FhirJsonSerializer>()));
+            services.AddSingleton<IFhirSerializer>(provider =>
+                new FirelyFhirXmlSerializer(
+                    provider.GetRequiredService<FhirXmlParser>(),
+                    provider.GetRequiredService<FhirXmlSerializer>()));
 
             FhirPathCompiler.DefaultSymbolTable.AddFhirExtensions();
 

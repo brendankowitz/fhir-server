@@ -8,6 +8,9 @@
     <Import_RootNamespace>Microsoft.Health.Fhir.Core</Import_RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)Adapters\FirelyFhirPathCompiler.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Adapters\FirelyFhirJsonSerializer.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Adapters\FirelyFhirXmlSerializer.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Extensions\FhirMediatorExtensions.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Extensions\ModelExtensions.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Extensions\OperationDefinitionMediatorExtensions.cs" />

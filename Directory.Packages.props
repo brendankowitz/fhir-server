@@ -6,6 +6,7 @@
     <Hl7FhirLegacyVersion>5.11.0</Hl7FhirLegacyVersion>
     <DotNetSdkPackageVersion>9.0.6</DotNetSdkPackageVersion>
     <OpenIddictPackageVersion>6.2.0</OpenIddictPackageVersion>
+    <IgnixaVersion>0.0.55</IgnixaVersion>
   </PropertyGroup>
   <!-- SDK Packages -->
   <Choose>
@@ -60,6 +61,13 @@
     <PackageVersion Include="Hl7.Fhir.Specification.R4" Version="$(Hl7FhirVersion)" />
     <PackageVersion Include="Hl7.Fhir.Specification.R4B" Version="$(Hl7FhirVersion)" />
     <PackageVersion Include="Hl7.Fhir.Specification.R5" Version="$(Hl7FhirVersion)" />
+    <PackageVersion Include="Ignixa.Abstractions" Version="$(IgnixaVersion)" />
+    <PackageVersion Include="Ignixa.Extensions.FirelySdk5" Version="$(IgnixaVersion)" />
+    <PackageVersion Include="Ignixa.FhirPath" Version="$(IgnixaVersion)" />
+    <PackageVersion Include="Ignixa.Search" Version="$(IgnixaVersion)" />
+    <PackageVersion Include="Ignixa.Serialization" Version="$(IgnixaVersion)" />
+    <PackageVersion Include="Ignixa.Specification" Version="$(IgnixaVersion)" />
+    <PackageVersion Include="Ignixa.Validation" Version="$(IgnixaVersion)" />
     <PackageVersion Include="MediatR" Version="12.5.0" />
     <PackageVersion Include="Microsoft.ApplicationInsights.AspNetCore" Version="2.22.0" />
     <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="$(AspNetPackageVersion)" />
