@@ -51,7 +51,7 @@ stages:
         targetBuildFramework: $(defaultBuildFramework)
         unitTest: false
         codeCoverage: true
-  - job: Linux_dotnet8
+  - job: Linux_dotnet9
     pool:
       name: '$(InternalPool)'
       demands:
@@ -61,7 +61,7 @@ stages:
     steps:
     - template: ./jobs/build.yml
       parameters:
-        targetBuildFramework: 'net8.0'
+        targetBuildFramework: $(defaultBuildFramework)
 
 - stage: BuildArtifacts
   displayName: 'Build artifacts'
