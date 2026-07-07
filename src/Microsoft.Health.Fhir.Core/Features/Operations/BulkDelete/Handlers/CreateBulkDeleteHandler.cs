@@ -21,6 +21,7 @@ using Microsoft.Health.Fhir.Core.Features.Operations.BulkDelete.Messages;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Security;
+using Microsoft.Health.Fhir.Core.Features.Security.Authorization;
 using Microsoft.Health.Fhir.Core.Messages.Delete;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.JobManagement;
@@ -59,12 +60,11 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.BulkDelete.Handlers
                 _ => DataActions.HardDelete | DataActions.Delete,
             };
 
-            if (await _authorizationService.CheckAccess(requiredDataAction, cancellationToken) != requiredDataAction)
-            {
-                throw new UnauthorizedFhirActionException();
-            }
+            await _authorizationService.CheckAccess(requiredDataAction, true, cancellationToken);
 
-            var searchParameters = new List<Tuple<string, string>>(request.ConditionalParameters); // remove read only restriction
+            var searchParameters = new List<Tuple<string, string>>(request.ConditionalParameters);
+
+            // Temporarily add _lastUpdated to the search parameters to mimic the behavior of the processing job. Conditional search will also fail if there are no search criteria.
             var dateCurrent = new PartialDateTime(Clock.UtcNow);
             searchParameters.Add(Tuple.Create("_lastUpdated", $"lt{dateCurrent}"));
 
@@ -79,7 +79,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.BulkDelete.Handlers
                 JobType.BulkDeleteOrchestrator,
                 request.DeleteOperation,
                 request.ResourceType,
-                searchParameters,
+                request.ConditionalParameters,
                 request.ExcludedResourceTypes,
                 _contextAccessor.RequestContext.Uri.ToString(),
                 _contextAccessor.RequestContext.BaseUri.ToString(),

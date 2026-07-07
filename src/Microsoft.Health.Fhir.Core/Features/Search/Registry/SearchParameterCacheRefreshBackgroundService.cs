@@ -14,6 +14,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.Core.Messages.Search;
 
 namespace Microsoft.Health.Fhir.Core.Features.Search.Registry
@@ -27,10 +28,10 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Registry
         private readonly ISearchParameterStatusManager _searchParameterStatusManager;
         private readonly ISearchParameterOperations _searchParameterOperations;
         private readonly IOptions<CoreFeatureConfiguration> _coreFeatureConfiguration;
+        private readonly ISearchParameterCacheRefresherMetricHandler _searchParameterCacheRefresherMetricHandler;
         private readonly ILogger<SearchParameterCacheRefreshBackgroundService> _logger;
         private readonly TimeSpan _refreshInterval;
         private readonly Timer _refreshTimer;
-        private readonly SemaphoreSlim _refreshSemaphore;
         private bool _isInitialized;
         private CancellationToken _stoppingToken;
 
@@ -38,11 +39,13 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Registry
             ISearchParameterStatusManager searchParameterStatusManager,
             ISearchParameterOperations searchParameterOperations,
             IOptions<CoreFeatureConfiguration> coreFeatureConfiguration,
+            ISearchParameterCacheRefresherMetricHandler searchParameterCacheRefresherMetricHandler,
             ILogger<SearchParameterCacheRefreshBackgroundService> logger)
         {
             _searchParameterStatusManager = EnsureArg.IsNotNull(searchParameterStatusManager, nameof(searchParameterStatusManager));
             _searchParameterOperations = EnsureArg.IsNotNull(searchParameterOperations, nameof(searchParameterOperations));
             _coreFeatureConfiguration = EnsureArg.IsNotNull(coreFeatureConfiguration, nameof(coreFeatureConfiguration));
+            _searchParameterCacheRefresherMetricHandler = EnsureArg.IsNotNull(searchParameterCacheRefresherMetricHandler, nameof(searchParameterCacheRefresherMetricHandler));
             _logger = EnsureArg.IsNotNull(logger, nameof(logger));
 
             // Get refresh interval from configuration (default 20 seconds, minimum 1 second)
@@ -53,9 +56,6 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Registry
 
             // Create timer but don't start it yet - wait for SearchParametersInitializedNotification
             _refreshTimer = new Timer(OnRefreshTimer, null, Timeout.InfiniteTimeSpan, _refreshInterval);
-
-            // Create semaphore to prevent concurrent refresh operations (max 1 concurrent operation)
-            _refreshSemaphore = new SemaphoreSlim(1, 1);
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -108,18 +108,19 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Registry
                 return;
             }
 
-            // Try to acquire the semaphore immediately - if we can't, it means another refresh is already running
-            if (!await _refreshSemaphore.WaitAsync(0, _stoppingToken))
-            {
-                _logger.LogDebug("SearchParameter cache refresh already in progress. Skipping this timer execution to prevent concurrent operations.");
-                return;
-            }
-
             try
             {
                 _logger.LogInformation("Performing incremental SearchParameter cache refresh...");
-                await _searchParameterOperations.GetAndApplySearchParameterUpdates(_stoppingToken, false);
-                _logger.LogInformation("Completed incremental SearchParameter cache refresh.");
+                var complete = await _searchParameterOperations.GetAndApplySearchParameterUpdates(_stoppingToken, true);
+                if (complete)
+                {
+                    _logger.LogInformation("Completed incremental SearchParameter cache refresh.");
+                    _searchParameterCacheRefresherMetricHandler.EmitSuccess();
+                }
+                else
+                {
+                    _logger.LogInformation("Skipped incremental SearchParameter cache refresh.");
+                }
             }
             catch (OperationCanceledException)
             {
@@ -131,14 +132,22 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Registry
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error occurred during SearchParameter cache refresh. Will retry on next scheduled interval.");
+                const string message = "Error occurred during SearchParameter cache refresh. Will retry on next scheduled interval.";
+
+                string exceptionAsString = ex.ToString();
+
+                if ((exceptionAsString.Contains("SqlException", StringComparison.OrdinalIgnoreCase) && exceptionAsString.Contains("is not accessible due to Azure Key Vault critical error.", StringComparison.OrdinalIgnoreCase)) ||
+                    (exceptionAsString.Contains("RequestRateExceededException", StringComparison.OrdinalIgnoreCase) && exceptionAsString.Contains("The request rate has exceeded the maximum API request rate and is being throttled.", StringComparison.OrdinalIgnoreCase)))
+                {
+                    _logger.LogWarning(ex, message);
+                }
+                else
+                {
+                    _logger.LogError(ex, message);
+                    _searchParameterCacheRefresherMetricHandler.EmitFailure(ex.GetType().Name);
+                }
 
                 // Don't rethrow from timer callback to avoid crashing the timer
-            }
-            finally
-            {
-                // Always release the semaphore to allow the next refresh operation
-                _refreshSemaphore.Release();
             }
         }
 
@@ -178,7 +187,6 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Registry
         public override void Dispose()
         {
             _refreshTimer?.Dispose();
-            _refreshSemaphore?.Dispose();
             base.Dispose();
             GC.SuppressFinalize(this);
         }

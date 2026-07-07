@@ -41,7 +41,6 @@ using Microsoft.Health.Fhir.Tests.Common.FixtureParameters;
 using Microsoft.Health.Fhir.Tests.Integration.Persistence;
 using Microsoft.Health.Test.Utilities;
 using NSubstitute;
-using NSubstitute.Core;
 using Xunit;
 using Task = System.Threading.Tasks.Task;
 
@@ -51,115 +50,26 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Features.Smart
     [Trait(Traits.Category, Categories.SmartOnFhir)]
     [FhirStorageTestsFixtureArgumentSets(DataStore.All)]
 
-    public class SmartSearchTests : IClassFixture<FhirStorageTestsFixture>, IAsyncLifetime
+    public class SmartSearchTests : IClassFixture<SmartSearchSharedFixture>
     {
+        private readonly SmartSearchSharedFixture _smartFixture;
         private readonly FhirStorageTestsFixture _fixture;
-        private readonly IFhirStorageTestHelper _testHelper;
-        private IFhirOperationDataStore _fhirOperationDataStore;
-        private IScoped<IFhirDataStore> _scopedDataStore;
-        private IFhirStorageTestHelper _fhirStorageTestHelper;
-        private SearchParameterDefinitionManager _searchParameterDefinitionManager;
-        private ITypedElementToSearchValueConverterManager _typedElementToSearchValueConverterManager;
-        private ISearchIndexer _searchIndexer;
-        private readonly ISearchParameterSupportResolver _searchParameterSupportResolver = Substitute.For<ISearchParameterSupportResolver>();
-        private ISupportedSearchParameterDefinitionManager _supportedSearchParameterDefinitionManager;
-        private SearchParameterStatusManager _searchParameterStatusManager;
 
         private IScoped<ISearchService> _searchService;
 
         private RequestContextAccessor<IFhirRequestContext> _contextAccessor;
-        private readonly IDataStoreSearchParameterValidator _dataStoreSearchParameterValidator = Substitute.For<IDataStoreSearchParameterValidator>();
 
-        public SmartSearchTests(FhirStorageTestsFixture fixture)
+        public SmartSearchTests(SmartSearchSharedFixture smartFixture)
         {
-            _fixture = fixture;
-            _testHelper = _fixture.TestHelper;
-        }
+            _smartFixture = smartFixture;
 
-        public async Task InitializeAsync()
-        {
             if (ModelInfoProvider.Instance.Version == FhirSpecification.R4 ||
                 ModelInfoProvider.Instance.Version == FhirSpecification.R4B)
             {
-                _dataStoreSearchParameterValidator.ValidateSearchParameter(default, out Arg.Any<string>()).ReturnsForAnyArgs(x =>
-                {
-                    x[1] = null;
-                    return true;
-                });
-
-                _searchParameterSupportResolver.IsSearchParameterSupported(Arg.Any<SearchParameterInfo>()).Returns((true, false));
-
+                _fixture = _smartFixture.Fixture;
                 _contextAccessor = _fixture.FhirRequestContextAccessor;
-
-                _fhirOperationDataStore = _fixture.OperationDataStore;
-                _fhirStorageTestHelper = _fixture.TestHelper;
-                _scopedDataStore = _fixture.DataStore.CreateMockScope();
-
-                _searchParameterDefinitionManager = _fixture.SearchParameterDefinitionManager;
-                _supportedSearchParameterDefinitionManager = _fixture.SupportedSearchParameterDefinitionManager;
-
-                _typedElementToSearchValueConverterManager = await CreateFhirTypedElementToSearchValueConverterManagerAsync();
-
-                _searchIndexer = new TypedElementSearchIndexer(
-                    _supportedSearchParameterDefinitionManager,
-                    _typedElementToSearchValueConverterManager,
-                    Substitute.For<IReferenceToElementResolver>(),
-                    ModelInfoProvider.Instance,
-                    new FirelyFhirPathProvider(),
-                    NullLogger<TypedElementSearchIndexer>.Instance);
-
-                ResourceWrapperFactory wrapperFactory = Mock.TypeWithArguments<ResourceWrapperFactory>(
-                    new RawResourceFactory(new IgnixaJsonSerializer(), new FhirJsonSerializer()),
-                    new FhirRequestContextAccessor(),
-                    _searchIndexer,
-                    _searchParameterDefinitionManager,
-                    Deserializers.ResourceDeserializer);
-
-                _searchParameterStatusManager = _fixture.SearchParameterStatusManager;
-
                 _searchService = _fixture.SearchService.CreateMockScope();
-
-                _contextAccessor = _fixture.FhirRequestContextAccessor;
-
-                var smartBundle = Samples.GetJsonSample<Bundle>("SmartPatientA");
-                foreach (var entry in smartBundle.Entry)
-                {
-                    await UpsertResource(entry.Resource);
-                }
-
-                smartBundle = Samples.GetJsonSample<Bundle>("SmartPatientB");
-                foreach (var entry in smartBundle.Entry)
-                {
-                    await UpsertResource(entry.Resource);
-                }
-
-                smartBundle = Samples.GetJsonSample<Bundle>("SmartPatientC");
-                foreach (var entry in smartBundle.Entry)
-                {
-                    await UpsertResource(entry.Resource);
-                }
-
-                smartBundle = Samples.GetJsonSample<Bundle>("SmartPatientD");
-                foreach (var entry in smartBundle.Entry)
-                {
-                    await UpsertResource(entry.Resource);
-                }
-
-                smartBundle = Samples.GetJsonSample<Bundle>("SmartCommon");
-                foreach (var entry in smartBundle.Entry)
-                {
-                    await UpsertResource(entry.Resource);
-                }
-
-                await UpsertResource(Samples.GetJsonSample<Medication>("Medication"));
-                await UpsertResource(Samples.GetJsonSample<Organization>("Organization"));
-                await UpsertResource(Samples.GetJsonSample<Location>("Location-example-hq"));
             }
-        }
-
-        public Task DisposeAsync()
-        {
-            return Task.CompletedTask;
         }
 
         [SkippableFact]
@@ -1122,47 +1032,9 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Features.Smart
             Assert.DoesNotContain(results.Results, r => r.Resource.ResourceTypeName == KnownResourceTypes.Observation);
         }
 
-        private async Task<UpsertOutcome> UpsertResource(Resource resource, string httpMethod = "PUT")
+        private static string CreateSmartV2TestResourceId(string scenario)
         {
-            resource.Meta ??= new Meta();
-            resource.Meta.LastUpdated = DateTimeOffset.UtcNow;
-
-            ResourceElement resourceElement = resource.ToResourceElement();
-
-            var rawResource = new RawResource(resource.ToJson(), FhirResourceFormat.Json, isMetaSet: false);
-            var resourceRequest = new ResourceRequest(httpMethod);
-            var compartmentIndices = Substitute.For<CompartmentIndices>();
-            var searchIndices = _searchIndexer.Extract(resourceElement);
-            var wrapper = new ResourceWrapper(resourceElement, rawResource, resourceRequest, false, searchIndices, compartmentIndices, new List<KeyValuePair<string, string>>(), _searchParameterDefinitionManager.GetSearchParameterHashForResourceType("Patient"));
-            wrapper.SearchParameterHash = "hash";
-
-            return await _scopedDataStore.Value.UpsertAsync(new ResourceWrapperOperation(wrapper, true, true, null, false, false, bundleResourceContext: null), CancellationToken.None);
-        }
-
-        private static async Task<FhirTypedElementToSearchValueConverterManager> CreateFhirTypedElementToSearchValueConverterManagerAsync()
-        {
-            var types = typeof(ITypedElementToSearchValueConverter)
-                .Assembly
-                .GetTypes()
-                .Where(x => typeof(ITypedElementToSearchValueConverter).IsAssignableFrom(x) && !x.IsAbstract && !x.IsInterface);
-
-            var referenceSearchValueParser = new ReferenceSearchValueParser(new FhirRequestContextAccessor(), new FhirServerInstanceConfiguration());
-            var codeSystemResolver = new CodeSystemResolver(ModelInfoProvider.Instance);
-            await codeSystemResolver.StartAsync(CancellationToken.None);
-
-            var fhirElementToSearchValueConverters = new List<ITypedElementToSearchValueConverter>();
-
-            foreach (Type type in types)
-            {
-                // Filter out the extension converter because it will be added to the converter dictionary in the converter manager's constructor
-                if (type.Name != nameof(FhirTypedElementToSearchValueConverterManager.ExtensionConverter))
-                {
-                    var x = (ITypedElementToSearchValueConverter)Mock.TypeWithArguments(type, referenceSearchValueParser, codeSystemResolver);
-                    fhirElementToSearchValueConverters.Add(x);
-                }
-            }
-
-            return new FhirTypedElementToSearchValueConverterManager(fhirElementToSearchValueConverters);
+            return $"smart-v2-{scenario}-{Guid.NewGuid():N}";
         }
 
         private void ConfigureFhirRequestContext(
@@ -1181,7 +1053,10 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Features.Smart
                 accessControlContext.AllowedResourceActions.Add(scope);
             }
 
-            contextAccessor.RequestContext.AccessControlContext.Returns(accessControlContext);
+            var fhirRequestContext = Substitute.For<IFhirRequestContext>();
+            fhirRequestContext.AccessControlContext.Returns(accessControlContext);
+
+            contextAccessor.RequestContext.Returns(fhirRequestContext);
         }
 
         // SMART v2 Granular Scope Tests
@@ -1195,20 +1070,21 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Features.Smart
                 "This test is only valid for R4 and R4B");
 
             var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Create, "patient");
+            var patientId = CreateSmartV2TestResourceId("create");
 
             ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction });
-            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-test";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = patientId;
             _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
 
             var newPatient = new Patient
             {
-                Id = "smart-v2-create-test",
+                Id = patientId,
                 Name = new List<HumanName> { new HumanName().WithGiven("TestCreate").AndFamily("SmartV2") },
             };
 
-            var result = await UpsertResource(newPatient);
+            var result = await _smartFixture.UpsertResource(newPatient);
             Assert.NotNull(result);
-            Assert.Equal("smart-v2-create-test", result.Wrapper.ResourceId);
+            Assert.Equal(patientId, result.Wrapper.ResourceId);
         }
 
         [SkippableFact]
@@ -1265,20 +1141,28 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Features.Smart
                 "This test is only valid for R4 and R4B");
 
             var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Update, "patient");
+            var patientId = CreateSmartV2TestResourceId("update");
+
+            await _smartFixture.UpsertResource(new Patient
+            {
+                Id = patientId,
+                Name = new List<HumanName> { new HumanName().WithGiven("InitialName").AndFamily("SmartV2") },
+            });
 
             ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction });
-            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = patientId;
             _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
 
             // Create an updated patient resource
             var updatedPatient = new Patient
             {
-                Id = "smart-patient-A",
+                Id = patientId,
                 Name = new List<HumanName> { new HumanName().WithGiven("UpdatedName").AndFamily("Updated") },
             };
 
-            var result = await UpsertResource(updatedPatient);
+            var result = await _smartFixture.UpsertResource(updatedPatient);
             Assert.NotNull(result);
+            Assert.Equal(patientId, result.Wrapper.ResourceId);
         }
 
         [SkippableFact]
@@ -1291,9 +1175,10 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Features.Smart
 
             var scopeRestriction1 = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient");
             var scopeRestriction2 = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Create, "patient");
+            var patientId = CreateSmartV2TestResourceId("search-create");
 
             ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction1, scopeRestriction2 });
-            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-test";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = patientId;
             _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
 
             // Test search capability
@@ -1306,11 +1191,11 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Features.Smart
             // Test create capability
             var newPatient = new Patient
             {
-                Id = "smart-v2-search-create-test",
+                Id = patientId,
                 Name = new List<HumanName> { new HumanName().WithGiven("SearchCreate").AndFamily("SmartV2") },
             };
 
-            var createResult = await UpsertResource(newPatient);
+            var createResult = await _smartFixture.UpsertResource(newPatient);
             Assert.NotNull(createResult);
         }
 
@@ -1324,27 +1209,34 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Features.Smart
 
             var scopeRestriction1 = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient");
             var scopeRestriction2 = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Update, "patient");
+            var patientId = CreateSmartV2TestResourceId("search-update");
+
+            await _smartFixture.UpsertResource(new Patient
+            {
+                Id = patientId,
+                Name = new List<HumanName> { new HumanName().WithGiven("InitialSearchUpdate").AndFamily("SmartV2") },
+            });
 
             ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction1, scopeRestriction2 });
-            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = patientId;
             _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
 
             // Test search capability
             var query = new List<Tuple<string, string>>();
-            query.Add(new Tuple<string, string>("_id", "smart-patient-A"));
+            query.Add(new Tuple<string, string>("_id", patientId));
             var searchResults = await _searchService.Value.SearchAsync("Patient", query, CancellationToken.None);
             Assert.NotEmpty(searchResults.Results);
 
             // Test update capability
             var updatedPatient = new Patient
             {
-                Id = "smart-patient-A",
+                Id = patientId,
                 Name = new List<HumanName> { new HumanName().WithGiven("SearchUpdate").AndFamily("SmartV2") },
             };
 
-            var updateResult = await UpsertResource(updatedPatient);
+            var updateResult = await _smartFixture.UpsertResource(updatedPatient);
             Assert.NotNull(updateResult);
-            Assert.Equal("smart-patient-A", updateResult.Wrapper.ResourceId);
+            Assert.Equal(patientId, updateResult.Wrapper.ResourceId);
         }
 
         // SMART v2 Granular Scope with Search parameters Tests
@@ -3853,6 +3745,314 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Features.Smart
             Assert.DoesNotContain(results.Results, r => r.Resource.ResourceTypeName == "Appointment");
             Assert.DoesNotContain(results.Results, r => r.Resource.ResourceTypeName == "MedicationRequest");
             Assert.DoesNotContain(results.Results, r => r.Resource.ResourceTypeName == "Practitioner");
+        }
+
+        // SMART v2 Granular Scope with Search Prefix Tests
+        // Validates that FHIR search prefixes (gt, lt, ge, le, ne, eq, sa, eb, ap) work correctly
+        // when used in SMART v2 scope search parameter constraints.
+        // Reference: https://hl7.org/fhir/R4/search.html#prefix
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithGtPrefix_WhenSearching_ThenOnlyMatchingResourcesReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Patient.s?birthdate=gt1980-01-01
+            // smart-patient-A has birthDate 1981-07-02 which is > 1980-01-01
+            var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("birthdate", "gt1980-01-01")));
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Patient", null, CancellationToken.None);
+            Assert.Single(results.Results);
+            Assert.Equal("smart-patient-A", results.Results.First().Resource.ResourceId);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithGtPrefixNoMatch_WhenSearching_ThenNoResultsReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Patient.s?birthdate=gt2000-01-01
+            // smart-patient-A has birthDate 1981-07-02 which is NOT > 2000-01-01
+            var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("birthdate", "gt2000-01-01")));
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Patient", null, CancellationToken.None);
+            Assert.Empty(results.Results);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithLtPrefix_WhenSearching_ThenOnlyMatchingResourcesReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Patient.s?birthdate=lt2000-01-01
+            // smart-patient-A has birthDate 1981-07-02 which is < 2000-01-01
+            var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("birthdate", "lt2000-01-01")));
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Patient", null, CancellationToken.None);
+            Assert.Single(results.Results);
+            Assert.Equal("smart-patient-A", results.Results.First().Resource.ResourceId);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithLtPrefixNoMatch_WhenSearching_ThenNoResultsReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Patient.s?birthdate=lt1970-01-01
+            // smart-patient-A has birthDate 1981-07-02 which is NOT < 1970-01-01
+            var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("birthdate", "lt1970-01-01")));
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Patient", null, CancellationToken.None);
+            Assert.Empty(results.Results);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithGePrefix_WhenSearching_ThenOnlyMatchingResourcesReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Patient.s?birthdate=ge1981-07-02
+            // smart-patient-A has birthDate 1981-07-02 which is >= 1981-07-02 (exact match)
+            var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("birthdate", "ge1981-07-02")));
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Patient", null, CancellationToken.None);
+            Assert.Single(results.Results);
+            Assert.Equal("smart-patient-A", results.Results.First().Resource.ResourceId);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithLePrefix_WhenSearching_ThenOnlyMatchingResourcesReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Patient.s?birthdate=le1981-07-02
+            // smart-patient-A has birthDate 1981-07-02 which is <= 1981-07-02 (exact match)
+            var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("birthdate", "le1981-07-02")));
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Patient", null, CancellationToken.None);
+            Assert.Single(results.Results);
+            Assert.Equal("smart-patient-A", results.Results.First().Resource.ResourceId);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithLePrefixNoMatch_WhenSearching_ThenNoResultsReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Patient.s?birthdate=le1970-01-01
+            // smart-patient-A has birthDate 1981-07-02 which is NOT <= 1970-01-01
+            var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("birthdate", "le1970-01-01")));
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Patient", null, CancellationToken.None);
+            Assert.Empty(results.Results);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithNePrefix_WhenSearching_ThenOnlyMatchingResourcesReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Patient.s?birthdate=ne2000-01-01
+            // smart-patient-A has birthDate 1981-07-02 which is != 2000-01-01
+            var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("birthdate", "ne2000-01-01")));
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Patient", null, CancellationToken.None);
+            Assert.Single(results.Results);
+            Assert.Equal("smart-patient-A", results.Results.First().Resource.ResourceId);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithNePrefixNoMatch_WhenSearching_ThenNoResultsReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Patient.s?birthdate=ne1981-07-02
+            // smart-patient-A has birthDate 1981-07-02 which IS equal, so ne excludes it
+            var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("birthdate", "ne1981-07-02")));
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Patient", null, CancellationToken.None);
+            Assert.Empty(results.Results);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithEqPrefix_WhenSearching_ThenOnlyMatchingResourcesReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Patient.s?birthdate=eq1981-07-02
+            // smart-patient-A has birthDate 1981-07-02 which equals 1981-07-02
+            var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("birthdate", "eq1981-07-02")));
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Patient", null, CancellationToken.None);
+            Assert.Single(results.Results);
+            Assert.Equal("smart-patient-A", results.Results.First().Resource.ResourceId);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithSaPrefix_WhenSearching_ThenOnlyMatchingResourcesReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Patient.s?birthdate=sa1980-01-01
+            // sa = "starts after" - value starts after the specified value
+            // smart-patient-A has birthDate 1981-07-02 which starts after 1980-01-01
+            var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("birthdate", "sa1980-01-01")));
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Patient", null, CancellationToken.None);
+            Assert.Single(results.Results);
+            Assert.Equal("smart-patient-A", results.Results.First().Resource.ResourceId);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithEbPrefix_WhenSearching_ThenOnlyMatchingResourcesReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Patient.s?birthdate=eb2000-01-01
+            // eb = "ends before" - value ends before the specified value
+            // smart-patient-A has birthDate 1981-07-02 which ends before 2000-01-01
+            var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("birthdate", "eb2000-01-01")));
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Patient", null, CancellationToken.None);
+            Assert.Single(results.Results);
+            Assert.Equal("smart-patient-A", results.Results.First().Resource.ResourceId);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithApPrefix_WhenSearching_ThenOnlyMatchingResourcesReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Patient.s?birthdate=ap1981-07-02
+            // ap = "approximately" - value is approximately the specified value (within 10%)
+            // smart-patient-A has birthDate 1981-07-02 which approximately equals 1981-07-02
+            var scopeRestriction = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("birthdate", "ap1981-07-02")));
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Patient", null, CancellationToken.None);
+            Assert.Single(results.Results);
+            Assert.Equal("smart-patient-A", results.Results.First().Resource.ResourceId);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithPrefixOnObservationDate_WhenSearching_ThenOnlyMatchingResourcesReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Observation.s?date=gt2000-01-01 patient/Patient.s
+            // Observations have effectiveDateTime: 2008-04-10 (smart-observation-A1) and 1977-09-01 (smart-observation-A2)
+            // Only smart-observation-A1 (2008-04-10) is > 2000-01-01
+            var scopeRestriction1 = new ScopeRestriction("Observation", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("date", "gt2000-01-01")));
+            var scopeRestriction2 = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient");
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction1, scopeRestriction2 }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Observation", null, CancellationToken.None);
+            Assert.Single(results.Results);
+            Assert.Equal("smart-observation-A1", results.Results.First().Resource.ResourceId);
+        }
+
+        [SkippableFact]
+        public async Task GivenSmartV2ScopeWithLtPrefixOnObservationDate_WhenSearching_ThenOnlyMatchingResourcesReturned()
+        {
+            Skip.If(
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4 &&
+                ModelInfoProvider.Instance.Version != FhirSpecification.R4B,
+                "This test is only valid for R4 and R4B");
+
+            // scope = patient/Observation.s?date=lt2000-01-01 patient/Patient.s
+            // Observations have effectiveDateTime: 2008-04-10 (smart-observation-A1) and 1977-09-01 (smart-observation-A2)
+            // Only smart-observation-A2 (1977-09-01) is < 2000-01-01
+            var scopeRestriction1 = new ScopeRestriction("Observation", Core.Features.Security.DataActions.Search, "patient", CreateSearchParams(("date", "lt2000-01-01")));
+            var scopeRestriction2 = new ScopeRestriction("Patient", Core.Features.Security.DataActions.Search, "patient");
+            ConfigureFhirRequestContext(_contextAccessor, new List<ScopeRestriction>() { scopeRestriction1, scopeRestriction2 }, true);
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentId = "smart-patient-A";
+            _contextAccessor.RequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+
+            var results = await _searchService.Value.SearchAsync("Observation", null, CancellationToken.None);
+            Assert.Single(results.Results);
+            Assert.Equal("smart-observation-A2", results.Results.First().Resource.ResourceId);
         }
     }
 }

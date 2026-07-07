@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using Hl7.Fhir.ElementModel;
@@ -20,13 +21,17 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Primitives;
 using Microsoft.Health.Abstractions.Features.Transactions;
 using Microsoft.Health.Core.Features.Context;
+using Microsoft.Health.Core.Features.Security;
+using Microsoft.Health.Extensions.DependencyInjection;
 using Microsoft.Health.Fhir.Api.Features.Bundle;
 using Microsoft.Health.Fhir.Api.Features.Routing;
 using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Audit;
+using Microsoft.Health.Fhir.Core.Features.Compartment;
 using Microsoft.Health.Fhir.Core.Features.Conformance;
 using Microsoft.Health.Fhir.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Features.Definition;
@@ -51,7 +56,10 @@ using Microsoft.Health.Fhir.Core.Messages.Upsert;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Core.Registration;
 using Microsoft.Health.Fhir.Core.UnitTests.Extensions;
+using Microsoft.Health.Fhir.Core.UnitTests.Features.Context;
+using Microsoft.Health.Fhir.CosmosDb.Features.Storage.Operations;
 using Microsoft.Health.Fhir.Ignixa;
+using Microsoft.Health.Fhir.SqlServer.Features.Storage;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Fhir.Tests.Common.FixtureParameters;
 using Microsoft.Health.Fhir.Tests.Common.Mocks;
@@ -70,6 +78,7 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         private readonly ResourceIdProvider _resourceIdProvider;
         private readonly DataResourceFilter _dataResourceFilter;
         private readonly IFhirRuntimeConfiguration _fhirRuntimeConfiguration;
+        private SearchParameterOperations _searchParameterOperations;
 
         public FhirStorageTestsFixture(DataStore dataStore)
             : this(dataStore switch
@@ -134,9 +143,9 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
 
         public SearchParameterDefinitionManager SearchParameterDefinitionManager => _fixture.GetRequiredService<SearchParameterDefinitionManager>();
 
-        public SupportedSearchParameterDefinitionManager SupportedSearchParameterDefinitionManager => _fixture.GetRequiredService<SupportedSearchParameterDefinitionManager>();
+        public SearchParameterOperations SearchParameterOperations => _searchParameterOperations;
 
-        public SchemaInitializer SchemaInitializer => _fixture.GetRequiredService<SchemaInitializer>();
+        public SupportedSearchParameterDefinitionManager SupportedSearchParameterDefinitionManager => _fixture.GetRequiredService<SupportedSearchParameterDefinitionManager>();
 
         public SchemaUpgradeRunner SchemaUpgradeRunner => _fixture.GetRequiredService<SchemaUpgradeRunner>();
 
@@ -148,7 +157,35 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
 
         public GetResourceHandler GetResourceHandler { get; set; }
 
+        internal IFhirOperationDataStore CosmosOperationDataStore
+        {
+            get
+            {
+                if (_fixture is CosmosDbFhirStorageTestsFixture cosmosFixture)
+                {
+                    return cosmosFixture.CosmosOperationDataStore;
+                }
+
+                return null;
+            }
+        }
+
+        internal IFhirOperationDataStore SqlServerOperationDataStore
+        {
+            get
+            {
+                if (_fixture is SqlServerFhirStorageTestsFixture sqlFixture)
+                {
+                    return sqlFixture.SqlServerOperationDataStore;
+                }
+
+                return null;
+            }
+        }
+
         public IQueueClient QueueClient => _fixture.GetRequiredService<IQueueClient>();
+
+        public IServiceProvider Service => _fixture;
 
         public void Dispose()
         {
@@ -161,6 +198,18 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             {
                 await asyncLifetime.InitializeAsync();
             }
+
+            // Initialize FhirRequestContext to ensure pending status updates are captured
+            // This needs to be here (like ResourceIdProvider) because it uses AsyncLocal
+            FhirRequestContextAccessor.RequestContext = new DefaultFhirRequestContext
+            {
+                BaseUri = new Uri("http://localhost/"),
+                CorrelationId = Guid.NewGuid().ToString(),
+                RequestHeaders = new Dictionary<string, StringValues>(),
+                ResponseHeaders = new Dictionary<string, StringValues>(),
+                Method = "POST",
+                Uri = new Uri("http://localhost/"),
+            };
 
             CapabilityStatement = CapabilityStatementMock.GetMockedCapabilityStatement();
 
@@ -185,25 +234,77 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             ConformanceProvider = Substitute.For<ConformanceProviderBase>();
             ConformanceProvider.GetCapabilityStatementOnStartup(Arg.Any<CancellationToken>()).Returns(CapabilityStatement.ToTypedElement().ToResourceElement());
 
-            // TODO: FhirRepository instantiate ResourceDeserializer class directly
-            // which will try to deserialize the raw resource. We should mock it as well.
-            var rawResourceFactory = Substitute.For<RawResourceFactory>(new IgnixaJsonSerializer(), new FhirJsonSerializer());
+            Deserializer = new ResourceDeserializer(
+                (FhirResourceFormat.Json, new Func<string, string, DateTimeOffset, ResourceElement>((str, version, lastUpdated) => JsonParser.Parse(str).ToResourceElement())));
 
-            var resourceWrapperFactory = Substitute.For<IResourceWrapperFactory>();
-            resourceWrapperFactory
-                .Create(Arg.Any<ResourceElement>(), Arg.Any<bool>(), Arg.Any<bool>())
-                .Returns(x =>
+            // Create real ResourceWrapperFactory to ensure proper search index extraction
+            var rawResourceFactory = new RawResourceFactory(new IgnixaJsonSerializer(), new FhirJsonSerializer());
+
+            // Try to get services from DI, fallback to substitutes if not available
+            ISearchIndexer searchIndexer;
+            try
+            {
+                searchIndexer = _fixture.GetRequiredService<ISearchIndexer>();
+            }
+            catch (InvalidOperationException)
+            {
+                searchIndexer = Substitute.For<ISearchIndexer>();
+                searchIndexer.Extract(Arg.Any<ResourceElement>()).Returns(callInfo =>
                 {
-                    ResourceElement resource = x.ArgAt<ResourceElement>(0);
-                    var searchParamHash = SearchParameterDefinitionManager.GetSearchParameterHashForResourceType(resource.InstanceType);
+                    // Extract search indices using the real search parameter definition manager
+                    var resource = callInfo.Arg<ResourceElement>();
+                    var indices = new List<SearchIndexEntry>();
 
-                    if (string.IsNullOrEmpty(searchParamHash))
+                    // For SearchParameter resources, add the url parameter index
+                    if (resource.InstanceType == "SearchParameter")
                     {
-                        searchParamHash = "hash";
+                        var urlValue = resource.ToPoco<SearchParameter>().Url;
+                        if (!string.IsNullOrEmpty(urlValue))
+                        {
+                            var urlParam = SearchParameterDefinitionManager.AllSearchParameters
+                                .FirstOrDefault(p => p.Code == "url" && p.BaseResourceTypes?.Contains("SearchParameter") == true);
+                            if (urlParam != null)
+                            {
+                                indices.Add(new SearchIndexEntry(urlParam, new UriSearchValue(urlValue, false)));
+                            }
+                        }
                     }
 
-                    return new ResourceWrapper(resource, rawResourceFactory.Create(resource, keepMeta: true), new ResourceRequest(HttpMethod.Post, "http://fhir"), x.ArgAt<bool>(1), new List<SearchIndexEntry>() { new SearchIndexEntry(new SearchParameterInfo("name", "name", ValueSets.SearchParamType.String, new Uri("http://hl7.org/fhir/SearchParameter/Patient-name")) { SortStatus = SortParameterStatus.Enabled }, new StringSearchValue("alpha")) }, null, null, searchParamHash);
+                    return indices;
                 });
+            }
+
+            IClaimsExtractor claimsExtractor;
+            try
+            {
+                claimsExtractor = _fixture.GetRequiredService<IClaimsExtractor>();
+            }
+            catch (InvalidOperationException)
+            {
+                claimsExtractor = Substitute.For<IClaimsExtractor>();
+                claimsExtractor.Extract().Returns((IEnumerable<KeyValuePair<string, string>>)null);
+            }
+
+            ICompartmentIndexer compartmentIndexer;
+            try
+            {
+                compartmentIndexer = _fixture.GetRequiredService<ICompartmentIndexer>();
+            }
+            catch (InvalidOperationException)
+            {
+                compartmentIndexer = Substitute.For<ICompartmentIndexer>();
+                compartmentIndexer.Extract(Arg.Any<string>(), Arg.Any<IReadOnlyCollection<SearchIndexEntry>>())
+                    .Returns(new CompartmentIndices());
+            }
+
+            var resourceWrapperFactory = new ResourceWrapperFactory(
+                rawResourceFactory,
+                FhirRequestContextAccessor,
+                searchIndexer,
+                claimsExtractor,
+                compartmentIndexer,
+                SearchParameterDefinitionManager,
+                Deserializer);
 
             UrlResolver urlResolver = CreateUrlResolver(FhirRequestContextAccessor);
             var bundleFactory = new BundleFactory(urlResolver, FhirRequestContextAccessor, NullLogger<BundleFactory>.Instance);
@@ -215,8 +316,27 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             var auditLogger = Substitute.For<IAuditLogger>();
             var logger = Substitute.For<ILogger<DeletionService>>();
 
-            Deserializer = new ResourceDeserializer(
-                (FhirResourceFormat.Json, new Func<string, string, DateTimeOffset, ResourceElement>((str, version, lastUpdated) => JsonParser.Parse(str).ToResourceElement())));
+            var searchParameterSupportResolver = Substitute.For<ISearchParameterSupportResolver>();
+            searchParameterSupportResolver.IsSearchParameterSupported(Arg.Any<SearchParameterInfo>()).Returns((true, false));
+
+            var dataStoreSearchParameterValidator = Substitute.For<IDataStoreSearchParameterValidator>();
+            dataStoreSearchParameterValidator.ValidateSearchParameter(Arg.Any<SearchParameterInfo>(), out Arg.Any<string>()).Returns(x =>
+            {
+                x[1] = null; // out parameter for errorMessage
+                return true;
+            });
+
+            _searchParameterOperations = new SearchParameterOperations(
+                SearchParameterStatusManager,
+                SearchParameterDefinitionManager,
+                ModelInfoProvider.Instance,
+                searchParameterSupportResolver,
+                dataStoreSearchParameterValidator,
+                () => OperationDataStore.CreateMockScope(),
+                () => SearchService.CreateMockScope(),
+                DataStore.CreateMockScopeProvider(),
+                resourceWrapperFactory,
+                NullLogger<SearchParameterOperations>.Instance);
 
             var deleter = new DeletionService(
                 resourceWrapperFactory,
@@ -228,7 +348,7 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
                 auditLogger,
                 new OptionsWrapper<CoreFeatureConfiguration>(coreFeatureConfiguration),
                 _fhirRuntimeConfiguration,
-                Substitute.For<ISearchParameterOperations>(),
+                _searchParameterOperations,
                 Deserializer,
                 logger);
 
@@ -240,6 +360,32 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             collection.AddSingleton(typeof(IRequestHandler<DeleteResourceRequest, DeleteResourceResponse>), new DeleteResourceHandler(DataStore, new Lazy<IConformanceProvider>(() => ConformanceProvider), resourceWrapperFactory, _resourceIdProvider, DisabledFhirAuthorizationService.Instance, deleter));
             collection.AddSingleton(typeof(IRequestHandler<SearchResourceHistoryRequest, SearchResourceHistoryResponse>), new SearchResourceHistoryHandler(SearchService, bundleFactory, DisabledFhirAuthorizationService.Instance, new DataResourceFilter(MissingDataFilterCriteria.Default)));
             collection.AddSingleton(typeof(IRequestHandler<SearchResourceRequest, SearchResourceResponse>), new SearchResourceHandler(SearchService, bundleFactory, DisabledFhirAuthorizationService.Instance, new DataResourceFilter(MissingDataFilterCriteria.Default)));
+
+            // Register pipeline behaviors for search parameter handling
+            collection.AddTransient<IPipelineBehavior<CreateResourceRequest, UpsertResourceResponse>>(
+                sp => new CreateOrUpdateSearchParameterBehavior<CreateResourceRequest, UpsertResourceResponse>(
+                    _searchParameterOperations,
+                    DataStore,
+                    SearchParameterDefinitionManager,
+                    FhirRequestContextAccessor,
+                    ModelInfoProvider.Instance));
+
+            collection.AddTransient<IPipelineBehavior<UpsertResourceRequest, UpsertResourceResponse>>(
+                sp => new CreateOrUpdateSearchParameterBehavior<UpsertResourceRequest, UpsertResourceResponse>(
+                    _searchParameterOperations,
+                    DataStore,
+                    SearchParameterDefinitionManager,
+                    FhirRequestContextAccessor,
+                    ModelInfoProvider.Instance));
+
+            collection.AddTransient<IPipelineBehavior<DeleteResourceRequest, DeleteResourceResponse>>(
+                sp => new DeleteSearchParameterBehavior<DeleteResourceRequest, DeleteResourceResponse>(
+                    _searchParameterOperations,
+                    DataStore,
+                    SearchParameterDefinitionManager,
+                    SearchParameterStatusManager,
+                    FhirRequestContextAccessor,
+                    ModelInfoProvider.Instance));
 
             ServiceProvider services = collection.BuildServiceProvider();
 

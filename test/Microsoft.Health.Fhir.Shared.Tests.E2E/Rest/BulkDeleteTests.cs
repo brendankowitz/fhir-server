@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -24,9 +25,9 @@ using Microsoft.Health.Fhir.Tests.Common.FixtureParameters;
 using Microsoft.Health.Fhir.Tests.E2E.Common;
 using Microsoft.Health.Test.Utilities;
 using Newtonsoft.Json;
-using Polly;
 using Xunit;
 using Xunit.Abstractions;
+using Xunit.Sdk;
 using static Hl7.Fhir.Model.Encounter;
 using Task = System.Threading.Tasks.Task;
 
@@ -51,6 +52,7 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
         }
 
         [SkippableFact]
+        [Trait(Traits.Category, Categories.IndexAndReindex)] // temporarily moved till reindex conflict is moved to the storage layer
         public async Task GivenVariousResourcesOfDifferentTypes_WhenBulkDeleted_ThenAllAreDeleted()
         {
             CheckBulkDeleteEnabled();
@@ -81,6 +83,7 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
         }
 
         [SkippableFact]
+        [Trait(Traits.Category, Categories.IndexAndReindex)] // temporarily moved till reindex conflict is moved to the storage layer
         public async Task GivenBulkDeleteRequestWithInvalidSearchParameters_WhenRequested_ThenBadRequestIsReturned()
         {
             CheckBulkDeleteEnabled();
@@ -97,6 +100,7 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
         }
 
         [SkippableFact]
+        [Trait(Traits.Category, Categories.IndexAndReindex)] // temporarily moved till reindex conflict is moved to the storage layer
         public async Task GivenSoftBulkDeleteRequest_WhenCompleted_ThenHistoricalRecordsExist()
         {
             CheckBulkDeleteEnabled();
@@ -124,6 +128,7 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
         [SkippableTheory]
         [InlineData(KnownQueryParameterNames.BulkHardDelete)]
         [InlineData(KnownQueryParameterNames.HardDelete)]
+        [Trait(Traits.Category, Categories.IndexAndReindex)] // temporarily moved till reindex conflict is moved to the storage layer
         public async Task GivenHardBulkDeleteRequest_WhenCompleted_ThenHistoricalRecordsDontExist(string hardDeleteKey)
         {
             CheckBulkDeleteEnabled();
@@ -153,6 +158,7 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
         }
 
         [SkippableFact]
+        [Trait(Traits.Category, Categories.IndexAndReindex)] // temporarily moved till reindex conflict is moved to the storage layer
         public async Task GivenPurgeBulkDeleteRequest_WhenCompleted_ThenHistoricalRecordsDontExistAndCurrentRecordExists()
         {
             CheckBulkDeleteEnabled();
@@ -242,8 +248,6 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
 
             await _fhirClient.CreateAsync(observation);
 
-            await Task.Delay(5000); // Add delay to ensure resources are created before bulk delete
-
             using HttpRequestMessage request = GenerateBulkDeleteRequest(
                 tag,
                 "Observation/$bulk-delete",
@@ -306,8 +310,6 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
 
             await _fhirClient.CreateAsync(observation);
 
-            await Task.Delay(5000); // Add delay to ensure resources are created before bulk delete
-
             using HttpRequestMessage request = GenerateBulkDeleteRequest(
                 tag,
                 "Patient/$bulk-delete",
@@ -349,8 +351,6 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
 
             await _fhirClient.CreateAsync(observation);
 
-            await Task.Delay(5000); // Add delay to ensure resources are created before bulk delete
-
             using HttpRequestMessage request = GenerateBulkDeleteRequest(
                 tag,
                 "Observation/$bulk-delete",
@@ -377,7 +377,6 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
             };
             var tag = Guid.NewGuid().ToString();
             await CreateGroupWithPatients(tag, 20);
-            await Task.Delay(5000); // Add delay to ensure resources are created before bulk delete
 
             using HttpRequestMessage request = GenerateBulkDeleteRequest(
                 tag,
@@ -394,6 +393,7 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
         }
 
         [SkippableFact]
+        [Trait(Traits.Category, Categories.IndexAndReindex)] // temporarily moved till reindex conflict is moved to the storage layer
         public async Task GivenBulkDeleteRequestWithMultipleExcludedResourceTypes_WhenCompleted_ThenExcludedResourcesAreNotDeleted()
         {
             CheckBulkDeleteEnabled();
@@ -436,9 +436,6 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
             };
             organization.Active = true;
             await _fhirClient.CreateAsync(organization);
-
-            // Wait to ensure resources are created before bulk delete
-            await Task.Delay(2000);
 
             // Create the request with Observation and Location as excluded resource types
             var request = new HttpRequestMessage
@@ -484,53 +481,38 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
 
         // Before SP cache update fixes: Skip = "The test adds and deletes custom SPs causing the SP cache going out of sync with the store making the test flaky. Disable it for now until the issue of the SP cache out of sync is resolved.
         [Theory]
+        [Trait(Traits.Category, Categories.IndexAndReindex)]
         [InlineData(true)]
         [InlineData(false)]
-        [Trait(Traits.Category, Categories.IndexAndReindex)] // this moves tests to reindex group to avoid racing failures
         public async Task GivenBulkDeleteRequest_WhenSearchParametersDeleted_ThenSearchParameterStatusShouldBeUpdated(bool hardDelete)
         {
+            const int searchParameterStatusTimeoutSeconds = 60;
+
             CheckBulkDeleteEnabled();
 
             var tag = Guid.NewGuid().ToString();
             var bundle = (Bundle)TagResources((Bundle)Samples.GetJsonSample("SearchParameter-USCoreIG").ToPoco(), tag);
             var resources = bundle.Entry.Select(x => x.Resource).ToList();
 
-            try
-            {
-                await CleanupAsync();
+            await CleanupAsync();
 
-                await CreateAsync();
+            await CreateAsync();
 
-                await EnsureCreateAsync();
+            await EnsureCreateAsync();
 
-                await WaitForCacheRefreshAsync();
+            await CheckSearchParameterStatusAsync(SearchParameterStatus.Supported, TimeSpan.FromSeconds(searchParameterStatusTimeoutSeconds));
 
-                await CheckSearchParameterStatusAsync(SearchParameterStatus.Supported);
+            var queryParams = new Dictionary<string, string> { { KnownQueryParameterNames.BulkHardDelete, hardDelete ? "true" : "false" } };
+            using var request = GenerateBulkDeleteRequest(tag, $"{ResourceType.SearchParameter}/$bulk-delete", queryParams);
+            using var response = await _httpClient.SendAsync(request);
+            Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 
-                var queryParams = new Dictionary<string, string> { { KnownQueryParameterNames.BulkHardDelete, hardDelete ? "true" : "false" } };
-                using var request = GenerateBulkDeleteRequest(tag, $"{ResourceType.SearchParameter}/$bulk-delete", queryParams);
-                using var response = await _httpClient.SendAsync(request);
-                Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+            await CheckBulkDeleteStatusAsync(response.Content.Headers.ContentLocation, bundle.Entry.Count);
 
-                await CheckBulkDeleteStatusAsync(response.Content.Headers.ContentLocation, bundle.Entry.Count);
+            await EnsureBulkDeleteAsync();
 
-                await WaitForCacheRefreshAsync();
-
-                await EnsureBulkDeleteAsync();
-
-                await CheckSearchParameterStatusAsync(SearchParameterStatus.PendingDelete);
-            }
-            finally
-            {
-                await CleanupAsync();
-            }
-
-            async Task WaitForCacheRefreshAsync()
-            {
-                // Wait for the search parameter cache to be updated
-                // 6 sec = 2 sec refresh interval * 3
-                await Task.Delay(TimeSpan.FromSeconds(6));
-            }
+            var expectedStatus = hardDelete ? SearchParameterStatus.PendingHardDelete : SearchParameterStatus.PendingDelete;
+            await CheckSearchParameterStatusAsync(expectedStatus, TimeSpan.FromSeconds(searchParameterStatusTimeoutSeconds));
 
             async Task CleanupAsync()
             {
@@ -590,35 +572,76 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
 
             async Task EnsureBulkDeleteAsync()
             {
+                // SearchParameter resources should still exist after bulk delete - only status is updated
                 var response = await _fhirClient.SearchAsync(ResourceType.SearchParameter, $"_tag={tag}");
                 Assert.Equal(HttpStatusCode.OK, response.StatusCode);
                 var count = response.Resource?.Entry.Count ?? 0;
-                Assert.True(count == 0, $"{count} search parameters found in the store after bulk delete.");
+                Assert.True(count == resources.Count, $"Expected {resources.Count} search parameters to still exist (only status updated), but found {count}.");
             }
 
-            async Task CheckSearchParameterStatusAsync(SearchParameterStatus expectedStatus)
+            async Task CheckSearchParameterStatusAsync(SearchParameterStatus expectedStatus, TimeSpan timeout)
             {
                 if (_fixture.DataStore == DataStore.CosmosDb)
                 {
                     return;
                 }
 
-                foreach (var url in resources.Select(resource => ((SearchParameter)resource).Url))
+                var expectedStatusText = expectedStatus.ToString();
+                var pollingInterval = TimeSpan.FromSeconds(2);
+                var stopwatch = Stopwatch.StartNew();
+                string lastObservedState = "No status responses recorded.";
+
+                while (stopwatch.Elapsed < timeout)
                 {
-                    var response = await _fhirClient.ReadAsync<Parameters>($"{ResourceType.SearchParameter}/$status?url={url}");
-                    Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                    var statusesMatched = true;
+                    var observedStates = new List<string>();
 
-                    var part = response.Resource.Parameter
-                        .Where(x => x.Part.Any(p => string.Equals(p.Name, "url", StringComparison.OrdinalIgnoreCase) && string.Equals(p.Value?.ToString(), url, StringComparison.OrdinalIgnoreCase)))
-                        .FirstOrDefault();
-                    Assert.NotNull(part);
+                    foreach (var url in resources.Select(resource => ((SearchParameter)resource).Url))
+                    {
+                        try
+                        {
+                            var response = await _fhirClient.ReadAsync<Parameters>($"{ResourceType.SearchParameter}/$status?url={url}");
+                            if (response.StatusCode != HttpStatusCode.OK)
+                            {
+                                statusesMatched = false;
+                                observedStates.Add($"url={url} response={response.StatusCode}");
+                                continue;
+                            }
 
-                    var status = part.Part
-                        .Where(x => string.Equals(x.Name, "status", StringComparison.OrdinalIgnoreCase))
-                        .Select(x => x.Value?.ToString())
-                        .FirstOrDefault();
-                    Assert.True(status == expectedStatus.ToString(), $"url={url} expected={expectedStatus} actual={status}");
+                            var part = response.Resource.Parameter
+                                .FirstOrDefault(x => x.Part.Any(p => string.Equals(p.Name, "url", StringComparison.OrdinalIgnoreCase) && string.Equals(p.Value?.ToString(), url, StringComparison.OrdinalIgnoreCase)));
+
+                            var status = part?.Part
+                                .Where(x => string.Equals(x.Name, "status", StringComparison.OrdinalIgnoreCase))
+                                .Select(x => x.Value?.ToString())
+                                .FirstOrDefault();
+
+                            observedStates.Add($"url={url} actual={status ?? "<missing>"}");
+
+                            if (part == null || !string.Equals(status, expectedStatusText, StringComparison.Ordinal))
+                            {
+                                statusesMatched = false;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            statusesMatched = false;
+                            observedStates.Add($"url={url} error={ex.GetType().Name}: {ex.Message}");
+                        }
+                    }
+
+                    lastObservedState = string.Join("; ", observedStates);
+
+                    if (statusesMatched)
+                    {
+                        return;
+                    }
+
+                    await Task.Delay(pollingInterval);
                 }
+
+                throw new XunitException(
+                    $"Timed out after {timeout.TotalSeconds:F0}s waiting for SearchParameter status '{expectedStatusText}'. Last observed state: {lastObservedState}");
             }
         }
 
@@ -653,8 +676,6 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
             observation.Code = new CodeableConcept("test", "test");
 
             await _fhirClient.CreateAsync(observation);
-
-            await Task.Delay(5000); // Add delay to ensure resources are created before bulk delete
 
             using HttpRequestMessage request = GenerateBulkDeleteRequest(
                 tag,
@@ -695,8 +716,6 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest
             {
                 await _fhirClient.CreateResourcesAsync(ModelInfoProvider.GetTypeForFhirType(key), (int)expectedResults[key], tag);
             }
-
-            await Task.Delay(2000); // Add delay to ensure resources are created before bulk delete
 
             using HttpRequestMessage request = GenerateBulkDeleteRequest(tag, path, queryParams);
 

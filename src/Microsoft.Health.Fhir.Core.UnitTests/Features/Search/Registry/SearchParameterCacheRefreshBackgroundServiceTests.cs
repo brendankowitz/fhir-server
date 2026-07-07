@@ -4,15 +4,25 @@
 // -------------------------------------------------------------------------------------------------
 
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using MediatR;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Health.Extensions.DependencyInjection;
 using Microsoft.Health.Fhir.Core.Configs;
+using Microsoft.Health.Fhir.Core.Features.Definition;
+using Microsoft.Health.Fhir.Core.Features.Operations;
+using Microsoft.Health.Fhir.Core.Features.Persistence;
+using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
 using Microsoft.Health.Fhir.Core.Features.Search.Registry;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.Core.Messages.Search;
+using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Test.Utilities;
 using NSubstitute;
@@ -22,10 +32,12 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
 {
     [Trait(Traits.OwningTeam, OwningTeam.Fhir)]
     [Trait(Traits.Category, Categories.Search)]
+    [Trait(Traits.Category, Categories.BackgroundJobs)]
     public class SearchParameterCacheRefreshBackgroundServiceTests
     {
         private readonly ISearchParameterStatusManager _searchParameterStatusManager;
         private readonly ISearchParameterOperations _searchParameterOperations;
+        private readonly ISearchParameterCacheRefresherMetricHandler _searchParameterCacheRefresherMetricHandler;
         private readonly IOptions<CoreFeatureConfiguration> _coreFeatureConfiguration;
         private readonly SearchParameterCacheRefreshBackgroundService _service;
 
@@ -33,6 +45,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
         {
             _searchParameterStatusManager = Substitute.For<ISearchParameterStatusManager>();
             _searchParameterOperations = Substitute.For<ISearchParameterOperations>();
+            _searchParameterCacheRefresherMetricHandler = Substitute.For<ISearchParameterCacheRefresherMetricHandler>();
             _coreFeatureConfiguration = Substitute.For<IOptions<CoreFeatureConfiguration>>();
             _coreFeatureConfiguration.Value.Returns(new CoreFeatureConfiguration
             {
@@ -44,6 +57,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
                 _searchParameterStatusManager,
                 _searchParameterOperations,
                 _coreFeatureConfiguration,
+                _searchParameterCacheRefresherMetricHandler,
                 NullLogger<SearchParameterCacheRefreshBackgroundService>.Instance);
         }
 
@@ -77,6 +91,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
                 _searchParameterStatusManager,
                 _searchParameterOperations,
                 options,
+                _searchParameterCacheRefresherMetricHandler,
                 NullLogger<SearchParameterCacheRefreshBackgroundService>.Instance);
 
             Assert.NotNull(service);
@@ -100,6 +115,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
                 _searchParameterStatusManager,
                 _searchParameterOperations,
                 options,
+                _searchParameterCacheRefresherMetricHandler,
                 mockLogger);
 
             // Assert
@@ -132,6 +148,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
                 _searchParameterStatusManager,
                 _searchParameterOperations,
                 options,
+                _searchParameterCacheRefresherMetricHandler,
                 mockLogger);
 
             // Assert
@@ -154,6 +171,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
                 _searchParameterStatusManager,
                 _searchParameterOperations,
                 null,
+                _searchParameterCacheRefresherMetricHandler,
                 NullLogger<SearchParameterCacheRefreshBackgroundService>.Instance));
         }
 
@@ -165,6 +183,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
                 _searchParameterStatusManager,
                 null,
                 _coreFeatureConfiguration,
+                _searchParameterCacheRefresherMetricHandler,
                 NullLogger<SearchParameterCacheRefreshBackgroundService>.Instance));
         }
 
@@ -176,6 +195,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
                 null,
                 _searchParameterOperations,
                 _coreFeatureConfiguration,
+                _searchParameterCacheRefresherMetricHandler,
                 NullLogger<SearchParameterCacheRefreshBackgroundService>.Instance));
         }
 
@@ -187,6 +207,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
                 _searchParameterStatusManager,
                 _searchParameterOperations,
                 _coreFeatureConfiguration,
+                _searchParameterCacheRefresherMetricHandler,
                 null));
         }
 
@@ -204,7 +225,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
             await Task.Delay(200);
 
             // Assert - use at least 1 call since timer might fire multiple times in test environment
-            await _searchParameterOperations.Received().GetAndApplySearchParameterUpdates(Arg.Any<CancellationToken>());
+            await _searchParameterOperations.Received().GetAndApplySearchParameterUpdates(Arg.Any<CancellationToken>(), true);
         }
 
         [Fact]
@@ -218,6 +239,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
                 _searchParameterStatusManager,
                 _searchParameterOperations,
                 _coreFeatureConfiguration,
+                _searchParameterCacheRefresherMetricHandler,
                 mockLogger);
 
             // Act
@@ -249,13 +271,14 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
             var mockLogger = Substitute.For<ILogger<SearchParameterCacheRefreshBackgroundService>>();
 
             // Set up throwing ObjectDisposedException to simulate the service provider being disposed
-            _searchParameterOperations.GetAndApplySearchParameterUpdates(Arg.Any<CancellationToken>())
-                .Returns(_ => throw new ObjectDisposedException("IServiceProvider"));
+            _searchParameterOperations.GetAndApplySearchParameterUpdates(Arg.Any<CancellationToken>(), true)
+                .Returns(_ => Task.FromException<bool>(new ObjectDisposedException("IServiceProvider")));
 
             var service = new SearchParameterCacheRefreshBackgroundService(
                 _searchParameterStatusManager,
                 _searchParameterOperations,
                 _coreFeatureConfiguration,
+                _searchParameterCacheRefresherMetricHandler,
                 mockLogger);
 
             // Act - Initialize and let timer run
@@ -285,10 +308,11 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
                 _searchParameterStatusManager,
                 _searchParameterOperations,
                 _coreFeatureConfiguration,
+                _searchParameterCacheRefresherMetricHandler,
                 mockLogger);
 
-            _searchParameterOperations.GetAndApplySearchParameterUpdates(Arg.Any<CancellationToken>())
-                .Returns(_ => throw new OperationCanceledException());
+            _searchParameterOperations.GetAndApplySearchParameterUpdates(Arg.Any<CancellationToken>(), true)
+                .Returns(_ => Task.FromException<bool>(new OperationCanceledException()));
 
             // Act - Initialize and let timer run
             await service.Handle(new SearchParametersInitializedNotification(), CancellationToken.None);
@@ -315,10 +339,11 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
             using var cancellationTokenSource = new CancellationTokenSource();
             var mockLogger = Substitute.For<ILogger<SearchParameterCacheRefreshBackgroundService>>();
 
-            var service = new SearchParameterCacheRefreshBackgroundService(
+            using var service = new SearchParameterCacheRefreshBackgroundService(
                 _searchParameterStatusManager,
                 _searchParameterOperations,
                 _coreFeatureConfiguration,
+                _searchParameterCacheRefresherMetricHandler,
                 mockLogger);
 
             // Start the service and then immediately cancel it
@@ -328,6 +353,135 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Registry
 
             // Act - Try to handle the notification after cancellation
             await service.Handle(new SearchParametersInitializedNotification(), CancellationToken.None);
+        }
+
+        [Fact]
+        public async Task Handle_WhenServiceRunsWithSuccess_ThenSuccessMetricIsEmitted()
+        {
+            // Arrange
+            using var cancellationTokenSource = new CancellationTokenSource();
+            var mockLogger = Substitute.For<ILogger<SearchParameterCacheRefreshBackgroundService>>();
+
+            using var service = new SearchParameterCacheRefreshBackgroundService(
+                _searchParameterStatusManager,
+                _searchParameterOperations,
+                _coreFeatureConfiguration,
+                _searchParameterCacheRefresherMetricHandler,
+                mockLogger);
+
+            _searchParameterOperations.GetAndApplySearchParameterUpdates(Arg.Any<CancellationToken>(), true)
+                .Returns(_ => true);
+
+            // Start service that skips refresh
+            await service.Handle(new SearchParametersInitializedNotification(), CancellationToken.None);
+
+            // Start the service and then immediately cancel it
+            var executeTask = service.StartAsync(cancellationTokenSource.Token);
+
+            await Task.Delay(2000);
+
+            await executeTask;
+
+            cancellationTokenSource.Cancel();
+
+            _searchParameterCacheRefresherMetricHandler.Received().EmitSuccess();
+
+            _searchParameterCacheRefresherMetricHandler.Received(0).EmitFailure(Arg.Any<string>());
+        }
+
+        [Fact]
+        public async Task WhenBackgroundIsBlockedByAPI_BackgroundShouldSkipRefresh()
+        {
+            var statusStore = Substitute.For<ISearchParameterStatusDataStore>();
+            statusStore.GetSearchParameterStatuses(Arg.Any<CancellationToken>(), Arg.Any<DateTimeOffset?>())
+                .Returns(callInfo =>
+                {
+                    Thread.Sleep(1000); // Block to simulate long-running operation.
+                    return Task.FromResult<IReadOnlyCollection<ResourceSearchParameterStatus>>([]);
+                });
+
+            var statusManager = new SearchParameterStatusManager(
+                statusStore,
+                Substitute.For<ISearchParameterDefinitionManager>(),
+                Substitute.For<ISearchParameterSupportResolver>(),
+                Substitute.For<IMediator>(),
+                Substitute.For<ILogger<SearchParameterStatusManager>>());
+
+            var paramOperations = new SearchParameterOperations(
+                statusManager,
+                Substitute.For<ISearchParameterDefinitionManager>(),
+                Substitute.For<IModelInfoProvider>(),
+                Substitute.For<ISearchParameterSupportResolver>(),
+                Substitute.For<IDataStoreSearchParameterValidator>(),
+                () => Substitute.For<IScoped<IFhirOperationDataStore>>(),
+                Substitute.For<Func<IScoped<ISearchService>>>(),
+                Substitute.For<IScopeProvider<IFhirDataStore>>(),
+                Substitute.For<IResourceWrapperFactory>(),
+                Substitute.For<ILogger<SearchParameterOperations>>());
+
+            // Start a long-running API call that holds the semaphore
+            var apiTask = Task.Run(async () => { await paramOperations.GetAndApplySearchParameterUpdates(CancellationToken.None); });
+
+            var mockLogger = Substitute.For<ILogger<SearchParameterCacheRefreshBackgroundService>>();
+            var service = new SearchParameterCacheRefreshBackgroundService(_searchParameterStatusManager, paramOperations, _coreFeatureConfiguration, _searchParameterCacheRefresherMetricHandler, mockLogger);
+
+            // Start service that skips refresh
+            await service.Handle(new SearchParametersInitializedNotification(), CancellationToken.None);
+
+            await apiTask;
+
+            mockLogger.Received().Log(
+                LogLevel.Information,
+                Arg.Any<EventId>(),
+                Arg.Is<object>(o => o.ToString().Contains("Skipped incremental SearchParameter cache refresh.")),
+                null,
+                Arg.Any<Func<object, Exception, string>>());
+
+            service.Dispose();
+        }
+
+        [Fact]
+        public async Task WhenAPIIsBlockedByBackground_ApiShouldWait()
+        {
+            var statusStore = Substitute.For<ISearchParameterStatusDataStore>();
+            statusStore.GetSearchParameterStatuses(Arg.Any<CancellationToken>(), Arg.Any<DateTimeOffset?>())
+                .Returns(callInfo =>
+                {
+                    Thread.Sleep(5000); // Block to simulate long-running operation.
+                    return Task.FromResult<IReadOnlyCollection<ResourceSearchParameterStatus>>([]);
+                });
+
+            var statusManager = new SearchParameterStatusManager(
+                statusStore,
+                Substitute.For<ISearchParameterDefinitionManager>(),
+                Substitute.For<ISearchParameterSupportResolver>(),
+                Substitute.For<IMediator>(),
+                Substitute.For<ILogger<SearchParameterStatusManager>>());
+
+            var paramOperations = new SearchParameterOperations(
+                statusManager,
+                Substitute.For<ISearchParameterDefinitionManager>(),
+                Substitute.For<IModelInfoProvider>(),
+                Substitute.For<ISearchParameterSupportResolver>(),
+                Substitute.For<IDataStoreSearchParameterValidator>(),
+                () => Substitute.For<IScoped<IFhirOperationDataStore>>(),
+                Substitute.For<Func<IScoped<ISearchService>>>(),
+                Substitute.For<IScopeProvider<IFhirDataStore>>(),
+                Substitute.For<IResourceWrapperFactory>(),
+                Substitute.For<ILogger<SearchParameterOperations>>());
+
+            var mockLogger = Substitute.For<ILogger<SearchParameterCacheRefreshBackgroundService>>();
+            var service = new SearchParameterCacheRefreshBackgroundService(_searchParameterStatusManager, paramOperations, _coreFeatureConfiguration, _searchParameterCacheRefresherMetricHandler, mockLogger);
+
+            // Start service that holds the semaphore
+            await service.Handle(new SearchParametersInitializedNotification(), CancellationToken.None);
+
+            // Start API call that waits
+            var sw = Stopwatch.StartNew();
+            var apiTask = Task.Run(async () => { await paramOperations.GetAndApplySearchParameterUpdates(CancellationToken.None); });
+            await apiTask;
+
+            Assert.True(sw.Elapsed.TotalMilliseconds >= 4000, "API call should have been blocked by background operation.");
 
             service.Dispose();
         }

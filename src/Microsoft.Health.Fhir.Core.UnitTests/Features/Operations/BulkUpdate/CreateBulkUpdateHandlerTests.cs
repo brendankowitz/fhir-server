@@ -81,7 +81,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Operations.BulkUpdate
                 var definition = JsonConvert.DeserializeObject<BulkUpdateDefinition>(args.ArgAt<string[]>(1)[0]);
                 Assert.Equal(_testUrl, definition.Url);
                 Assert.Equal(_testUrl, definition.BaseUrl);
-                Assert.Equal((searchParams?.Count ?? 0) + 1, definition.SearchParameters.Count);
+                Assert.Equal(searchParams?.Count ?? 0, definition.SearchParameters.Count);
                 return new List<JobInfo>()
                 {
                     new JobInfo()
@@ -115,7 +115,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Operations.BulkUpdate
                 var definition = JsonConvert.DeserializeObject<BulkUpdateDefinition>(args.ArgAt<string[]>(1)[0]);
                 Assert.Equal(_testUrl, definition.Url);
                 Assert.Equal(_testUrl, definition.BaseUrl);
-                Assert.Equal(searchParams.Count + 1, definition.SearchParameters.Count);
+                Assert.Equal(searchParams.Count, definition.SearchParameters.Count);
                 Assert.Null(definition.Type);
 
                 return new List<JobInfo>()
@@ -144,7 +144,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Operations.BulkUpdate
                 var definition = JsonConvert.DeserializeObject<BulkUpdateDefinition>(args.ArgAt<string[]>(1)[0]);
                 Assert.Equal(_testUrl, definition.Url);
                 Assert.Equal(_testUrl, definition.BaseUrl);
-                Assert.Single(definition.SearchParameters); // Will have _lastUpdated parameter added by the handler
+                Assert.Empty(definition.SearchParameters);
 
                 return new List<JobInfo>()
                     {
@@ -348,6 +348,10 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Operations.BulkUpdate
                     new Tuple<string, string>("_lastUpdated", "value2"),
                     new Tuple<string, string>("_lastUpdated", "value3"),
                 },
+            };
+            yield return new object[]
+            {
+                new List<Tuple<string, string>>(),
             };
         }
     }

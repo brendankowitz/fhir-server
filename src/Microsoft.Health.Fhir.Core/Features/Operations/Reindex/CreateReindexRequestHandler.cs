@@ -17,6 +17,7 @@ using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Operations.Reindex.Models;
 using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
 using Microsoft.Health.Fhir.Core.Features.Security;
+using Microsoft.Health.Fhir.Core.Features.Security.Authorization;
 using Microsoft.Health.Fhir.Core.Messages.Reindex;
 using Microsoft.Health.Fhir.Core.Models;
 
@@ -54,10 +55,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Reindex
         {
             EnsureArg.IsNotNull(request, nameof(request));
 
-            if (await _authorizationService.CheckAccess(DataActions.Reindex, cancellationToken) != DataActions.Reindex)
-            {
-                throw new UnauthorizedFhirActionException();
-            }
+            await _authorizationService.CheckAccess(DataActions.Reindex, true, cancellationToken);
 
             // Check for active reindex jobs - but don't block, instead signal for updates
             (var activeReindexJobs, var reindexJobId) = await _fhirOperationDataStore.CheckActiveReindexJobsAsync(cancellationToken);
@@ -69,32 +67,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Reindex
                 return new CreateReindexResponse(existingJob);
             }
 
-            // We need to pull in latest search parameter updates from the data store before creating a reindex job.
-            // There could be a potential delay of <see cref="ReindexJobConfiguration.JobPollingFrequency"/> before
-            // search parameter updates on one instance propagates to other instances.
-            await _searchParameterOperations.GetAndApplySearchParameterUpdates(cancellationToken);
-
-            // What this handles is the scenario where a user is effectively forcing a reindex to run by passing
-            // in a parameter of targetSearchParameterTypes. From those we can identify the base resource types.
-            var searchParameterResourceTypes = new HashSet<string>();
-            if (request.TargetSearchParameterTypes.Any())
-            {
-                foreach (var searchParameterUrl in request.TargetSearchParameterTypes)
-                {
-                    SearchParameterInfo searchParameterInfo = _searchParameterDefinitionManager.GetSearchParameter(searchParameterUrl);
-                    if (searchParameterInfo == null)
-                    {
-                        throw new RequestNotValidException(Core.Resources.SearchParameterByDefinitionUriNotSupported, searchParameterUrl);
-                    }
-
-                    searchParameterResourceTypes.UnionWith(searchParameterInfo.BaseResourceTypes);
-                }
-            }
-
             var jobRecord = new ReindexJobRecord(
             request.TargetResourceTypes,
-            request.TargetSearchParameterTypes,
-            searchParameterResourceTypes,
             request.MaximumResourcesPerQuery ?? _reindexJobConfiguration.MaximumNumberOfResourcesPerQuery,
             request.MaximumResourcesPerWrite ?? _reindexJobConfiguration.MaximumNumberOfResourcesPerWrite,
             request.QueryDelayIntervalInMilliseconds ?? _reindexJobConfiguration.QueryDelayIntervalInMilliseconds);

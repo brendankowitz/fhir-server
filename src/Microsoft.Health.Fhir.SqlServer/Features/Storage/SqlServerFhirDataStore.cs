@@ -30,6 +30,8 @@ using Microsoft.Health.Fhir.Core.Features.Operations.Import;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Persistence.Orchestration;
 using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
+using Microsoft.Health.Fhir.Core.Features.Search.Registry;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema.Model;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage.TvpRowGeneration;
@@ -154,6 +156,9 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
+                // Capture whether this attempt is enlisted in an ambient C# transaction (e.g. a sequential transaction bundle).
+                bool wasEnlistedInAmbientTransaction = mergeOptions.EnlistInTransaction && _sqlTransactionHandler.SqlTransactionScope != null;
+
                 try
                 {
                     var results = await MergeInternalAsync(
@@ -163,7 +168,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                         mergeOptions.EnlistInTransaction,
                         retries == 0,
                         eventualConsistency: false,
-                        ensureAtomicOperations: mergeOptions.EnsureAtomicOperations,
+                        isBundleTransaction: mergeOptions.IsBundleTransaction,
                         cancellationToken); // TODO: Pass correct retries value once we start supporting retries
                     return results;
                 }
@@ -174,10 +179,17 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                     if (sqlEx != null)
                     {
                         // SQL Conflict (50409) - It indicates a conflict with another concurrent operation, which could be resolved by retrying.
-                        // SQL Failed Dependency (50424) - Rare scenario. It indicates an issue with the surrogate ID generation, which could be resolved by retrying.
+                        // SQL Duplicated Key Conflict (50424) - Rare scenario. It indicates an issue with the surrogate ID generation. Regular API calls should not retry.
 
                         if (sqlEx.Number == SqlErrorCodes.Conflict)
                         {
+                            if (wasEnlistedInAmbientTransaction)
+                            {
+                                // The ambient SqlTransaction is now zombied by this conflict; retrying within it is futile. Fail fast with a 409 so the client can retry the whole transaction bundle.
+                                _logger.LogWarning(e, "Conflict: ResourceConcurrentUpdateConflict in ambient transaction; failing fast (SQL error {SqlErrorNumber}).", sqlEx.Number);
+                                throw new ResourceConflictException(Resources.ResourceConcurrentUpdateConflict);
+                            }
+
                             if (retries++ >= maxRetries)
                             {
                                 _logger.LogInformation("PreconditionFailed: ResourceConcurrentUpdateConflict");
@@ -192,12 +204,18 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                                 continue;
                             }
                         }
-                        else if (sqlEx.Number == FhirSqlErrorCodes.FailedDependency && retries++ < maxRetries)
+                        else if (sqlEx.Number == FhirSqlErrorCodes.SurrogateIdCollision && retries++ < maxRetries)
                         {
-                            _logger.LogWarning(e, $"Error from SQL database on {nameof(MergeAsync)} retries={{Retries}} (FailedDependency)", retries);
+                            _logger.LogWarning(e, $"Error from SQL database on {nameof(MergeAsync)} retries={{Retries}} (SurrogateIdCollision)", retries);
                             await _sqlRetryService.TryLogEvent(nameof(MergeAsync), "Warn", $"retries={retries}, error={e}, ", null, cancellationToken);
+
                             await Task.Delay(defaultRetryDelayInMilliseconds, cancellationToken);
                             continue;
+                        }
+                        else if (sqlEx.IsSearchParameterConcurrencyConflict())
+                        {
+                            _logger.LogWarning(sqlEx, "Optimistic concurrency conflict occurred while calling dbo.MergeResourcesAndSearchParams");
+                            throw new BadRequestException(Core.Resources.SearchParameterConcurrencyConflict);
                         }
                     }
 
@@ -209,7 +227,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
             }
         }
 
-        private async Task<MergeOutcome> MergeInternalAsync(IReadOnlyList<ResourceWrapperOperation> resources, bool keepLastUpdated, bool keepAllDeleted, bool enlistInTransaction, bool useReplicasForReads, bool eventualConsistency, bool ensureAtomicOperations, CancellationToken cancellationToken)
+        private async Task<MergeOutcome> MergeInternalAsync(IReadOnlyList<ResourceWrapperOperation> resources, bool keepLastUpdated, bool keepAllDeleted, bool enlistInTransaction, bool useReplicasForReads, bool eventualConsistency, bool isBundleTransaction, CancellationToken cancellationToken)
         {
             var results = new Dictionary<DataStoreOperationIdentifier, DataStoreOperationOutcome>();
             if (resources == null || resources.Count == 0)
@@ -230,19 +248,19 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
 
             var index = 0;
             var mergeWrappersWithVersions = new List<(MergeResourceWrapper Wrapper, bool KeepVersion, int ResourceVersion, int? ExistingVersion)>();
-            var prevResourceId = string.Empty;
+            ResourceKey prevResourceKey = null;
             foreach (var resourceExt in resources) // if list contains more that one version per resource it must be sorted by id and last updated DESC.
             {
                 var metaHistory = true;
                 var resource = resourceExt.Wrapper;
-                var setAsHistory = prevResourceId == resource.ResourceId; // this assumes that first resource version is the latest one
+                var setAsHistory = prevResourceKey == resource.ToResourceKey(true); // this assumes that first resource version is the latest one
                 //// negative versions are historical by definition
                 if (resourceExt.KeepVersion && int.Parse(resource.Version) < 0)
                 {
                     setAsHistory = true;
                 }
 
-                prevResourceId = resource.ResourceId;
+                prevResourceKey = resource.ToResourceKey(true);
                 var weakETag = resourceExt.WeakETag;
                 int? eTag = weakETag == null
                     ? null
@@ -336,12 +354,15 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                         // check if the new resource data is same as existing resource data
                         if (ExistingRawResourceIsEqualToInput(resource.RawResource, existingResource.RawResource, resourceExt.KeepVersion))
                         {
+                            _logger.LogInformation("Update operation resulted in no changes for resource {ResourceType}/{ResourceId}.", resource.ResourceTypeName, resource.ResourceId);
+
                             // Send the existing resource in the response
                             results.Add(resourceExt.GetIdentifier(), new DataStoreOperationOutcome(new UpsertOutcome(existingResource, SaveOutcomeType.Updated)));
                             continue;
                         }
                         else if (!resourceExt.MetaHistory && ChangesAreOnlyInMetadata(resource, existingResource))
                         {
+                            _logger.LogInformation("Update operation modified only meta fields for resource {ResourceType}/{ResourceId}.", resource.ResourceTypeName, resource.ResourceId);
                             metaHistory = false;
                         }
                     }
@@ -386,14 +407,21 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                     singleTransaction = true;
                 }
 
-                mergeWrappersWithVersions.Add((new MergeResourceWrapper(resource, resourceExt.KeepHistory && metaHistory, hasVersionToCompare), resourceExt.KeepVersion, int.Parse(resource.Version), existingVersion));
+                // exclude resources for search param deletes, as they are handled by reindex
+                if (resourceExt.PendingSearchParameterStatus == null
+                    || (resourceExt.PendingSearchParameterStatus.Status != SearchParameterStatus.PendingDelete
+                        && resourceExt.PendingSearchParameterStatus.Status != SearchParameterStatus.PendingHardDelete))
+                {
+                    mergeWrappersWithVersions.Add((new MergeResourceWrapper(resource, resourceExt.KeepHistory && metaHistory, hasVersionToCompare), resourceExt.KeepVersion, int.Parse(resource.Version), existingVersion));
+                }
+
                 index++;
                 results.Add(resourceExt.GetIdentifier(), new DataStoreOperationOutcome(new UpsertOutcome(resource, resource.Version == InitialVersion ? SaveOutcomeType.Created : SaveOutcomeType.Updated)));
             }
 
-            // In case the operation is atomic and there are validation errors, then nothing should be persisted at the database.
+            // In case the operation is atomic (i.e., bundle transaction) and there are validation errors, then nothing should be persisted at the database.
             // Instead, the errors should be reported and ensure the operation is atomic.
-            if (ensureAtomicOperations && results.Where(r => !r.Value.IsOperationSuccessful).Any())
+            if (isBundleTransaction && results.Where(r => !r.Value.IsOperationSuccessful).Any())
             {
                 return new MergeOutcome(MergeOutcomeFinalState.CompletedWithFailures, results);
             }
@@ -402,16 +430,16 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
             // Resources with keepVersion=true must be in separate call, and not mixed with keepVersion=false ones.
             // Sort them in groups by resource id and order by version.
             // In each group find the smallest version higher then existing
-            prevResourceId = string.Empty;
+            prevResourceKey = null;
             var notSetInResoureGroup = false;
-            foreach (var mergeWrapper in mergeWrappersWithVersions.Where(x => x.KeepVersion && x.ExistingVersion != 0).OrderBy(x => x.Wrapper.ResourceWrapper.ResourceId).ThenBy(x => x.ResourceVersion))
+            foreach (var mergeWrapper in mergeWrappersWithVersions.Where(x => x.KeepVersion && x.ExistingVersion != 0).OrderBy(x => x.Wrapper.ResourceWrapper.ToResourceKey(true)).ThenBy(x => x.ResourceVersion))
             {
-                if (prevResourceId != mergeWrapper.Wrapper.ResourceWrapper.ResourceId) // this should reset flag on each resource id group including first.
+                if (prevResourceKey != mergeWrapper.Wrapper.ResourceWrapper.ToResourceKey(true)) // this should reset flag on each resource id group including first.
                 {
                     notSetInResoureGroup = true;
                 }
 
-                prevResourceId = mergeWrapper.Wrapper.ResourceWrapper.ResourceId;
+                prevResourceKey = mergeWrapper.Wrapper.ResourceWrapper.ToResourceKey(true);
 
                 if (notSetInResoureGroup && mergeWrapper.ResourceVersion > mergeWrapper.ExistingVersion)
                 {
@@ -420,7 +448,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                 }
             }
 
-            if (mergeWrappersWithVersions.Count > 0) // Do not call DB with empty input
+            var pendingStatuses = resources.Where(_ => _.PendingSearchParameterStatus != null).Select(_ => _.PendingSearchParameterStatus).ToList();
+            if (mergeWrappersWithVersions.Count > 0 || pendingStatuses.Count > 0) // Do not call DB with empty input
             {
                 await using (new Timer(async _ => await _sqlStoreClient.MergeResourcesPutTransactionHeartbeatAsync(transactionId, MergeResourcesTransactionHeartbeatPeriod, cancellationToken), null, TimeSpan.FromSeconds(RandomNumberGenerator.GetInt32(100) / 100.0 * MergeResourcesTransactionHeartbeatPeriod.TotalSeconds), MergeResourcesTransactionHeartbeatPeriod))
                 {
@@ -430,7 +459,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                     {
                         try
                         {
-                            await MergeResourcesWrapperAsync(transactionId, singleTransaction, mergeWrappersWithVersions.Select(_ => _.Wrapper).ToList(), enlistInTransaction, timeoutRetries, cancellationToken);
+                            await MergeResourcesWrapperAsync(transactionId, singleTransaction, mergeWrappersWithVersions.Select(_ => _.Wrapper).ToList(), enlistInTransaction, timeoutRetries, pendingStatuses, cancellationToken);
                             break;
                         }
                         catch (Exception e)
@@ -492,9 +521,9 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                         continue;
                     }
 
-                    if (sqlEx != null && sqlEx.Number == SqlErrorCodes.Conflict && retries++ < maxRetries)
+                    if (sqlEx != null && (sqlEx.Number == SqlErrorCodes.Conflict || sqlEx.Number == FhirSqlErrorCodes.SurrogateIdCollision) && retries++ < maxRetries)
                     {
-                        _logger.LogWarning(e, $"Error on {nameof(ImportResourcesInternalAsync)} retries={{Retries}} resources={{Resources}}", retries, resources.Count);
+                        _logger.LogWarning(e, $"Error on {nameof(ImportResourcesInternalAsync)} retries={{Retries}} resources={{Resources}} error={{SqlErrorCode}}", retries, resources.Count, sqlEx.Number);
                         await Task.Delay(retries > 3 ? 10 : 1000, cancellationToken); // if >3 assume that it is id generation problem
                         continue;
                     }
@@ -604,12 +633,12 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                 List<ImportResource> RemoveVersionOutOfSyncWithLastUpdatedConflicts(IEnumerable<ImportResource> inputs)
                 {
                     // Remove conflicts where versions and last updated are out of order
-                    var prevResourceId = string.Empty;
+                    ResourceKey prevResourceKey = null;
                     var prevVersion = int.MaxValue;
                     var inputsWithVersion = new List<ImportResource>();
-                    foreach (var input in inputs.OrderBy(_ => _.ResourceWrapper.ResourceId).ThenByDescending(_ => _.ResourceWrapper.LastModified))
+                    foreach (var input in inputs.OrderBy(_ => _.ResourceWrapper.ToResourceKey(true)).ThenByDescending(_ => _.ResourceWrapper.LastModified))
                     {
-                        if (prevResourceId != input.ResourceWrapper.ResourceId)
+                        if (prevResourceKey != input.ResourceWrapper.ToResourceKey(true))
                         {
                             prevVersion = int.MaxValue;
                         }
@@ -638,7 +667,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                             inputsWithVersion.Add(input);
                         }
 
-                        prevResourceId = input.ResourceWrapper.ResourceId;
+                        prevResourceKey = input.ResourceWrapper.ToResourceKey(true);
                         prevVersion = inputVersion;
                     }
 
@@ -714,10 +743,10 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                     // Ensure that the imported resources can "fit" in the db. We want to keep versionId alinged to lastUpdated and sequential if possible.
                     // Note: surrogate id is populated from last updated by ToResourceDateKey(), therefore we can trust this value as part of dictionary key.
                     var versionSlots = (await StoreClient.GetResourceVersionsAsync(inputsNoVersionForCheck.Select(_ => _.ResourceWrapper.ToResourceDateKey(_model.GetResourceTypeId, true)).ToList(), _compressedRawResourceConverter.ReadCompressedRawResource, cancellationToken)).ToDictionary(_ => new ResourceDateKey(_.Key.ResourceTypeId, _.Key.Id, _.Key.ResourceSurrogateId, null), _ => _);
-                    foreach (var input in inputsNoVersionForCheck.OrderBy(_ => _.ResourceWrapper.ResourceId).ThenByDescending(_ => _.ResourceWrapper.LastModified))
+                    foreach (var input in inputsNoVersionForCheck.OrderBy(_ => _.ResourceWrapper.ToResourceKey(true)).ThenByDescending(_ => _.ResourceWrapper.LastModified))
                     {
-                        var resourceKey = input.ResourceWrapper.ToResourceDateKey(_model.GetResourceTypeId, true);
-                        versionSlots.TryGetValue(resourceKey, out var existing);
+                        var resourceDateKey = input.ResourceWrapper.ToResourceDateKey(_model.GetResourceTypeId, true);
+                        versionSlots.TryGetValue(resourceDateKey, out var existing);
                         input.KeepVersion = true;
                         var versionIdInt = int.Parse(existing.Key.VersionId);
                         if (versionIdInt == 0) // though this check was done above, racing conditions can stil lead to extra matches
@@ -751,51 +780,55 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                     var inputNoConflict = inputs.Except(conflicts).Except(loaded);
 
                     // Make sure that version is incremented taking into account current state in the database.
-                    var prevResourceId = string.Empty;
+                    ResourceKey prevResourceKey = null;
                     var version = 0;
-                    foreach (var input in inputNoConflict.Where(_ => _.KeepLastUpdated && !_.KeepVersion).OrderBy(_ => _.ResourceWrapper.ResourceId).ThenBy(_ => _.ResourceWrapper.LastModified))
+                    foreach (var input in inputNoConflict.Where(_ => _.KeepLastUpdated && !_.KeepVersion).OrderBy(_ => _.ResourceWrapper.ToResourceKey(true)).ThenBy(_ => _.ResourceWrapper.LastModified))
                     {
-                        if (prevResourceId != input.ResourceWrapper.ResourceId)
+                        if (prevResourceKey != input.ResourceWrapper.ToResourceKey(true))
                         {
                             version = currentInDb.TryGetValue(input.ResourceWrapper.ToResourceKey(true), out var current) ? int.Parse(current.Version) : 0;
                         }
 
                         input.ResourceWrapper.Version = (++version).ToString();
                         input.KeepVersion = true;
-                        prevResourceId = input.ResourceWrapper.ResourceId;
+                        prevResourceKey = input.ResourceWrapper.ToResourceKey(true);
                     }
 
                     // Finally merge the resources to the db.
-                    await Merge(inputNoConflict.OrderBy(_ => _.ResourceWrapper.ResourceId).ThenByDescending(_ => int.Parse(_.ResourceWrapper.Version)), keepLastUpdated, useReplicasForReads);
+                    await Merge(inputNoConflict.OrderBy(_ => _.ResourceWrapper.ToResourceKey(true)).ThenByDescending(_ => int.Parse(_.ResourceWrapper.Version)), keepLastUpdated, useReplicasForReads);
                     loaded.AddRange(inputNoConflict);
                 }
             }
 
             async Task Merge(IEnumerable<ImportResource> resources, bool keepLastUpdated, bool useReplicasForReads)
             {
-                var input = resources.Select(_ => new ResourceWrapperOperation(_.ResourceWrapper, true, true, null, requireETagOnUpdate: false, keepVersion: _.KeepVersion, bundleResourceContext: null)).ToList();
-                await MergeInternalAsync(
-                    resources: input,
-                    keepLastUpdated,
-                    keepAllDeleted: true,
-                    enlistInTransaction: false,
-                    useReplicasForReads,
-                    eventualConsistency,
-                    ensureAtomicOperations: false,
-                    cancellationToken);
+                var input = resources.Select(_ => new ResourceWrapperOperation(_.ResourceWrapper, true, true, null, false, _.KeepVersion, null)).ToList();
+                await MergeInternalAsync(input, keepLastUpdated, true, false, useReplicasForReads, eventualConsistency, false, cancellationToken);
             }
         }
 
-        internal async Task MergeResourcesWrapperAsync(long transactionId, bool singleTransaction, IReadOnlyList<MergeResourceWrapper> mergeWrappers, bool enlistInTransaction, int timeoutRetries, CancellationToken cancellationToken)
+        internal async Task MergeResourcesWrapperAsync(long transactionId, bool singleTransaction, IReadOnlyList<MergeResourceWrapper> mergeWrappers, bool enlistInTransaction, int timeoutRetries, IReadOnlyList<ResourceSearchParameterStatus> pendingStatuses, CancellationToken cancellationToken)
         {
             var sw = Stopwatch.StartNew();
             using var cmd = new SqlCommand();
             //// Do not use auto generated tvp generator as it does not allow to skip compartment tvp and paramters with default values
             cmd.CommandType = CommandType.StoredProcedure;
-            cmd.CommandText = "dbo.MergeResources";
+
+            if (pendingStatuses?.Count > 0)
+            {
+                cmd.CommandText = "dbo.MergeResourcesAndSearchParams";
+                new SearchParamListTableValuedParameterDefinition("@SearchParams").AddParameter(cmd.Parameters, new SearchParamListRowGenerator().GenerateRows(pendingStatuses));
+                cmd.Parameters.AddWithValue("@ReindexId", 0);
+            }
+            else
+            {
+                cmd.CommandText = "dbo.MergeResources";
+                cmd.Parameters.AddWithValue("@SingleTransaction", singleTransaction);
+            }
+
             cmd.Parameters.AddWithValue("@IsResourceChangeCaptureEnabled", _coreFeatures.SupportsResourceChangeCapture);
             cmd.Parameters.AddWithValue("@TransactionId", transactionId);
-            cmd.Parameters.AddWithValue("@SingleTransaction", singleTransaction);
+
             new ResourceListTableValuedParameterDefinition("@Resources").AddParameter(cmd.Parameters, new ResourceListRowGenerator(_model, _compressedRawResourceConverter).GenerateRows(mergeWrappers));
             new ResourceWriteClaimListTableValuedParameterDefinition("@ResourceWriteClaims").AddParameter(cmd.Parameters, new ResourceWriteClaimListRowGenerator(_model, _searchParameterTypeMap).GenerateRows(mergeWrappers));
             new ReferenceSearchParamListTableValuedParameterDefinition("@ReferenceSearchParams").AddParameter(cmd.Parameters, new ReferenceSearchParamListRowGenerator(_model, _searchParameterTypeMap).GenerateRows(mergeWrappers));
@@ -827,7 +860,16 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                 await cmd.ExecuteNonQueryAsync(_sqlRetryService, _logger, cancellationToken, disableRetries: true, applicationName: MergeApplicationName);
             }
 
-            _logger.LogInformation($"MergeResourcesWrapperAsync: transactionId={transactionId}, singleTransaction={singleTransaction}, resources={mergeWrappers.Count}, enlistInTran={enlistInTransaction}, commandTimeout={commandTimeout}, elapsed={sw.Elapsed.TotalMilliseconds} ms.");
+            _logger.LogInformation($"MergeResourcesWrapperAsync: resources={mergeWrappers.Count}, searchParams={pendingStatuses?.Count ?? 0} transactionId={transactionId}, singleTransaction={singleTransaction}, enlistInTran={enlistInTransaction}, commandTimeout={commandTimeout}, elapsed={sw.Elapsed.TotalMilliseconds} ms.");
+        }
+
+        private void SetAndClearPendingSearchParameterStatus(ResourceWrapperOperation resource)
+        {
+            if (_requestContextAccessor?.RequestContext?.Properties?.TryGetValue(SearchParameterRequestContextPropertyNames.PendingStatus, out object value) == true)
+            {
+                resource.PendingSearchParameterStatus = (ResourceSearchParameterStatus)value;
+                _requestContextAccessor.RequestContext.Properties.Remove(SearchParameterRequestContextPropertyNames.PendingStatus);
+            }
         }
 
         public async Task<UpsertOutcome> UpsertAsync(ResourceWrapperOperation resource, CancellationToken cancellationToken)
@@ -840,15 +882,33 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                 resource.BundleResourceContext != null &&
                 resource.BundleResourceContext.IsTransactionalBundle;
 
+            // For non-transaction operations, extract pending statuses now so they are merged with the resource.
+            // Transaction bundles never reach this branch with pending statuses: any transaction bundle that
+            // contains a SearchParameter resource is forced to the parallel path (handled above), where the
+            // statuses ride along with the resource through dbo.MergeResourcesAndSearchParams.
+            if (!isBundleTransaction)
+            {
+                SetAndClearPendingSearchParameterStatus(resource);
+            }
+
             if (isBundleParallelOperation)
             {
+                // Parallel operations:
+                // - EnlistTransaction: should be always false, and rely on SQL transactions.
+
                 IBundleOrchestratorOperation bundleOperation = _bundleOrchestrator.GetOperation(resource.BundleResourceContext.BundleOperationId);
+                SetAndClearPendingSearchParameterStatus(resource);
+
                 return await bundleOperation.AppendResourceAsync(resource, this, cancellationToken).ConfigureAwait(false);
             }
             else
             {
-                // For regular upserts and sequential bundle operations, enlistTransaction is set to true.
-                MergeOptions mergeOptions = new MergeOptions(enlistTransaction: true, ensureAtomicOperations: isBundleTransaction);
+                // Sequential operations:
+                // - EnlistTransaction: set to true only in sequential transaction bundles (as they rely on C# transactions). Standalone operations should not enlist transactions (as they rely on SQL transactions).
+
+                MergeOptions mergeOptions = new MergeOptions(
+                    enlistTransaction: isBundleTransaction,
+                    isBundleTransaction: isBundleTransaction);
                 var mergeOutcome = await MergeAsync(new[] { resource }, mergeOptions, cancellationToken);
                 DataStoreOperationOutcome dataStoreOperationOutcome = mergeOutcome.Results.First().Value;
 

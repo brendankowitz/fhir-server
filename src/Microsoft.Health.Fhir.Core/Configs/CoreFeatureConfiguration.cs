@@ -114,6 +114,14 @@ namespace Microsoft.Health.Fhir.Core.Configs
         public bool EnableGeoRedundancy { get; set; }
 
         /// <summary>
+        /// Gets or sets a value indicating whether stale job queue monitoring is enabled.
+        /// When enabled (the default), the <c>JobMonitorWatchdog</c> periodically reads aggregate job
+        /// queue state and emits the <c>Jobs.OldestQueuedAge</c> and <c>Jobs.QueueDepth</c> metrics.
+        /// Disabling it stops the periodic SQL reads and metric publication without affecting job processing.
+        /// </summary>
+        public bool EnableJobMonitor { get; set; } = true;
+
+        /// <summary>
         /// Gets or sets the refresh interval in seconds for the SearchParameter cache background service.
         /// The background service will call EnsureCacheFreshnessAsync at this interval to keep
         /// SearchParameter cache synchronized across instances. Default is 60 seconds if not specified.
@@ -136,5 +144,13 @@ namespace Microsoft.Health.Fhir.Core.Configs
         /// Gets or sets the rebuild interval in seconds for the SystemConformanceProvider background service.
         /// </summary>
         public int SystemConformanceProviderRebuildIntervalSeconds { get; set; } = 14400; // 4 hours.
+
+        /// <summary>
+        /// Gets or sets a value indicating whether FHIR resources with dangerous href schemes
+        /// (e.g., javascript:, vbscript:) in narrative HTML should be rejected during validation.
+        /// When false (default), a warning is logged but the resource is accepted.
+        /// When true, the resource is rejected with a validation error.
+        /// </summary>
+        public bool RejectDangerousNarrativeHrefs { get; set; } = false;
     }
 }

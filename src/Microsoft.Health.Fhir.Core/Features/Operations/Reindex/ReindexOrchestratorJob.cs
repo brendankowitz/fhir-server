@@ -6,12 +6,14 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
 using Hl7.Fhir.Model;
+using Hl7.Fhir.Utility;
 using Microsoft.AspNetCore.JsonPatch.Internal;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
@@ -22,6 +24,7 @@ using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Operations.Reindex.Models;
+using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
 using Microsoft.Health.Fhir.Core.Features.Search.Registry;
@@ -43,8 +46,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Reindex
         private readonly IModelInfoProvider _modelInfoProvider;
         private readonly ISearchParameterOperations _searchParameterOperations;
         private readonly bool _isSurrogateIdRangingSupported;
-        private readonly CoreFeatureConfiguration _coreFeatureConfiguration;
         private readonly OperationsConfiguration _operationsConfiguration;
+        private readonly int _searchParameterCacheRefreshIntervalSeconds;
 
         private CancellationToken _cancellationToken;
         private IQueueClient _queueClient;
@@ -75,7 +78,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Reindex
         /// Combined retry policy for search parameter status updates.
         /// Handles both SQL Server timeouts and Cosmos DB 429 errors.
         /// </summary>
-        private static readonly AsyncPolicy _searchParameterStatusRetries = Policy.WrapAsync(_requestRateRetries, _timeoutRetries);
+        private static readonly AsyncPolicy _retries = Policy.WrapAsync(_requestRateRetries, _timeoutRetries);
 
         private HashSet<long> _processedJobIds = new HashSet<long>();
         private HashSet<string> _processedSearchParameters = new HashSet<string>();
@@ -113,8 +116,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Reindex
             _modelInfoProvider = modelInfoProvider;
             _searchParameterStatusManager = searchParameterStatusManager;
             _searchParameterOperations = searchParameterOperations;
-            _coreFeatureConfiguration = coreFeatureConfiguration.Value;
             _operationsConfiguration = operationsConfiguration.Value;
+            _searchParameterCacheRefreshIntervalSeconds = coreFeatureConfiguration.Value.SearchParameterCacheRefreshIntervalSeconds;
 
             // Determine support for surrogate ID ranging once
             // This is to ensure Gen1 Reindex still works as expected but we still maintain perf on job inseration to SQL
@@ -183,39 +186,108 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Reindex
             return JsonConvert.SerializeObject(_currentResult);
         }
 
-        private async Task WaitForRefresh()
-        {
-            await Task.Delay(_operationsConfiguration.Reindex.CacheRefreshWaitMultiplier * _coreFeatureConfiguration.SearchParameterCacheRefreshIntervalSeconds * 1000, _cancellationToken);
-        }
-
         private async Task RefreshSearchParameterCache(bool isReindexStart)
         {
-            // before starting anything wait for natural cache refresh. this will also make sure that all processing pods have latest search param definitions.
             var suffix = isReindexStart ? "Start" : "End";
             _logger.LogJobInformation(_jobInfo, $"Reindex orchestrator job started cache refresh at the {suffix}.");
             await TryLogEvent($"ReindexOrchestratorJob={_jobInfo.Id}.ExecuteAsync.{suffix}", "Warn", "Started", null, _cancellationToken);
-            await WaitForRefresh(); // wait for M * cache refresh intervals
 
-            // Update the reindex job record with the latest hash map
-            var currentDate = _searchParameterOperations.SearchParamLastUpdated.HasValue ? _searchParameterOperations.SearchParamLastUpdated.Value : DateTimeOffset.MinValue;
-            _searchParamLastUpdated = currentDate;
+            if (_isSurrogateIdRangingSupported)
+            {
+                // SQL Server: Wait for all instances to update their cache. This prevents the
+                // orchestrator from creating reindex ranges while other instances still have
+                // stale search parameter caches and would write resources with wrong hashes.
+                var updateEventsSince = isReindexStart ? _jobInfo.StartDate.Value : DateTime.UtcNow;
+                var isConsistent = await WaitForAllInstancesCacheSyncAsync(updateEventsSince, _cancellationToken);
+                if (!isConsistent)
+                {
+                    var msg = "Unable to sync search parameter cache. Please resubmit reindex. If issue persists please contact your administrator.";
+                    _logger.LogJobError(_jobInfo, msg);
+                    await TryLogEvent($"ReindexOrchestratorJob={_jobInfo.Id}.ExecuteAsync.{suffix}", "Error", msg, null, _cancellationToken);
+                    throw new JobExecutionException(msg, false);
+                }
+            }
+            else
+            {
+                // Cosmos DB: There is no EventLog-based convergence tracking, so wait a fixed
+                // delay to allow all instances to refresh their search parameter caches.
+                var delayMs = _operationsConfiguration.Reindex.CacheRefreshWaitMultiplier * _searchParameterCacheRefreshIntervalSeconds * 1000;
+                _logger.LogJobInformation(_jobInfo, $"Cosmos DB detected — waiting {delayMs}ms for cache propagation across instances.");
+                await Task.Delay(delayMs, _cancellationToken);
+            }
+
+            _searchParamLastUpdated = _searchParameterOperations.SearchParamLastUpdated;
 
             _logger.LogJobInformation(_jobInfo, $"Reindex orchestrator job completed cache refresh at the {suffix}: SearchParamLastUpdated {_searchParamLastUpdated}");
             await TryLogEvent($"ReindexOrchestratorJob={_jobInfo.Id}.ExecuteAsync.{suffix}", "Warn", $"SearchParamLastUpdated={_searchParamLastUpdated.ToString("yyyy-MM-dd HH:mm:ss.fff")}", null, _cancellationToken);
+
+            async Task<bool> WaitForAllInstancesCacheSyncAsync(DateTime updateEventsSince, CancellationToken cancellationToken)
+            {
+                var start = Stopwatch.StartNew();
+                var maxWaitTime = TimeSpan.FromSeconds(_operationsConfiguration.Reindex.CacheUpdateMaxWaitMultiplier * _searchParameterCacheRefreshIntervalSeconds);
+                var waitInterval = TimeSpan.FromSeconds(_searchParameterCacheRefreshIntervalSeconds);
+                CacheConsistencyResult result = null;
+                while (start.Elapsed < maxWaitTime)
+                {
+                    var activeHostsSince = DateTime.UtcNow.AddSeconds((-1) * _operationsConfiguration.Reindex.ActiveHostsEventsMultiplier * _searchParameterCacheRefreshIntervalSeconds);
+                    result = await _searchParameterStatusManager.CheckCacheConsistencyAsync(updateEventsSince, activeHostsSince, cancellationToken);
+
+                    if (result.IsConsistent)
+                    {
+                        _logger.LogJobInformation(_jobInfo, $"Cache sync check: All {result.ActiveHosts} active host(s) have converged to SearchParamLastUpdated={_searchParameterOperations.SearchParamLastUpdated.ToString("yyyy-MM-dd HH:mm:ss.fff")}.");
+                        break;
+                    }
+
+                    _logger.LogJobInformation(_jobInfo, $"Cache sync check: {result.ConvergedHosts}/{result.ActiveHosts} hosts synced. Waiting...");
+                    await Task.Delay(waitInterval, cancellationToken);
+                }
+
+                return result != null && result.IsConsistent;
+            }
+        }
+
+        private async Task<List<string>> CleanupMissingSearchParameterResourcesAsync(IReadOnlyCollection<ResourceSearchParameterStatus> allStatuses, CancellationToken cancellationToken)
+        {
+            _logger.LogJobInformation(_jobInfo, "Checking for search parameters in pending delete states with missing resources.");
+
+            var pending = allStatuses.Where(sp => sp.Status == SearchParameterStatus.PendingDelete || sp.Status == SearchParameterStatus.PendingHardDelete).Select(sp => sp.Uri.OriginalString).ToList();
+            _logger.LogJobInformation(_jobInfo, "Found {Count} search parameter(s) in pending delete states. Checking if resources exist.", pending.Count);
+
+            var searchParameters = await _retries.ExecuteAsync(async () => await _searchParameterOperations.GetSearchParametersByUrlsAsync(pending, cancellationToken));
+
+            var toMarkDeleted = new List<string>();
+            foreach (var url in pending.Where(url => !searchParameters.ContainsKey(url)))
+            {
+                _logger.LogJobInformation(_jobInfo, "Search parameter resource '{Url}' not found - will mark as Deleted.", url);
+                toMarkDeleted.Add(url);
+            }
+
+            if (toMarkDeleted.Any())
+            {
+                _logger.LogJobInformation(_jobInfo, "Marking {Count} search parameter(s) as Deleted due to missing resources.", toMarkDeleted.Count);
+                await _retries.ExecuteAsync(
+                    async () => await _searchParameterStatusManager.UpdateSearchParameterStatusAsync(toMarkDeleted, SearchParameterStatus.Deleted, cancellationToken, reindexId: _jobInfo.Id));
+            }
+
+            return toMarkDeleted;
         }
 
         private async Task<IReadOnlyList<long>> CreateReindexProcessingJobsAsync(CancellationToken cancellationToken)
         {
             // Build queries based on new search params
             // Find search parameters not in a final state such as supported, pendingDelete, pendingDisable.
-            List<SearchParameterStatus> validStatus = new List<SearchParameterStatus>() { SearchParameterStatus.Supported, SearchParameterStatus.PendingDelete, SearchParameterStatus.PendingDisable };
+            var validStatus = new List<SearchParameterStatus>() { SearchParameterStatus.Supported, SearchParameterStatus.PendingDelete, SearchParameterStatus.PendingHardDelete, SearchParameterStatus.PendingDisable };
             _initialSearchParamStatusCollection = await _searchParameterStatusManager.GetAllSearchParameterStatus(cancellationToken);
 
+            // Clean up search parameters in pending delete states if resources don't exist
+            var deletedSearchParameterUrls = await CleanupMissingSearchParameterResourcesAsync(_initialSearchParamStatusCollection, cancellationToken);
+
             // Get all URIs that have at least one entry with a valid status
-            // This handles case-variant duplicates naturally
+            // Exclude search parameters marked as deleted during cleanup
             var validUris = _initialSearchParamStatusCollection
                 .Where(s => validStatus.Contains(s.Status))
                 .Select(s => s.Uri.ToString())
+                .Where(uri => !deletedSearchParameterUrls.Contains(uri))
                 .ToHashSet();
 
             // Filter to only those search parameters which have valid definitions
@@ -727,7 +799,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Reindex
             {
                 try
                 {
-                    return await searchService.Value.SearchForReindexAsync(queryParametersList, searchParameterHash, countOnly: countOnly, cancellationToken, true);
+                    return await _retries.ExecuteAsync(
+                        async () => await searchService.Value.SearchForReindexAsync(queryParametersList, searchParameterHash, countOnly: countOnly, cancellationToken, true));
                 }
                 catch (Exception ex)
                 {
@@ -756,7 +829,6 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Reindex
             // Check if all the resource types which are base types of the search parameter
             // were reindexed by this job. If so, then we should mark the search parameters
             // as fully reindexed
-            var fullyIndexedParamUris = new List<string>();
             var searchParamStatusCollection = await _searchParameterStatusManager.GetAllSearchParameterStatus(cancellationToken);
 
             if (readySearchParameters == null || !readySearchParameters.Any())
@@ -765,38 +837,93 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Reindex
                 return;
             }
 
+            // Process each search parameter individually
             foreach (var searchParameterUrl in readySearchParameters)
             {
-                var spStatus = searchParamStatusCollection.FirstOrDefault(sp => string.Equals(sp.Uri.OriginalString, searchParameterUrl, StringComparison.Ordinal))?.Status;
+                var spStatus = searchParamStatusCollection.FirstOrDefault(sp => string.Equals(sp.Uri.OriginalString, searchParameterUrl, StringComparison.Ordinal));
 
-                switch (spStatus)
+                if (spStatus == null)
+                {
+                    _logger.LogJobWarning(_jobInfo, "Search parameter '{Url}' not found in status collection. Skipping.", searchParameterUrl);
+                    continue;
+                }
+
+                switch (spStatus.Status)
                 {
                     case SearchParameterStatus.PendingDisable:
-                        _logger.LogJobInformation(_jobInfo, "Reindex job updating the status of the fully indexed search parameter, parameter: '{ParamUri}' to Disabled.", searchParameterUrl);
-                        await _searchParameterStatusRetries.ExecuteAsync(
-                            async () => await _searchParameterStatusManager.UpdateSearchParameterStatusAsync(new List<string>() { searchParameterUrl }, SearchParameterStatus.Disabled, cancellationToken));
-                        _processedSearchParameters.Add(searchParameterUrl);
+                        await ProcessDisableSearchParameterAsync(searchParameterUrl, cancellationToken);
                         break;
+
                     case SearchParameterStatus.PendingDelete:
-                        _logger.LogJobInformation(_jobInfo, "Reindex job updating the status of the fully indexed search parameter, parameter: '{ParamUri}' to Deleted.", searchParameterUrl);
-                        await _searchParameterStatusRetries.ExecuteAsync(
-                            async () => await _searchParameterStatusManager.UpdateSearchParameterStatusAsync(new List<string>() { searchParameterUrl }, SearchParameterStatus.Deleted, cancellationToken));
-                        _processedSearchParameters.Add(searchParameterUrl);
+                    case SearchParameterStatus.PendingHardDelete:
+                        await ProcessDeleteSearchParameterAsync(searchParameterUrl, spStatus.Status == SearchParameterStatus.PendingHardDelete, cancellationToken);
                         break;
+
                     case SearchParameterStatus.Supported:
                     case SearchParameterStatus.Enabled:
-                        fullyIndexedParamUris.Add(searchParameterUrl);
+                        await ProcessEnableSearchParameterAsync(searchParameterUrl, cancellationToken);
+                        break;
+
+                    default:
+                        _logger.LogJobWarning(_jobInfo, "Search parameter '{Url}' has unexpected status '{Status}'. Skipping.", searchParameterUrl, spStatus.Status);
                         break;
                 }
             }
+        }
 
-            if (fullyIndexedParamUris.Count > 0)
-            {
-                _logger.LogJobInformation(_jobInfo, "Reindex job updating the status of the fully indexed search parameter, parameters: '{ParamUris} to Enabled.'", string.Join("', '", fullyIndexedParamUris));
-                await _searchParameterStatusRetries.ExecuteAsync(
-                    async () => await _searchParameterStatusManager.UpdateSearchParameterStatusAsync(fullyIndexedParamUris, SearchParameterStatus.Enabled, _cancellationToken));
-                _processedSearchParameters.UnionWith(fullyIndexedParamUris);
-            }
+        private async Task ProcessDisableSearchParameterAsync(string searchParameterUrl, CancellationToken cancellationToken)
+        {
+            _logger.LogJobInformation(_jobInfo, "Disabling search parameter '{Url}'", searchParameterUrl);
+
+            await _retries.ExecuteAsync(
+                async () => await _searchParameterStatusManager.UpdateSearchParameterStatusAsync(
+                    new[] { searchParameterUrl },
+                    SearchParameterStatus.Disabled,
+                    cancellationToken,
+                    reindexId: _jobInfo.Id));
+
+            _processedSearchParameters.Add(searchParameterUrl);
+            _logger.LogJobInformation(_jobInfo, "Successfully disabled search parameter '{Url}'", searchParameterUrl);
+        }
+
+        private async Task ProcessDeleteSearchParameterAsync(string searchParameterUrl, bool isHardDelete, CancellationToken cancellationToken)
+        {
+            _logger.LogJobInformation(_jobInfo, "{DeleteType} deleting search parameter resource for '{Url}'", isHardDelete ? "Hard" : "Soft", searchParameterUrl);
+
+            // Delete the resource
+            await _retries.ExecuteAsync(
+                async () => await _searchParameterOperations.DeleteSearchParameterResourceAsync(
+                    searchParameterUrl,
+                    isHardDelete,
+                    cancellationToken));
+
+            _logger.LogJobInformation(_jobInfo, "Successfully deleted search parameter resource for '{Url}'", searchParameterUrl);
+
+            // Update status to Deleted
+            await _retries.ExecuteAsync(
+                async () => await _searchParameterStatusManager.UpdateSearchParameterStatusAsync(
+                    new[] { searchParameterUrl },
+                    SearchParameterStatus.Deleted,
+                    cancellationToken,
+                    reindexId: _jobInfo.Id));
+
+            _processedSearchParameters.Add(searchParameterUrl);
+            _logger.LogJobInformation(_jobInfo, "Successfully marked search parameter '{Url}' as Deleted", searchParameterUrl);
+        }
+
+        private async Task ProcessEnableSearchParameterAsync(string searchParameterUrl, CancellationToken cancellationToken)
+        {
+            _logger.LogJobInformation(_jobInfo, "Enabling search parameter '{Url}'", searchParameterUrl);
+
+            await _retries.ExecuteAsync(
+                async () => await _searchParameterStatusManager.UpdateSearchParameterStatusAsync(
+                    new[] { searchParameterUrl },
+                    SearchParameterStatus.Enabled,
+                    cancellationToken,
+                    reindexId: _jobInfo.Id));
+
+            _processedSearchParameters.Add(searchParameterUrl);
+            _logger.LogJobInformation(_jobInfo, "Successfully enabled search parameter '{Url}'", searchParameterUrl);
         }
 
         private HashSet<string> GetDerivedResourceTypes(IReadOnlyCollection<string> resourceTypes)
@@ -1207,7 +1334,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Reindex
                         _jobInfo,
                         "Search parameter {SearchParamUrl} is ready for status update - all related resource types completed",
                         searchParamUrl);
-            }
+                }
             }
 
             return readySearchParameters;

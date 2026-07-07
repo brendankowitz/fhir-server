@@ -320,7 +320,7 @@ namespace Microsoft.Health.Fhir.Shared.Tests.Integration.Features.Search
 
             // Assert
             Assert.NotNull(stats);
-            Assert.IsAssignableFrom<ICollection<(string TableName, string ColumnName, short ResourceTypeId, short SearchParamId)>>(stats);
+            Assert.IsAssignableFrom<ICollection<(string TableName, string ColumnName, short ResourceTypeId, short SearchParamId, short? ReferenceResourceTypeId)>>(stats);
 
             // Verify that stats were actually created for the Patient identifier search
             // The cache should contain at least one entry for Patient with identifier search parameter
@@ -889,29 +889,6 @@ namespace Microsoft.Health.Fhir.Shared.Tests.Integration.Features.Search
             // The deleted current version should be filtered out
             var deletedResourceInNonDeletedSearch = resultWithoutDeleted.Results.FirstOrDefault(r => r.Resource.ResourceId == resourceId && r.Resource.IsDeleted);
             Assert.Null(deletedResourceInNonDeletedSearch.Resource);
-        }
-
-        [Fact]
-        public async Task Search_WithResetQueryPlans_ExecutesSuccessfully()
-        {
-            // Arrange
-            var patient = await CreateTestPatient($"QueryPlanTest_{Guid.NewGuid()}");
-
-            // Act - Reset query plans
-            SqlServerSearchService.ResetReuseQueryPlans();
-
-            // Act - Execute search after reset using _id (doesn't require name search parameter indexing)
-            var queryParameters = new List<Tuple<string, string>>
-            {
-                new Tuple<string, string>("_id", patient.ResourceId),
-            };
-
-            var result = await _searchService.SearchAsync("Patient", queryParameters, CancellationToken.None);
-
-            // Assert - Search should still work after reset
-            Assert.NotNull(result);
-            Assert.Single(result.Results);
-            Assert.Equal(patient.ResourceId, result.Results.First().Resource.ResourceId);
         }
 
         private async Task<List<ResourceWrapper>> CreateTestPatients(int count)
