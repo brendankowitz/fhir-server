@@ -19,6 +19,7 @@ using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Messages.Get;
 using Microsoft.Health.Fhir.Core.Messages.Operation;
 using Microsoft.Health.Fhir.Core.Models;
+using Microsoft.Health.Fhir.Ignixa;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Test.Utilities;
 using NSubstitute;
@@ -148,6 +149,57 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Controllers
             await _mediator.Received(valid ? 1 : 0).Send<GetResourceResponse>(
                 Arg.Any<GetResourceRequest>(),
                 Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task GivenIgnixaBackedStoredResource_WhenValidatingById_ThenValidateRequestUsesFirelyResourceElement()
+        {
+            var mediator = Substitute.For<IMediator>();
+            var patient = Samples.GetJsonSample("Profile-Patient-uscore").ToPoco<Patient>();
+            mediator.Send<GetResourceResponse>(
+                Arg.Any<GetResourceRequest>(),
+                Arg.Any<CancellationToken>())
+                .Returns(new GetResourceResponse(new RawResourceElement(
+                    new ResourceWrapper(
+                        patient.ToResourceElement(),
+                        new RawResource(patient.ToJson(), FhirResourceFormat.Json, false),
+                        null,
+                        false,
+                        null,
+                        null,
+                        null))));
+
+            ValidateOperationRequest validateRequest = null;
+            mediator.Send<ValidateOperationResponse>(
+                Arg.Do<ValidateOperationRequest>(request => validateRequest = request),
+                Arg.Any<CancellationToken>())
+                .Returns(new ValidateOperationResponse(Array.Empty<OperationOutcomeIssue>()));
+
+            var ignixaSerializer = new IgnixaJsonSerializer();
+            var schemaContext = new IgnixaSchemaContext(ModelInfoProvider.Instance);
+            var resourceDeserializer = new ResourceDeserializer(
+                (FhirResourceFormat.Json, new Func<string, string, DateTimeOffset, ResourceElement>((str, version, lastUpdated) =>
+                {
+                    return new IgnixaResourceElement(ignixaSerializer.Parse(str), schemaContext.Schema).ToResourceElement();
+                })));
+
+            var controller = new ValidateController(mediator, resourceDeserializer)
+            {
+                ControllerContext = new ControllerContext(
+                    new ActionContext(
+                        Substitute.For<HttpContext>(),
+                        new RouteData(),
+                        new ControllerActionDescriptor())),
+            };
+
+            await controller.ValidateById(
+                KnownResourceTypes.Patient,
+                patient.Id,
+                "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient");
+
+            Assert.NotNull(validateRequest);
+            Assert.Null(validateRequest.Resource.GetIgnixaNode());
+            Assert.IsType<Patient>(validateRequest.Resource.ToPoco<Resource>());
         }
 
         [Theory]

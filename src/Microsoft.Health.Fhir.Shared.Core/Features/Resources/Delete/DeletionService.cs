@@ -601,8 +601,9 @@ namespace Microsoft.Health.Fhir.Core.Features.Persistence
                     var modifiedResources = new List<ResourceWrapperOperation>();
                     foreach (var reference in resourcesWithReferences)
                     {
-                        ReferenceRemover.RemoveReference(reference.ToPoco(), resource.Resource.ResourceTypeName + "/" + resource.Resource.ResourceId);
-                        var wrapper = _resourceWrapperFactory.Create(reference, deleted: false, keepMeta: true);
+                        Resource modifiedResource = reference.ToPoco();
+                        ReferenceRemover.RemoveReference(modifiedResource, resource.Resource.ResourceTypeName + "/" + resource.Resource.ResourceId);
+                        var wrapper = _resourceWrapperFactory.Create(modifiedResource.ToResourceElement(), deleted: false, keepMeta: true);
                         modifiedResources.Add(new ResourceWrapperOperation(
                             wrapper,
                             allowCreate: false,

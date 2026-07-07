@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -270,6 +271,83 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Resources.Delete
                 await _service.DeleteMultipleAsync(request, CancellationToken.None));
 
             Assert.Contains(" Deletion.3", exception.InnerException.Message);
+        }
+
+        [Fact]
+        public async Task GivenHardDeleteWithRemoveReferences_WhenResourceReferencesDeletedResource_ThenModifiedResourceIsWrapped()
+        {
+            var request = new ConditionalDeleteResourceRequest(
+                KnownResourceTypes.Patient,
+                new List<Tuple<string, string>>
+                {
+                    Tuple.Create("_tag", "test"),
+                },
+                DeleteOperation.HardDelete,
+                maxDeleteCount: null,
+                deleteAll: true,
+                removeReferences: true);
+
+            var searchService = Substitute.For<ISearchService>();
+            var scopedSearchService = Substitute.For<IScoped<ISearchService>>();
+            scopedSearchService.Value.Returns(searchService);
+            _searchServiceFactory.Invoke().Returns(scopedSearchService);
+
+            var patient = new Patient { Id = "patient" };
+            var observation = new Observation
+            {
+                Id = "observation",
+                Subject = new ResourceReference("Patient/patient"),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept("test", "test"),
+            };
+
+            ResourceWrapper patientWrapper = CreateWrapper(patient);
+            ResourceWrapper observationWrapper = CreateWrapper(observation);
+            var patientEntry = new SearchResultEntry(patientWrapper, SearchEntryMode.Match);
+            var patientRevincludeEntry = new SearchResultEntry(patientWrapper, SearchEntryMode.Match);
+            var observationRevincludeEntry = new SearchResultEntry(observationWrapper, SearchEntryMode.Include);
+
+            searchService.SearchAsync(
+                Arg.Any<string>(),
+                Arg.Any<IReadOnlyList<Tuple<string, string>>>(),
+                Arg.Any<CancellationToken>(),
+                Arg.Any<bool>(),
+                Arg.Any<ResourceVersionType>(),
+                Arg.Any<bool>(),
+                Arg.Any<bool>()).Returns(
+                Task.FromResult(new SearchResult(new[] { patientEntry }, null, null, Array.Empty<Tuple<string, string>>())),
+                Task.FromResult(new SearchResult(new[] { patientRevincludeEntry, observationRevincludeEntry }, null, null, Array.Empty<Tuple<string, string>>())));
+
+            _resourceDeserializer.Deserialize(observationWrapper).Returns(observation.ToResourceElement());
+
+            ResourceElement updatedResource = null;
+            ResourceWrapper updatedWrapper = CreateWrapper(observation);
+            _resourceWrapperFactory.Create(
+                Arg.Do<ResourceElement>(resource => updatedResource = resource),
+                deleted: false,
+                keepMeta: true,
+                keepVersion: false).Returns(updatedWrapper);
+
+            var fhirDataStore = Substitute.For<IFhirDataStore>();
+            var scopedDataStore = new DeletionServiceScopedDataStore(fhirDataStore);
+            _dataStoreFactory.GetScopedDataStore().Returns(scopedDataStore);
+
+            await _service.DeleteMultipleAsync(request, CancellationToken.None);
+
+            Assert.NotNull(updatedResource);
+            var updatedObservation = updatedResource.ToPoco<Observation>();
+            Assert.Null(updatedObservation.Subject.Reference);
+            Assert.Equal("Referenced resource deleted", updatedObservation.Subject.Display);
+        }
+
+        private static ResourceWrapper CreateWrapper(Resource resource)
+        {
+            ResourceElement resourceElement = resource.ToResourceElement();
+            var rawResource = new RawResource(resource.ToJson(), FhirResourceFormat.Json, isMetaSet: false);
+            var resourceRequest = Substitute.For<ResourceRequest>();
+            var compartmentIndices = Substitute.For<CompartmentIndices>();
+
+            return new ResourceWrapper(resourceElement, rawResource, resourceRequest, false, null, compartmentIndices, Array.Empty<KeyValuePair<string, string>>(), "hash");
         }
     }
 }
