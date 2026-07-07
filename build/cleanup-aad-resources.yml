@@ -54,7 +54,6 @@ stages:
           # AzurePowerShell@5 pre-loads Az.Accounts before our script runs, which causes conflicts with
           # Microsoft.Graph.Authentication due to different versions of System.Threading.Tasks.Extensions.dll
           # See: https://github.com/microsoftgraph/msgraph-sdk-powershell/issues/3479
-          $graphModuleVersion = '2.33.0'
           Write-Host "Installing Microsoft Graph modules..."
           # Include Identity.DirectoryManagement for Get-MgDirectoryDeletedItem* cmdlets used in recycle bin cleanup
           $modules = @(
@@ -64,14 +63,19 @@ stages:
             "Microsoft.Graph.DirectoryObjects",
             "Microsoft.Graph.Identity.DirectoryManagement"
           )
+
+          # Pin all Graph submodules to a single version so the installed and imported set always
+          # match (floating to "latest" independently, or importing a stale copy pre-baked on the
+          # agent, can produce a mismatched set that fails Connect-MgGraph with EntryPointNotFoundException).
+          $graphVersion = '2.38.0'
           
           foreach ($module in $modules) {
-            Install-Module -Name $module -RequiredVersion $graphModuleVersion -Force -Scope CurrentUser -ErrorAction Stop
+            Install-Module -Name $module -RequiredVersion $graphVersion -Force -Scope CurrentUser -ErrorAction Stop
           }
           
           # Import all modules upfront to prevent auto-loading conflicts
           foreach ($module in $modules) {
-            Import-Module $module -RequiredVersion $graphModuleVersion -ErrorAction Stop
+            Import-Module $module -RequiredVersion $graphVersion -ErrorAction Stop
           }
 
           $installedAuth = Get-Module -Name Microsoft.Graph.Authentication | Select-Object -First 1
