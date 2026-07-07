@@ -17,6 +17,7 @@ steps:
       # IMPORTANT: Using AzureCLI@2 with pscore and importing Microsoft.Graph modules BEFORE Az modules
       # to avoid assembly loading conflicts with System.Threading.Tasks.Extensions.dll
       # See: https://github.com/microsoftgraph/msgraph-sdk-powershell/issues/3479
+      $graphModuleVersion = '2.33.0'
       
       # Install and import Microsoft Graph modules FIRST (order matters!)
       $graphModules = @(
@@ -27,12 +28,12 @@ steps:
       )
       
       Write-Host "Installing Microsoft Graph modules..."
-      $graphModules | ForEach-Object { Install-Module -Name $_ -Force -Scope CurrentUser -AllowClobber }
+      $graphModules | ForEach-Object { Install-Module -Name $_ -RequiredVersion $graphModuleVersion -Force -Scope CurrentUser -AllowClobber }
       
       Write-Host "Importing Microsoft Graph modules..."
-      $graphModules | ForEach-Object { Import-Module -Name $_ -ErrorAction Stop }
+      $graphModules | ForEach-Object { Import-Module -Name $_ -RequiredVersion $graphModuleVersion -ErrorAction Stop }
       
-      $graphAuthModule = Get-Module -Name Microsoft.Graph.Authentication -ListAvailable | Select-Object -First 1
+      $graphAuthModule = Get-Module -Name Microsoft.Graph.Authentication | Select-Object -First 1
       Write-Host "Microsoft.Graph.Authentication version: $($graphAuthModule.Version)"
 
       # Install and import Az modules AFTER Microsoft.Graph modules are loaded
