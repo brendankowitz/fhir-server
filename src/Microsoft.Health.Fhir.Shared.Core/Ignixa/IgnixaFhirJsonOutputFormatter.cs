@@ -6,17 +6,24 @@
 #nullable enable
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.IO;
 using System.Linq;
 using System.Text;
 using EnsureThat;
 using Hl7.Fhir.Model;
+using Hl7.Fhir.Rest;
 using Hl7.Fhir.Serialization;
 using Ignixa.Serialization.SourceNodes;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Formatters;
+using Microsoft.Health.Fhir.Core.Extensions;
+using Microsoft.Health.Fhir.Core.Features;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
+using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Models;
+using Newtonsoft.Json;
 using Task = System.Threading.Tasks.Task;
 
 namespace Microsoft.Health.Fhir.Ignixa;
@@ -52,19 +59,24 @@ internal sealed class IgnixaFhirJsonOutputFormatter : TextOutputFormatter
 
     private readonly IIgnixaJsonSerializer _serializer;
     private readonly FhirJsonSerializer _firelySerializer;
+    private readonly IModelInfoProvider _modelInfoProvider;
+    private static readonly FhirJsonParser Parser = new();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="IgnixaFhirJsonOutputFormatter"/> class.
     /// </summary>
     /// <param name="serializer">The Ignixa JSON serializer.</param>
     /// <param name="firelySerializer">The Firely JSON serializer for compatibility mode.</param>
-    public IgnixaFhirJsonOutputFormatter(IIgnixaJsonSerializer serializer, FhirJsonSerializer firelySerializer)
+    /// <param name="modelInfoProvider">FHIR model information provider used for projection.</param>
+    public IgnixaFhirJsonOutputFormatter(IIgnixaJsonSerializer serializer, FhirJsonSerializer firelySerializer, IModelInfoProvider modelInfoProvider)
     {
         EnsureArg.IsNotNull(serializer, nameof(serializer));
         EnsureArg.IsNotNull(firelySerializer, nameof(firelySerializer));
+        EnsureArg.IsNotNull(modelInfoProvider, nameof(modelInfoProvider));
 
         _serializer = serializer;
         _firelySerializer = firelySerializer;
+        _modelInfoProvider = modelInfoProvider;
 
         SupportedEncodings.Add(Encoding.UTF8);
         SupportedEncodings.Add(Encoding.Unicode);
@@ -105,8 +117,8 @@ internal sealed class IgnixaFhirJsonOutputFormatter : TextOutputFormatter
     /// in JSON format, providing zero-copy output for database reads.
     /// </para>
     /// <para>
-    /// For Firely <see cref="Resource"/> types, the resource is first serialized to JSON
-    /// using Firely, then re-parsed and written with Ignixa for consistent output formatting.
+    /// For Firely <see cref="Resource"/> types, the resource is written directly with Firely's
+    /// JSON serializer so FHIR projection parameters are applied consistently.
     /// </para>
     /// </remarks>
     public override async Task WriteResponseBodyAsync(OutputFormatterWriteContext context, Encoding selectedEncoding)
@@ -116,10 +128,23 @@ internal sealed class IgnixaFhirJsonOutputFormatter : TextOutputFormatter
 
         var response = context.HttpContext.Response;
         var pretty = GetPrettyParameter(context.HttpContext);
+        var elementsSearchParameter = GetElementsOrDefault(context.HttpContext);
+        var summarySearchParameter = GetSummaryTypeOrDefault(context.HttpContext);
+        var hasElements = elementsSearchParameter?.Any() == true;
+        var hasProjection = hasElements || summarySearchParameter != SummaryType.False;
 
         // Handle RawResourceElement - write raw JSON directly for best performance
         if (context.Object is RawResourceElement rawElement)
         {
+            if (hasProjection && rawElement.RawResource.Format == FhirResourceFormat.Json)
+            {
+                using var stringReader = new StringReader(rawElement.RawResource.Data);
+                using var jsonReader = new JsonTextReader(stringReader);
+                var rawResource = await Parser.ParseAsync<Resource>(jsonReader).ConfigureAwait(false);
+                await WriteFirelyResourceAsync(rawResource, response, pretty, selectedEncoding, summarySearchParameter, GetProjectedElements(rawResource, elementsSearchParameter)).ConfigureAwait(false);
+                return;
+            }
+
             await WriteRawResourceAsync(rawElement, response, pretty, selectedEncoding).ConfigureAwait(false);
             return;
         }
@@ -139,7 +164,7 @@ internal sealed class IgnixaFhirJsonOutputFormatter : TextOutputFormatter
         {
             // Write Firely JSON directly to the response stream — avoids the
             // previous triple-hop (Firely serialize → Ignixa parse → Ignixa serialize).
-            await WriteFirelyResourceAsync(firelyResource, response, pretty, selectedEncoding).ConfigureAwait(false);
+            await WriteFirelyResourceAsync(firelyResource, response, pretty, selectedEncoding, summarySearchParameter, GetProjectedElements(firelyResource, elementsSearchParameter)).ConfigureAwait(false);
             return;
         }
 
@@ -147,6 +172,13 @@ internal sealed class IgnixaFhirJsonOutputFormatter : TextOutputFormatter
         {
             // This shouldn't happen if CanWriteType is correct, but handle gracefully
             await response.WriteAsync("{}", selectedEncoding).ConfigureAwait(false);
+            return;
+        }
+
+        if (hasProjection)
+        {
+            var firelyResource = await ToFirelyResourceAsync(resourceNode).ConfigureAwait(false);
+            await WriteFirelyResourceAsync(firelyResource, response, pretty, selectedEncoding, summarySearchParameter, GetProjectedElements(firelyResource, elementsSearchParameter)).ConfigureAwait(false);
             return;
         }
 
@@ -201,20 +233,86 @@ internal sealed class IgnixaFhirJsonOutputFormatter : TextOutputFormatter
     /// This avoids the previous triple-hop (Firely serialize → Ignixa parse → Ignixa serialize)
     /// by writing Firely-produced JSON directly to the response stream.
     /// </remarks>
-    private async Task WriteFirelyResourceAsync(Resource resource, HttpResponse response, bool pretty, Encoding encoding)
+    private async Task WriteFirelyResourceAsync(Resource resource, HttpResponse response, bool pretty, Encoding encoding, SummaryType summaryType, string[]? elements)
     {
-        string json;
+        using TextWriter textWriter = new StreamWriter(response.Body, encoding, bufferSize: 1024, leaveOpen: true);
+        using var jsonWriter = new JsonTextWriter(textWriter);
+
         if (pretty)
         {
-            json = await new FhirJsonSerializer(new SerializerSettings { Pretty = true }).SerializeToStringAsync(resource).ConfigureAwait(false);
-        }
-        else
-        {
-            json = await _firelySerializer.SerializeToStringAsync(resource).ConfigureAwait(false);
+            jsonWriter.Formatting = Formatting.Indented;
         }
 
-        await response.WriteAsync(json, encoding).ConfigureAwait(false);
+        await _firelySerializer.SerializeAsync(resource, jsonWriter, summaryType, elements).ConfigureAwait(false);
+        await jsonWriter.FlushAsync().ConfigureAwait(false);
         await response.Body.FlushAsync().ConfigureAwait(false);
+    }
+
+    private async System.Threading.Tasks.Task<Resource> ToFirelyResourceAsync(ResourceJsonNode resourceNode)
+    {
+        using var stream = new MemoryStream();
+        _serializer.Serialize(resourceNode, stream, pretty: false);
+        stream.Position = 0;
+
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        using var jsonReader = new JsonTextReader(reader);
+        return await Parser.ParseAsync<Resource>(jsonReader).ConfigureAwait(false);
+    }
+
+    private string[]? GetProjectedElements(Resource resource, IEnumerable<string>? elementsSearchParameter)
+    {
+        if (elementsSearchParameter?.Any() != true)
+        {
+            return null;
+        }
+
+        var projectedElements = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var typeinfo = _modelInfoProvider.StructureDefinitionSummaryProvider.Provide(resource.TypeName);
+        projectedElements.UnionWith(typeinfo.GetElements().Where(e => e.IsRequired).Select(x => x.ElementName));
+        projectedElements.UnionWith(elementsSearchParameter);
+        projectedElements.Add("meta");
+
+        return projectedElements.ToArray();
+    }
+
+    private static SummaryType GetSummaryTypeOrDefault(HttpContext context)
+    {
+        var query = context.Request.Query[KnownQueryParameterNames.Summary].FirstOrDefault();
+
+        if (!string.IsNullOrWhiteSpace(query) &&
+            (context.Response.StatusCode == StatusCodes.Status200OK || context.Response.StatusCode == StatusCodes.Status201Created) &&
+            Enum.TryParse(query, true, out SummaryType summary))
+        {
+            return summary;
+        }
+
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            var count = context.Request.Query[KnownQueryParameterNames.Count].FirstOrDefault();
+
+            if (!string.IsNullOrWhiteSpace(count) &&
+                int.TryParse(count, out int parsedCount) &&
+                parsedCount == 0 &&
+                (context.Response.StatusCode == StatusCodes.Status200OK || context.Response.StatusCode == StatusCodes.Status201Created))
+            {
+                return SummaryType.Count;
+            }
+        }
+
+        return SummaryType.False;
+    }
+
+    private static IReadOnlyList<string>? GetElementsOrDefault(HttpContext context)
+    {
+        var query = context.Request.Query[KnownQueryParameterNames.Elements].FirstOrDefault();
+
+        if (!string.IsNullOrWhiteSpace(query) &&
+            (context.Response.StatusCode == StatusCodes.Status200OK || context.Response.StatusCode == StatusCodes.Status201Created))
+        {
+            return query.SplitByOrSeparator();
+        }
+
+        return null;
     }
 
     /// <summary>

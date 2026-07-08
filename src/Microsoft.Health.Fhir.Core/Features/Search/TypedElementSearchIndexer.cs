@@ -230,89 +230,100 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 return results;
             }
 
-            // If there is target set, then filter the extracted values to only those types.
-            if (searchParameterType == SearchParamType.Reference &&
-                allowedReferenceResourceTypes?.Count > 0)
+            try
             {
-                List<string> targetResourceTypes = _targetTypesLookup.GetOrAdd(searchParameterDefinitionUrl, _ =>
+                // If there is target set, then filter the extracted values to only those types.
+                if (searchParameterType == SearchParamType.Reference &&
+                    allowedReferenceResourceTypes?.Count > 0)
                 {
-                    return allowedReferenceResourceTypes.Select(t => t.ToString()).ToList();
-                });
+                    List<string> targetResourceTypes = _targetTypesLookup.GetOrAdd(searchParameterDefinitionUrl, _ =>
+                    {
+                        return allowedReferenceResourceTypes.Select(t => t.ToString()).ToList();
+                    });
 
-                // TODO: The expression for reference search parameters in STU3 has issues.
-                // The reference search parameter could be pointing to an element that can be multiple types. For example,
-                // the Appointment.participant.actor can be type of Patient, Practitioner, Related Person, Location, and so on.
-                // Some search parameter could refer to this property but restrict to certain types. For example,
-                // Appointment's location search parameter is returned only when Appointment.participant.actor is Location element.
-                // The STU3 expressions don't have this restriction so everything is being returned. This is addressed in R4 release (see
-                // http://community.fhir.org/t/expression-seems-incorrect-for-reference-search-parameter-thats-only-applicable-to-certain-types/916/2).
-                // Therefore, for now, we will need to compare the reference value itself (which can be internal or external references), and restrict
-                // the values ourselves.
-                extractedValues = extractedValues.Where(ev =>
+                    // TODO: The expression for reference search parameters in STU3 has issues.
+                    // The reference search parameter could be pointing to an element that can be multiple types. For example,
+                    // the Appointment.participant.actor can be type of Patient, Practitioner, Related Person, Location, and so on.
+                    // Some search parameter could refer to this property but restrict to certain types. For example,
+                    // Appointment's location search parameter is returned only when Appointment.participant.actor is Location element.
+                    // The STU3 expressions don't have this restriction so everything is being returned. This is addressed in R4 release (see
+                    // http://community.fhir.org/t/expression-seems-incorrect-for-reference-search-parameter-thats-only-applicable-to-certain-types/916/2).
+                    // Therefore, for now, we will need to compare the reference value itself (which can be internal or external references), and restrict
+                    // the values ourselves.
+                    extractedValues = extractedValues.Where(ev =>
+                    {
+                        if (ev == null)
+                        {
+                            _logger.LogWarning(
+                                "The FHIR element should not be null. Expression: '{FhirPathExpression}', ElementType: '{ElementType}'.",
+                                fhirPathExpression,
+                                element.GetType());
+                        }
+
+                        if (ev?.InstanceType != null && ev.InstanceType.Equals("ResourceReference", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return ev.Scalar("reference") is string rr && targetResourceTypes.Any(trt => rr.Contains(trt, StringComparison.Ordinal));
+                        }
+
+                        return true;
+                    });
+                }
+
+                foreach (var extractedValue in extractedValues)
                 {
-                    if (ev == null)
+                    if (extractedValue == null)
                     {
                         _logger.LogWarning(
                             "The FHIR element should not be null. Expression: '{FhirPathExpression}', ElementType: '{ElementType}'.",
                             fhirPathExpression,
                             element.GetType());
+                        continue;
                     }
 
-                    if (ev?.InstanceType != null && ev.InstanceType.Equals("ResourceReference", StringComparison.OrdinalIgnoreCase))
+                    if (!_fhirElementTypeConverterManager.TryGetConverter(extractedValue.InstanceType, GetSearchValueTypeForSearchParamType(searchParameterType), out ITypedElementToSearchValueConverter converter))
                     {
-                        return ev.Scalar("reference") is string rr && targetResourceTypes.Any(trt => rr.Contains(trt, StringComparison.Ordinal));
+                        _logger.LogWarning(
+                            "The FHIR element '{ElementType}' is not supported.",
+                            extractedValue.InstanceType);
+
+                        continue;
                     }
 
-                    return true;
-                });
-            }
+                    var searchValues = converter.ConvertTo(extractedValue).ToList();
 
-            foreach (var extractedValue in extractedValues)
-            {
-                if (extractedValue == null)
-                {
-                    _logger.LogWarning(
-                        "The FHIR element should not be null. Expression: '{FhirPathExpression}', ElementType: '{ElementType}'.",
-                        fhirPathExpression,
-                        element.GetType());
-                    continue;
-                }
-
-                if (!_fhirElementTypeConverterManager.TryGetConverter(extractedValue.InstanceType, GetSearchValueTypeForSearchParamType(searchParameterType), out ITypedElementToSearchValueConverter converter))
-                {
-                    _logger.LogWarning(
-                        "The FHIR element '{ElementType}' is not supported.",
-                        extractedValue.InstanceType);
-
-                    continue;
-                }
-
-                var searchValues = converter.ConvertTo(extractedValue).ToList();
-
-                if (searchValues != null)
-                {
-                    if (searchParameterType == SearchParamType.Reference && allowedReferenceResourceTypes?.Count == 1)
+                    if (searchValues != null)
                     {
-                        // For references, if the type is not specified in the reference string, we can set the type on the search value because
-                        // in this case it can only be of one type.
-                        string singleAllowedResourceType = allowedReferenceResourceTypes[0];
-                        foreach (ISearchValue searchValue in searchValues)
+                        if (searchParameterType == SearchParamType.Reference && allowedReferenceResourceTypes?.Count == 1)
                         {
-                            if (searchValue is ReferenceSearchValue rsr && string.IsNullOrEmpty(rsr.ResourceType))
+                            // For references, if the type is not specified in the reference string, we can set the type on the search value because
+                            // in this case it can only be of one type.
+                            string singleAllowedResourceType = allowedReferenceResourceTypes[0];
+                            foreach (ISearchValue searchValue in searchValues)
                             {
-                                results.Add(new ReferenceSearchValue(rsr.Kind, rsr.BaseUri, singleAllowedResourceType, rsr.ResourceId));
-                            }
-                            else
-                            {
-                                results.Add(searchValue);
+                                if (searchValue is ReferenceSearchValue rsr && string.IsNullOrEmpty(rsr.ResourceType))
+                                {
+                                    results.Add(new ReferenceSearchValue(rsr.Kind, rsr.BaseUri, singleAllowedResourceType, rsr.ResourceId));
+                                }
+                                else
+                                {
+                                    results.Add(searchValue);
+                                }
                             }
                         }
-                    }
-                    else
-                    {
-                        results.AddRange(searchValues);
+                        else
+                        {
+                            results.AddRange(searchValues);
+                        }
                     }
                 }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed to extract the values using '{FhirPathExpression}' against '{ElementType}'.",
+                    fhirPathExpression,
+                    element.GetType());
             }
 
             return results;

@@ -152,7 +152,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Resources
             var conditionalCreateLogger = Substitute.For<ILogger<ConditionalCreateResourceHandler>>();
             var conditionalUpsertLogger = Substitute.For<ILogger<ConditionalUpsertResourceHandler>>();
             var conditionalDeleteLogger = Substitute.For<ILogger<ConditionalDeleteResourceHandler>>();
-            var schemaContext = Substitute.For<IIgnixaSchemaContext>();
+            IIgnixaSchemaContext schemaContext = new IgnixaSchemaContext(ModelInfoProvider.Instance);
 
             collection.Add(x => _mediator).Singleton().AsSelf().AsImplementedInterfaces();
             collection.Add(x => new CreateResourceHandler(_fhirDataStore, lazyConformanceProvider, _resourceWrapperFactory, _resourceIdProvider, referenceResolver, _authorizationService, schemaContext)).Singleton().AsSelf().AsImplementedInterfaces();
@@ -234,6 +234,37 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Resources
 
                 Assert.Equal(new DateTimeOffset(baseDate.AddMilliseconds(6), TimeSpan.Zero), deserializedResource.LastUpdated);
             }
+        }
+
+        [Fact]
+        public async Task GivenIgnixaBackedResource_WhenCreatingWithConditionalReference_ThenResolvedReferenceIsPersisted()
+        {
+            var observation = Samples.GetDefaultObservation().ToPoco<Observation>();
+            observation.Subject = new ResourceReference("Patient?identifier=123");
+
+            var patient = Samples.GetDefaultPatient().UpdateId("resolved-patient");
+            var searchResult = new SearchResult(
+                new[] { new SearchResultEntry(CreateResourceWrapper(patient, false), ValueSets.SearchEntryMode.Match) },
+                null,
+                null,
+                Array.Empty<Tuple<string, string>>());
+
+            _searchService.SearchAsync(
+                KnownResourceTypes.Patient,
+                Arg.Any<IReadOnlyList<Tuple<string, string>>>(),
+                Arg.Any<CancellationToken>(),
+                false,
+                ResourceVersionType.Latest,
+                false,
+                false).Returns(searchResult);
+
+            _fhirDataStore.UpsertAsync(Arg.Any<ResourceWrapperOperation>(), Arg.Any<CancellationToken>())
+                .Returns(x => new UpsertOutcome(x.ArgAt<ResourceWrapperOperation>(0).Wrapper, SaveOutcomeType.Created));
+
+            var rawResource = await _mediator.CreateResourceAsync(new CreateResourceRequest(CreateIgnixaBackedResourceElement(observation), bundleResourceContext: null));
+            var savedObservation = rawResource.ToResourceElement(_deserializer).ToPoco<Observation>();
+
+            Assert.Equal("Patient/resolved-patient", savedObservation.Subject.Reference);
         }
 
         [Fact]
@@ -491,6 +522,14 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Resources
                 null,
                 null,
                 0);
+        }
+
+        private static ResourceElement CreateIgnixaBackedResourceElement(Resource resource)
+        {
+            var serializer = new IgnixaJsonSerializer();
+            var schemaContext = new IgnixaSchemaContext(ModelInfoProvider.Instance);
+            var ignixaElement = new IgnixaResourceElement(serializer.Parse(resource.ToJson()), schemaContext.Schema);
+            return ignixaElement.ToResourceElement();
         }
 
         [Fact]

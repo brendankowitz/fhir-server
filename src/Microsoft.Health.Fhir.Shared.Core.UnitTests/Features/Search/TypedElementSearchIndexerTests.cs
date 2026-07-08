@@ -9,6 +9,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Hl7.Fhir.ElementModel;
 using Hl7.Fhir.Model;
+using Hl7.FhirPath;
 using Microsoft.Extensions.Logging;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Definition;
@@ -107,6 +108,31 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
             Assert.Equal(familyName, nameSearchValue.String);
          }
 
+        [Fact]
+        public async System.Threading.Tasks.Task GivenFhirPathEvaluationThrowsDuringEnumeration_WhenExtract_ThenExceptionIsNotThrown()
+        {
+            var supportedSearchParameterDefinitionManager = Substitute.For<ISupportedSearchParameterDefinitionManager>();
+            var typedElementToSearchValueConverterManager = await GetTypeConverterAsync();
+            var referenceToElementResolver = Substitute.For<IReferenceToElementResolver>();
+            var modelInfoProvider = ModelInfoProvider.Instance;
+            var fhirPathProvider = Substitute.For<IFhirPathProvider>();
+            var logger = Substitute.For<ILogger<TypedElementSearchIndexer>>();
+            var expression = "Patient.name";
+            var patient = Samples.GetDefaultPatient().ToPoco<Patient>();
+
+            supportedSearchParameterDefinitionManager.GetSearchParameters(Arg.Any<string>()).Returns(new[]
+            {
+                new SearchParameterInfo("name", "name", (ValueSets.SearchParamType)SearchParamType.String, new Uri(ResourceName), expression: expression, baseResourceTypes: new[] { "Patient" }),
+            });
+            fhirPathProvider.Compile(expression).Returns(new ThrowingCompiledFhirPath(expression));
+
+            var searchIndexer = new TypedElementSearchIndexer(supportedSearchParameterDefinitionManager, typedElementToSearchValueConverterManager, referenceToElementResolver, modelInfoProvider, fhirPathProvider, logger);
+
+            var exception = Record.Exception(() => searchIndexer.Extract(patient.ToResourceElement()));
+
+            Assert.Null(exception);
+        }
+
 #if !Stu3
         // For Stu3 - Coverage.status, Observation.status, and Claim.use are not required fields
         [Fact]
@@ -140,5 +166,29 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
             }
         }
 #endif
+
+        private sealed class ThrowingCompiledFhirPath : ICompiledFhirPath
+        {
+            public ThrowingCompiledFhirPath(string expression)
+            {
+                Expression = expression;
+            }
+
+            public string Expression { get; }
+
+            public IEnumerable<ITypedElement> Evaluate(ITypedElement element, EvaluationContext context = null) => ThrowOnEnumeration();
+
+            private static IEnumerable<ITypedElement> ThrowOnEnumeration()
+            {
+                throw new InvalidOperationException("Deferred evaluation failed.");
+#pragma warning disable CS0162 // Unreachable code detected
+                yield break;
+#pragma warning restore CS0162 // Unreachable code detected
+            }
+
+            public T Scalar<T>(ITypedElement element, EvaluationContext context = null) => default;
+
+            public bool Predicate(ITypedElement element, EvaluationContext context = null) => false;
+        }
     }
 }

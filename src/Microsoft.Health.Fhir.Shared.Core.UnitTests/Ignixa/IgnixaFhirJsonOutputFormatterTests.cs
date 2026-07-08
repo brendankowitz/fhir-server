@@ -38,7 +38,7 @@ public class IgnixaFhirJsonOutputFormatterTests
     {
         _ignixaSerializer = new IgnixaJsonSerializer();
         var firelySerializer = new FhirJsonSerializer();
-        _formatter = new IgnixaFhirJsonOutputFormatter(_ignixaSerializer, firelySerializer);
+        _formatter = new IgnixaFhirJsonOutputFormatter(_ignixaSerializer, firelySerializer, ModelInfoProvider.Instance);
     }
 
     // ------------------------------------------------------------------
@@ -127,6 +127,30 @@ public class IgnixaFhirJsonOutputFormatterTests
         Assert.False(string.IsNullOrEmpty(json));
         var parsed = Parser.Parse<Patient>(json);
         Assert.NotNull(parsed.Id);
+    }
+
+    [Theory]
+    [InlineData(typeof(IgnixaResourceElement))]
+    [InlineData(typeof(global::Ignixa.Serialization.SourceNodes.ResourceJsonNode))]
+    public async Task GivenIgnixaResource_WhenWrittenWithElementsParameter_ThenOnlyRequestedElementsAreWritten(Type objectType)
+    {
+        var patient = new Patient
+        {
+            Id = "elements-test",
+            Active = true,
+            Name = { new HumanName { Family = "Smith", Given = new[] { "John" } } },
+        };
+        var node = _ignixaSerializer.Parse(patient.ToJson());
+        var schemaContext = new IgnixaSchemaContext(ModelInfoProvider.Instance);
+        object resource = objectType == typeof(IgnixaResourceElement)
+            ? new IgnixaResourceElement(node, schemaContext.Schema)
+            : node;
+
+        var json = await WriteObject(resource, objectType, "?_elements=active");
+
+        var parsed = Parser.Parse<Patient>(json);
+        Assert.True(parsed.Active);
+        Assert.Empty(parsed.Name);
     }
 
     // ------------------------------------------------------------------
@@ -278,12 +302,16 @@ public class IgnixaFhirJsonOutputFormatterTests
         return await WriteObject(rawElement, typeof(RawResourceElement));
     }
 
-    private async Task<string> WriteObject(object obj, Type objectType)
+    private async Task<string> WriteObject(object obj, Type objectType, string query = null)
     {
         using var body = new MemoryStream();
         var httpContext = new DefaultHttpContext();
         httpContext.Response.StatusCode = (int)HttpStatusCode.OK;
         httpContext.Response.Body = body;
+        if (query != null)
+        {
+            httpContext.Request.QueryString = new QueryString(query);
+        }
 
         using var writer = new StringWriter();
         var writeContext = new OutputFormatterWriteContext(

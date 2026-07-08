@@ -78,7 +78,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Resources.Create
                 resource.Id = null;
             }
 
-            await _referenceResolver.ResolveReferencesAsync(resource, _referenceIdDictionary, resource.TypeName, cancellationToken);
+            int resolvedReferences = await _referenceResolver.ResolveReferencesAsync(resource, _referenceIdDictionary, resource.TypeName, cancellationToken);
 
             // Generate ID and metadata
             if (string.IsNullOrEmpty(resource.Id))
@@ -97,7 +97,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Resources.Create
             // Check if we have an Ignixa ResourceJsonNode - if so, update it in place for efficient serialization
             ResourceElement resourceElement;
             var resourceJsonNode = request.Resource.GetIgnixaNode();
-            if (resourceJsonNode != null)
+            if (resourceJsonNode != null && resolvedReferences == 0)
             {
                 // Update the ResourceJsonNode with the new ID and metadata
                 resourceJsonNode.Id = resource.Id;

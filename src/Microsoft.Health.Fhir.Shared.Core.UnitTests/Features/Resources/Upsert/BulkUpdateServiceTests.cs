@@ -226,6 +226,57 @@ namespace Microsoft.Health.Fhir.Shared.Core.UnitTests.Features.Resources.Upsert
             Assert.True(result.ResourcesIgnored["Observation"] == 1); // Observations ignored as no applicable patch request
         }
 
+        [Fact]
+        public async Task UpdateMultipleAsync_WhenResourceIsUpdated_ThenLastModifiedUsesUpdateTime()
+        {
+            // Arrange
+            var resourceType = "Patient";
+            var readNextPage = false;
+            var isIncludesRequest = false;
+            var conditionalParameters = new List<Tuple<string, string>>();
+            var cancellationToken = CancellationToken.None;
+            var oldLastUpdated = Clock.UtcNow.AddDays(-1);
+            var beforeUpdate = Clock.UtcNow.AddSeconds(-1);
+
+            var patient = Samples.GetDefaultPatient().ToPoco<Patient>();
+            patient.Id = Guid.NewGuid().ToString();
+            patient.VersionId = "1";
+            patient.Meta = new Meta { LastUpdated = oldLastUpdated };
+
+            var searchService = Substitute.For<ISearchService>();
+            var scopedSearchService = Substitute.For<IScoped<ISearchService>>();
+            scopedSearchService.Value.Returns(searchService);
+            _searchServiceFactory.Invoke().Returns(scopedSearchService);
+
+            searchService.SearchAsync(
+                resourceType,
+                Arg.Any<IReadOnlyList<Tuple<string, string>>>(),
+                Arg.Any<CancellationToken>(),
+                true,
+                ResourceVersionType.Latest,
+                false,
+                isIncludesRequest).Returns(CreateSearchResult(patient));
+
+            IReadOnlyList<ResourceWrapperOperation> capturedOperations = null;
+            var fhirDataStore = Substitute.For<IFhirDataStore>();
+            var scopedFhirDataStore = Substitute.For<IScoped<IFhirDataStore>>();
+            scopedFhirDataStore.Value.Returns(fhirDataStore);
+            _fhirDataStoreFactory.Invoke().Returns(scopedFhirDataStore);
+            fhirDataStore.MergeAsync(Arg.Any<IReadOnlyList<ResourceWrapperOperation>>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo =>
+                {
+                    capturedOperations = callInfo.ArgAt<IReadOnlyList<ResourceWrapperOperation>>(0);
+                    return new MergeOutcome(MergeOutcomeFinalState.Completed, new Dictionary<DataStoreOperationIdentifier, DataStoreOperationOutcome>());
+                });
+
+            // Act
+            await _service.UpdateMultipleAsync(resourceType, fhirPatchParameters, readNextPage, 0, isIncludesRequest, conditionalParameters, bundleResourceContext: null, true, cancellationToken);
+
+            // Assert
+            var updatedWrapper = Assert.Single(capturedOperations).Wrapper;
+            Assert.True(updatedWrapper.LastModified > beforeUpdate);
+        }
+
         [Theory]
         [InlineData(true, 0)]
         [InlineData(true, 1)]
@@ -1056,6 +1107,21 @@ namespace Microsoft.Health.Fhir.Shared.Core.UnitTests.Features.Resources.Upsert
                 includesContinuationToken);
 
             return searchResult;
+        }
+
+        private static SearchResult CreateSearchResult(Resource resource)
+        {
+            var resourceElement = resource.ToResourceElement();
+            var rawResource = new RawResource(resource.ToJson(), FhirResourceFormat.Json, isMetaSet: true);
+            var resourceRequest = Substitute.For<ResourceRequest>();
+            var compartmentIndices = Substitute.For<CompartmentIndices>();
+            var wrapper = new ResourceWrapper(resourceElement, rawResource, resourceRequest, false, null, compartmentIndices, new List<KeyValuePair<string, string>>(), "hash");
+
+            return new SearchResult(
+                new[] { new SearchResultEntry(wrapper, SearchEntryMode.Match) },
+                continuationToken: null,
+                sortOrder: null,
+                unsupportedSearchParameters: Array.Empty<Tuple<string, string>>());
         }
 
         private static void CreateSearchResults(IReadOnlyCollection<SearchIndexEntry> searchIndices, Dictionary<string, int> resourceCounts, List<SearchResultEntry> entries, bool markHistorical = false)
