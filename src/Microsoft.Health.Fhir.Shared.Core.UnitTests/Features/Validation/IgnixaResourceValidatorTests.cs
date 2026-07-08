@@ -58,6 +58,21 @@ public class IgnixaResourceValidatorTests
     }
 
     [Fact]
+    public async Task GivenIgnixaResourceWithValidDateTimeWithoutOffset_WhenValidating_ThenValidShouldBeReturned()
+    {
+        // Arrange
+        var resource = await CreateResourceElement(ObservationWithValidDateTimeWithoutOffsetJson);
+        var results = new List<ValidationResult>();
+
+        // Act
+        var isValid = _validator.TryValidate(resource, results, recurse: false);
+
+        // Assert
+        Assert.True(isValid);
+        Assert.Empty(results);
+    }
+
+    [Fact]
     public async Task GivenIgnixaResourceWithInvalidDateTime_WhenValidatingCreate_ThenInvalidShouldBeReturned()
     {
         // Arrange
@@ -86,6 +101,29 @@ public class IgnixaResourceValidatorTests
             ]
           },
           "effectiveDateTime": "2021-10-13+02:00",
+          "valueQuantity": {
+            "value": 185,
+            "unit": "lbs",
+            "system": "http://unitsofmeasure.org",
+            "code": "[lb_av]"
+          }
+        }
+        """;
+
+    private const string ObservationWithValidDateTimeWithoutOffsetJson = """
+        {
+          "resourceType": "Observation",
+          "status": "final",
+          "code": {
+            "coding": [
+              {
+                "system": "http://loinc.org",
+                "code": "29463-7",
+                "display": "Body Weight"
+              }
+            ]
+          },
+          "effectiveDateTime": "1980-05-11T16:32:15",
           "valueQuantity": {
             "value": 185,
             "unit": "lbs",

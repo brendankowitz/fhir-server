@@ -5,6 +5,7 @@
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Hl7.Fhir.Validation;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Models;
@@ -13,6 +14,14 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
 {
     public class ModelAttributeValidator : IModelAttributeValidator
     {
+        private static readonly Regex DateTimeLiteralErrorRegex = new Regex(
+            @"'(?<literal>[^']+)' is not a correct literal for a dateTime",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+        private static readonly Regex DateTimeOffsetWithoutTimeRegex = new Regex(
+            @"^\d{4}(-\d{2}(-\d{2})?)?(Z|[+-]\d{2}:\d{2})$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
         public bool TryValidate(ResourceElement value, ICollection<ValidationResult> validationResults = null, bool recurse = false)
         {
             var resource = value.ToPoco();
@@ -26,7 +35,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
             DotNetAttributeValidation.TryValidate(resource, recursiveValidationResults, recurse: true);
 
             var primitiveFormatResults = recursiveValidationResults
-                .Where(x => x.ErrorMessage?.Contains("correct literal", System.StringComparison.OrdinalIgnoreCase) == true)
+                .Where(IsDateTimeOffsetWithoutTimeError)
                 .Select(x => new ValidationResult(
                     $"Invalid primitive format: {x.ErrorMessage}",
                     x.MemberNames))
@@ -46,6 +55,17 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
             }
 
             return false;
+        }
+
+        private static bool IsDateTimeOffsetWithoutTimeError(ValidationResult result)
+        {
+            if (result?.ErrorMessage == null)
+            {
+                return false;
+            }
+
+            var match = DateTimeLiteralErrorRegex.Match(result.ErrorMessage);
+            return match.Success && DateTimeOffsetWithoutTimeRegex.IsMatch(match.Groups["literal"].Value);
         }
     }
 }
