@@ -174,12 +174,12 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
                 }
             }
 
-            if (!result.IsValid || !recurse)
+            if (!result.IsValid)
             {
-                return result.IsValid;
+                return false;
             }
 
-            return _fallbackValidator.TryValidate(value, validationResults, recurse: true);
+            return _fallbackValidator.TryValidate(value, validationResults, recurse);
         }
 
         /// <summary>

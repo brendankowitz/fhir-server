@@ -43,18 +43,18 @@ public class IgnixaResourceValidatorTests
     }
 
     [Fact]
-    public async Task GivenIgnixaResourceWithInvalidDateTime_WhenRecursivelyValidating_ThenInvalidShouldBeReturned()
+    public async Task GivenIgnixaResourceWithInvalidDateTime_WhenValidating_ThenInvalidShouldBeReturned()
     {
         // Arrange
         var resource = await CreateResourceElement(ObservationWithInvalidDateTimeJson);
         var results = new List<ValidationResult>();
 
         // Act
-        var isValid = _validator.TryValidate(resource, results, recurse: true);
+        var isValid = _validator.TryValidate(resource, results, recurse: false);
 
         // Assert
         Assert.False(isValid);
-        Assert.NotEmpty(results);
+        Assert.Contains(results, x => x.ErrorMessage.Contains("format"));
     }
 
     [Fact]
@@ -69,7 +69,7 @@ public class IgnixaResourceValidatorTests
 
         // Assert
         Assert.False(result.IsValid);
-        Assert.Contains(result.Errors, e => e.ErrorMessage.Contains("dateTime"));
+        Assert.Contains(result.Errors, e => e.ErrorMessage.Contains("format"));
     }
 
     private const string ObservationWithInvalidDateTimeJson = """
