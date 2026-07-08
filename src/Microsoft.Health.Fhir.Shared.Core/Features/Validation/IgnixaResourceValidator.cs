@@ -115,27 +115,31 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
             }
 
             // Use Ignixa fast-path validation
-            return TryValidateIgnixa(ignixaNode, value.InstanceType, validationResults);
+            return TryValidateIgnixa(value, ignixaNode, value.InstanceType, validationResults, recurse);
         }
 
         /// <summary>
         /// Validates an Ignixa resource using the fast-path validation pipeline.
         /// </summary>
+        /// <param name="value">The resource element being validated.</param>
         /// <param name="resourceNode">The Ignixa resource node to validate.</param>
         /// <param name="resourceType">The FHIR resource type name.</param>
         /// <param name="validationResults">Optional collection to receive validation results.</param>
+        /// <param name="recurse">Whether to run recursive validation.</param>
         /// <returns>True if validation passed; otherwise false.</returns>
         private bool TryValidateIgnixa(
+            ResourceElement value,
             ResourceJsonNode resourceNode,
             string resourceType,
-            ICollection<DataAnnotations.ValidationResult> validationResults)
+            ICollection<DataAnnotations.ValidationResult> validationResults,
+            bool recurse)
         {
             // Conformance resources have complex nested types (ElementDefinition, etc.)
             // that are not properly validated by Ignixa. Fall back to Firely validation.
             if (ConformanceResourceTypes.Contains(resourceType))
             {
                 var ignixaElement = new IgnixaResourceElement(resourceNode, _schemaContext.Schema);
-                return _fallbackValidator.TryValidate(ignixaElement.ToResourceElement(), validationResults, recurse: false);
+                return _fallbackValidator.TryValidate(ignixaElement.ToResourceElement(), validationResults, recurse);
             }
 
             // Get or build the validation schema for this resource type
@@ -170,7 +174,12 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
                 }
             }
 
-            return result.IsValid;
+            if (!result.IsValid || !recurse)
+            {
+                return result.IsValid;
+            }
+
+            return _fallbackValidator.TryValidate(value, validationResults, recurse: true);
         }
 
         /// <summary>
