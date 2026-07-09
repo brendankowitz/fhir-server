@@ -12,8 +12,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Health.Fhir.Api.Configs;
 using Microsoft.Health.Fhir.Api.Features.Formatters;
-using Microsoft.Health.Fhir.Api.Features.Resources.Bundle;
 using Microsoft.Health.Fhir.Core.Configs;
+using Microsoft.Health.Fhir.Core.Features.Resources.Bundle;
 using Microsoft.Health.Fhir.Core.Features.Validation.Narratives;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Tests.Common;
@@ -44,8 +44,10 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Formatters
 
             _configuration = new FormatterConfiguration(
                 Options.Create(_featureConfiguration),
+                Options.Create(new CoreFeatureConfiguration()),
                 new TextInputFormatter[] { _fhirJsonInputFormatter, _fhirXmlInputFormatter },
-                new TextOutputFormatter[] { _htmlOutputFormatter, _fhirJsonOutputFormatter, _fhirXmlOutputFormatter });
+                new TextOutputFormatter[] { _htmlOutputFormatter, _fhirJsonOutputFormatter, _fhirXmlOutputFormatter },
+                NullLogger<FormatterConfiguration>.Instance);
 
             _options = new MvcOptions();
             _options.Filters.Add(new UnsupportedContentTypeFilter());

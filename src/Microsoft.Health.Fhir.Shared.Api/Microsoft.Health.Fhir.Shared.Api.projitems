@@ -50,7 +50,6 @@
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Bundle\BundleHandlerRuntime.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Bundle\BundleHandlerStatistics.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Bundle\BundleRouter.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Bundle\BundleSerializer.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\IProvenanceHeaderState.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\ProfileResourcesBehaviour.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\ProvenanceHeaderBehavior.cs" />
@@ -87,6 +86,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Bundle\TransactionExceptionHandler.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Security\SecurityProvider.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Modules\FeatureFlags\HtmlUi\HtmlUiFeatureModule.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Modules\FeatureFlags\SdkMode\SdkModeFeatureModule.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Modules\FeatureFlags\XmlFormatter\XmlFormatterConfiguration.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Modules\FeatureFlags\XmlFormatter\XmlFormatterFeatureModule.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Modules\FhirModule.cs" />

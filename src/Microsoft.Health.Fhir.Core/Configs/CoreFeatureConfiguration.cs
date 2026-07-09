@@ -35,6 +35,12 @@ namespace Microsoft.Health.Fhir.Core.Configs
         public TotalType IncludeTotalInBundle { get; set; } = TotalType.None;
 
         /// <summary>
+        /// Gets or sets which FHIR SDK (Firely or Ignixa) serves requests at each mode-gated seam.
+        /// Defaults to <see cref="FhirSdkMode.Hybrid"/> (Ignixa preferred where wired up, Firely as fallback).
+        /// </summary>
+        public FhirSdkMode SdkMode { get; set; } = FhirSdkMode.Hybrid;
+
+        /// <summary>
         /// Gets or sets the maximum value for _count in search.
         /// </summary>
         public int MaxItemCountPerSearch { get; set; } = 1000;

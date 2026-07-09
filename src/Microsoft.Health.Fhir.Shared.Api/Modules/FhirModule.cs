@@ -12,7 +12,6 @@ using Hl7.Fhir.Serialization;
 using Hl7.FhirPath;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.Mvc.Formatters;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -32,6 +31,7 @@ using Microsoft.Health.Fhir.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Features.Health;
 using Microsoft.Health.Fhir.Core.Features.Operations;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
+using Microsoft.Health.Fhir.Core.Features.Resources.Bundle;
 using Microsoft.Health.Fhir.Core.Features.Security;
 using Microsoft.Health.Fhir.Core.Messages.CapabilityStatement;
 using Microsoft.Health.Fhir.Core.Messages.Search;
@@ -163,21 +163,12 @@ namespace Microsoft.Health.Fhir.Api.Modules
             // Support for resolve()
             FhirPathCompiler.DefaultSymbolTable.AddFhirExtensions();
 
-            services.Add<FhirJsonInputFormatter>()
-                .Singleton()
-                .AsSelf()
-                .AsService<TextInputFormatter>();
-
-            services.Add<FhirJsonOutputFormatter>()
-                .Singleton()
-                .AsSelf()
-                .AsService<TextOutputFormatter>();
-
-            // Register Ignixa serialization services and configure as primary JSON formatters
-            // This registers IIgnixaJsonSerializer and inserts Ignixa formatters at the front
-            // of the MVC formatter lists to take precedence over Firely formatters.
-            // The Ignixa formatters support both Ignixa and Firely types for gradual migration.
-            services.AddIgnixaSerializationWithFormatters();
+            // Registers the Ignixa JSON serializer and the concrete Ignixa formatter singletons.
+            // Whether either JSON formatter family (Firely and/or Ignixa) actually participates in
+            // MVC formatter negotiation -- and in what order -- is mode-gated by SdkModeFeatureModule,
+            // not decided here, so IIgnixaJsonSerializer stays available to persistence/validation
+            // code paths regardless of SdkMode.
+            services.AddIgnixaSerialization();
 
             services.Add<FhirRequestContextAccessor>()
                 .Singleton()

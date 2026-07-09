@@ -4,14 +4,12 @@
 // -------------------------------------------------------------------------------------------------
 
 using System;
-using System.Diagnostics.CodeAnalysis;
 using EnsureThat;
 using Hl7.Fhir.Serialization;
 using Ignixa.Abstractions;
-using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Formatters;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Extensions.Options;
 using Microsoft.Health.Fhir.Core.Features.Search.FhirPath;
 using Microsoft.Health.Fhir.Ignixa.FhirPath;
 
@@ -37,8 +35,10 @@ public static class ServiceCollectionExtensions
     /// <item><description><see cref="IgnixaFhirJsonOutputFormatter"/> - ASP.NET Core output formatter</description></item>
     /// </list>
     /// <para>
-    /// Note: This does NOT automatically configure MVC to use these formatters.
-    /// Use <see cref="AddIgnixaSerializationWithFormatters"/> to also configure MVC options.
+    /// Note: This does NOT configure MVC to use these formatters. MVC formatter registration is
+    /// mode-gated (<see cref="Microsoft.Health.Fhir.Core.Configs.FhirSdkMode"/>) and lives in
+    /// <c>SdkModeFeatureModule</c>, not here — this method only makes the serializer and the concrete
+    /// formatter singletons available for that module (and other consumers) to resolve.
     /// </para>
     /// <para>
     /// Important: This method requires that <see cref="FhirJsonParser"/> and <see cref="FhirJsonSerializer"/>
@@ -72,35 +72,26 @@ public static class ServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Adds Ignixa FHIR serialization services and configures MVC to use the formatters.
+    /// Exposes the Ignixa JSON formatters (registered by <see cref="AddIgnixaSerialization"/>) as
+    /// <see cref="TextInputFormatter"/>/<see cref="TextOutputFormatter"/> services, so MVC's single
+    /// formatter-ordering owner (<c>FormatterConfiguration</c>) can see and order them.
     /// </summary>
     /// <param name="services">The service collection.</param>
     /// <returns>The service collection for chaining.</returns>
     /// <remarks>
-    /// <para>
-    /// This method registers all Ignixa services and configures MVC options to include
-    /// the Ignixa input and output formatters. The formatters are inserted at the beginning
-    /// of the formatter lists to take precedence over existing formatters.
-    /// </para>
-    /// <para>
-    /// Use this method when you want Ignixa formatters to handle FHIR JSON requests/responses
-    /// instead of the existing Firely-based formatters.
-    /// </para>
-    /// <para>
-    /// The Ignixa formatters support both Ignixa types (<see cref="Ignixa.Serialization.SourceNodes.ResourceJsonNode"/>,
-    /// <see cref="IgnixaResourceElement"/>) and Firely types (<see cref="Hl7.Fhir.Model.Resource"/>,
-    /// <see cref="Microsoft.Health.Fhir.Core.Models.RawResourceElement"/>) for gradual migration.
-    /// </para>
+    /// This lives here — not in <c>SdkModeFeatureModule</c> (Api layer) — because
+    /// <see cref="IgnixaFhirJsonInputFormatter"/>/<see cref="IgnixaFhirJsonOutputFormatter"/> are
+    /// <see langword="internal"/> and this assembly's <c>InternalsVisibleTo</c> does not extend to the
+    /// production Api assemblies (only their UnitTests counterparts). Callers MUST only invoke this
+    /// from a mode-gated branch (Ignixa or Hybrid) — calling it unconditionally would register Ignixa
+    /// as a competing formatter even in Firely mode, reproducing the defect this seam exists to fix.
     /// </remarks>
-    public static IServiceCollection AddIgnixaSerializationWithFormatters(this IServiceCollection services)
+    public static IServiceCollection AddIgnixaMvcFormatters(this IServiceCollection services)
     {
         EnsureArg.IsNotNull(services, nameof(services));
 
-        // Add base services
-        services.AddIgnixaSerialization();
-
-        // Configure MVC to use the formatters (inserted at the beginning for precedence)
-        services.AddSingleton<IConfigureOptions<MvcOptions>, IgnixaFormatterConfiguration>();
+        services.AddSingleton<TextInputFormatter>(sp => sp.GetRequiredService<IgnixaFhirJsonInputFormatter>());
+        services.AddSingleton<TextOutputFormatter>(sp => sp.GetRequiredService<IgnixaFhirJsonOutputFormatter>());
 
         return services;
     }
@@ -139,30 +130,5 @@ public static class ServiceCollectionExtensions
         });
 
         return services;
-    }
-
-    /// <summary>
-    /// Configures MVC options to use Ignixa formatters.
-    /// </summary>
-    [SuppressMessage("Performance", "CA1812:Avoid uninstantiated internal classes", Justification = "Instantiated via dependency injection")]
-    private sealed class IgnixaFormatterConfiguration : IConfigureOptions<MvcOptions>
-    {
-        private readonly IServiceProvider _serviceProvider;
-
-        public IgnixaFormatterConfiguration(IServiceProvider serviceProvider)
-        {
-            _serviceProvider = serviceProvider;
-        }
-
-        public void Configure(MvcOptions options)
-        {
-            // Resolve formatters from service provider to ensure all dependencies are available
-            var inputFormatter = _serviceProvider.GetRequiredService<IgnixaFhirJsonInputFormatter>();
-            var outputFormatter = _serviceProvider.GetRequiredService<IgnixaFhirJsonOutputFormatter>();
-
-            // Insert at the beginning to take precedence over Firely formatters
-            options.InputFormatters.Insert(0, inputFormatter);
-            options.OutputFormatters.Insert(0, outputFormatter);
-        }
     }
 }

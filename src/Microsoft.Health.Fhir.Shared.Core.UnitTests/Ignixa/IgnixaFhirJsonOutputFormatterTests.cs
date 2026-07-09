@@ -4,6 +4,7 @@
 // -------------------------------------------------------------------------------------------------
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -13,15 +14,26 @@ using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Formatters;
+using Microsoft.Extensions.Primitives;
+using Microsoft.Health.Core.Features.Context;
+using Microsoft.Health.Core.Features.Security;
 using Microsoft.Health.Fhir.Core.Extensions;
+using Microsoft.Health.Fhir.Core.Features;
+using Microsoft.Health.Fhir.Core.Features.Compartment;
+using Microsoft.Health.Fhir.Core.Features.Context;
+using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
+using Microsoft.Health.Fhir.Core.Features.Resources.Bundle;
+using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Ignixa;
+using Microsoft.Health.Fhir.Shared.Core.Features.Search;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Test.Utilities;
 using Newtonsoft.Json.Linq;
 using NSubstitute;
 using Xunit;
+using static Hl7.Fhir.Model.Bundle;
 using Task = System.Threading.Tasks.Task;
 
 namespace Microsoft.Health.Fhir.Core.UnitTests.Ignixa;
@@ -30,15 +42,33 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Ignixa;
 [Trait(Traits.Category, Categories.Serialization)]
 public class IgnixaFhirJsonOutputFormatterTests
 {
-    private static readonly FhirJsonParser Parser = new FhirJsonParser();
+    private static readonly FhirJsonParser Parser = new FhirJsonParser(DefaultParserSettings.Settings);
     private readonly IgnixaFhirJsonOutputFormatter _formatter;
     private readonly IIgnixaJsonSerializer _ignixaSerializer;
+    private readonly ResourceWrapperFactory _wrapperFactory;
 
     public IgnixaFhirJsonOutputFormatterTests()
     {
         _ignixaSerializer = new IgnixaJsonSerializer();
         var firelySerializer = new FhirJsonSerializer();
-        _formatter = new IgnixaFhirJsonOutputFormatter(_ignixaSerializer, firelySerializer, ModelInfoProvider.Instance);
+        _formatter = new IgnixaFhirJsonOutputFormatter(
+            _ignixaSerializer,
+            firelySerializer,
+            ModelInfoProvider.Instance,
+            new BundleSerializer(),
+            Deserializers.ResourceDeserializer);
+
+        var requestContextAccessor = Substitute.For<RequestContextAccessor<IFhirRequestContext>>();
+        requestContextAccessor.RequestContext.Returns(_ => new FhirRequestContext("get", "https://localhost/Patient", "https://localhost", "correlation", new Dictionary<string, StringValues>(), new Dictionary<string, StringValues>()));
+
+        _wrapperFactory = new ResourceWrapperFactory(
+            new RawResourceFactory(new IgnixaJsonSerializer(), new FhirJsonSerializer()),
+            requestContextAccessor,
+            Substitute.For<ISearchIndexer>(),
+            Substitute.For<IClaimsExtractor>(),
+            Substitute.For<ICompartmentIndexer>(),
+            Substitute.For<ISearchParameterDefinitionManager>(),
+            Deserializers.ResourceDeserializer);
     }
 
     // ------------------------------------------------------------------
@@ -225,6 +255,88 @@ public class IgnixaFhirJsonOutputFormatterTests
     }
 
     // ------------------------------------------------------------------
+    // WriteResponseBody — Bundle with RawBundleEntryComponent entries
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public async Task GivenABundleWithRawEntries_WhenWritten_ThenEachEntryResourceIsPopulated()
+    {
+        var patient = Samples.GetDefaultPatient();
+        var observation = Samples.GetDefaultObservation().ToPoco();
+        observation.Id = Guid.NewGuid().ToString();
+
+        var (rawBundle, bundle) = CreateBundleWithRawEntries(patient, observation.ToResourceElement());
+
+        var json = await WriteObject(rawBundle, typeof(Bundle));
+
+        var parsed = Parser.Parse<Bundle>(json);
+        Assert.Equal(2, parsed.Entry.Count);
+        Assert.All(parsed.Entry, entry => Assert.NotNull(entry.Resource));
+        Assert.True(parsed.IsExactly(bundle));
+    }
+
+    [Fact]
+    public async Task GivenABundleWithRawEntries_WhenWrittenWithSummaryCount_ThenEntriesAreOmitted()
+    {
+        var (rawBundle, _) = CreateBundleWithRawEntries(Samples.GetDefaultPatient());
+
+        var json = await WriteObject(rawBundle, typeof(Bundle), "?_summary=count");
+
+        var parsed = Parser.Parse<Bundle>(json);
+        Assert.Empty(parsed.Entry);
+        Assert.Equal(1, parsed.Total);
+    }
+
+    [Fact]
+    public async Task GivenABundleWithRawEntries_WhenWrittenWithElements_ThenOnlyRequestedElementsAreWrittenPerEntry()
+    {
+        var patient = new Patient
+        {
+            Id = "elements-bundle-test",
+            Active = true,
+            Name = { new HumanName { Family = "Smith", Given = new[] { "John" } } },
+        };
+
+        var (rawBundle, _) = CreateBundleWithRawEntries(patient.ToResourceElement());
+
+        var json = await WriteObject(rawBundle, typeof(Bundle), "?_elements=active");
+
+        var parsed = Parser.Parse<Bundle>(json);
+        var entry = Assert.Single(parsed.Entry);
+        var parsedPatient = Assert.IsType<Patient>(entry.Resource);
+        Assert.True(parsedPatient.Active);
+        Assert.Empty(parsedPatient.Name);
+    }
+
+    [Fact]
+    public async Task GivenABundleWithMixedRawAndPocoEntries_WhenWritten_ThenAllEntryResourcesAreWritten()
+    {
+        var (rawBundle, _) = CreateBundleWithRawEntries(Samples.GetDefaultPatient());
+        var operationOutcome = new OperationOutcome
+        {
+            Id = "search-issues",
+            Issue =
+            {
+                new OperationOutcome.IssueComponent
+                {
+                    Severity = OperationOutcome.IssueSeverity.Warning,
+                    Code = OperationOutcome.IssueType.Incomplete,
+                },
+            },
+        };
+
+        rawBundle.Entry.Add(new EntryComponent { Resource = operationOutcome });
+
+        var json = await WriteObject(rawBundle, typeof(Bundle));
+
+        var parsed = Parser.Parse<Bundle>(json);
+        Assert.Equal(2, parsed.Entry.Count);
+        Assert.All(parsed.Entry, entry => Assert.NotNull(entry.Resource));
+        var parsedOutcome = Assert.IsType<OperationOutcome>(parsed.Entry[1].Resource);
+        Assert.Equal("search-issues", parsedOutcome.Id);
+    }
+
+    // ------------------------------------------------------------------
     // Pretty printing
     // ------------------------------------------------------------------
 
@@ -257,6 +369,36 @@ public class IgnixaFhirJsonOutputFormatterTests
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
+
+    private (Bundle rawBundle, Bundle bundle) CreateBundleWithRawEntries(params ResourceElement[] resources)
+    {
+        string id = Guid.NewGuid().ToString();
+        var rawBundle = new Bundle();
+        var bundle = new Bundle();
+
+        rawBundle.Id = bundle.Id = id;
+        rawBundle.Type = bundle.Type = BundleType.Searchset;
+        rawBundle.Total = bundle.Total = resources.Length;
+
+        foreach (var resource in resources)
+        {
+            var poco = resource.ToPoco();
+            poco.VersionId = "1";
+            poco.Meta.LastUpdated = DateTimeOffset.UtcNow;
+            poco.Meta.Tag = new List<Coding>
+            {
+                new Coding { System = "testTag", Code = Guid.NewGuid().ToString() },
+            };
+            var wrapper = _wrapperFactory.Create(poco.ToResourceElement(), deleted: false, keepMeta: true);
+            wrapper.Version = "1";
+
+            var searchComponent = new SearchComponent { Mode = SearchEntryMode.Match };
+            rawBundle.Entry.Add(new RawBundleEntryComponent(wrapper) { Search = searchComponent });
+            bundle.Entry.Add(new EntryComponent { Resource = poco, Search = searchComponent });
+        }
+
+        return (rawBundle, bundle);
+    }
 
     private bool CanWrite(Type modelType)
     {

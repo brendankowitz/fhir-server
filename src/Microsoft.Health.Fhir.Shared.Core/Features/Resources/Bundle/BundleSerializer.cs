@@ -1,4 +1,4 @@
-﻿// -------------------------------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
@@ -12,7 +12,7 @@ using Hl7.Fhir.Utility;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Shared.Core.Features.Search;
 
-namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
+namespace Microsoft.Health.Fhir.Core.Features.Resources.Bundle
 {
     public class BundleSerializer
     {
