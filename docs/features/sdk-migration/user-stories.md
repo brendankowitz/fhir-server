@@ -229,7 +229,7 @@ $member-match, $everything, group export, search-parameter state/reindex admin, 
 **Blocked by:** none
 **Source:** abstraction-propagation-gap-audit §2.3; shim-minimization-audit §3.5; dual-provider-feature-flags §8 (G26)
 
-Delete the ~8 uncompiled, already-drifting duplicate files under `Shared.Core/Ignixa/`, the orphaned `AddIgnixaPersistence`/`IgnixaRawResourceFactory`/`IgnixaResourceDeserializer` scaffolding, and the unused `Ignixa.Extensions.FirelySdk6`/`Ignixa.Search` package pins; consolidate the standalone `Microsoft.Health.Fhir.Ignixa` project's duplicate type identities. Done: one definition per type, zero orphaned registrations, build green.
+Delete the 7 uncompiled, already-drifting duplicate files under `Shared.Core/Ignixa/`, the orphaned `AddIgnixaPersistence`/`IgnixaRawResourceFactory`/`IgnixaResourceDeserializer` scaffolding, and the unused `Ignixa.Extensions.FirelySdk6`/`Ignixa.Search` package pins; consolidate the standalone `Microsoft.Health.Fhir.Ignixa` project's duplicate type identities. Done: one definition per type, zero orphaned registrations, build green.
 
 ## US-24: Replace `IModelInfoProvider` and collapse version-specific projects (endgame)
 

@@ -262,8 +262,10 @@ Ignixa mode's correctness accounting depends on knowing which elements carry nod
   `FhirPath/IgnixaCompiledFhirPath.cs`) are **not in the `.projitems`** (only the two formatters
   and `ServiceCollectionExtensions` are compiled from that folder;
   `Microsoft.Health.Fhir.Shared.Core.projitems:14-16`). The compiled copies live in the
-  `Microsoft.Health.Fhir.Ignixa` project, which the projitems references (`:11`). The stale disk
-  copies are byte-identical today but will silently diverge — delete them.
+  `Microsoft.Health.Fhir.Ignixa` project, which the projitems references (`:11`). Six of the seven
+  stale disk copies are byte-identical today; `FhirPath/IgnixaCompiledFhirPath.cs` has already
+  diverged — delete them. *(Corrected by the 2026-07-08 adversarial review: original said all
+  copies were byte-identical.)*
 - `docs/features/sdk-migration/investigations/ignixa-integration-investigation.md` §4.1 and the
   test-readiness report §2.1 are stale on: formatter location, STU3/R4B schema providers (fixed),
   and the input-formatter double-parse (now `ToPoco` via shim, `IgnixaFhirJsonInputFormatter.cs:181-187`).
