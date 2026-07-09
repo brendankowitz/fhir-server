@@ -8,6 +8,8 @@ using FluentValidation;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Health.Extensions.DependencyInjection;
+using Microsoft.Health.Fhir.Api.Configs;
+using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Validation;
 using Microsoft.Health.Fhir.Core.Features.Validation.Narratives;
@@ -19,6 +21,14 @@ namespace Microsoft.Health.Fhir.Api.Modules;
 /// </summary>
 public class ValidationModule : IStartupModule
 {
+    private readonly FhirSdkMode _sdkMode;
+
+    public ValidationModule(FhirServerConfiguration fhirServerConfiguration)
+    {
+        EnsureArg.IsNotNull(fhirServerConfiguration, nameof(fhirServerConfiguration));
+        _sdkMode = fhirServerConfiguration.CoreFeatures.SdkMode;
+    }
+
     /// <inheritdoc />
     public void Load(IServiceCollection services)
     {
@@ -44,13 +54,22 @@ public class ValidationModule : IStartupModule
 
         // Register the Ignixa-based validator as the primary IModelAttributeValidator
         // Uses fast-path validation (Tier 1-2) for Ignixa resources (~1-5ms)
-        // Falls back to Firely DotNetAttributeValidation for non-Ignixa resources
-        services.AddSingleton<IModelAttributeValidator>(sp =>
+        // Falls back to Firely DotNetAttributeValidation for non-Ignixa resources.
+        // In Firely mode, ModelAttributeValidator itself is registered directly instead, so no
+        // resource ever takes the Ignixa fast path.
+        if (_sdkMode == FhirSdkMode.Firely)
         {
-            var schemaContext = sp.GetRequiredService<IIgnixaSchemaContext>();
-            var fallbackValidator = sp.GetRequiredService<ModelAttributeValidator>();
-            return new IgnixaResourceValidator(schemaContext, fallbackValidator);
-        });
+            services.AddSingleton<IModelAttributeValidator>(sp => sp.GetRequiredService<ModelAttributeValidator>());
+        }
+        else
+        {
+            services.AddSingleton<IModelAttributeValidator>(sp =>
+            {
+                var schemaContext = sp.GetRequiredService<IIgnixaSchemaContext>();
+                var fallbackValidator = sp.GetRequiredService<ModelAttributeValidator>();
+                return new IgnixaResourceValidator(schemaContext, fallbackValidator);
+            });
+        }
 
         services.AddSingleton<ServerProvideProfileValidation>();
         services.AddSingleton<ISupportedProfilesStore>(x => x.GetRequiredService<ServerProvideProfileValidation>());

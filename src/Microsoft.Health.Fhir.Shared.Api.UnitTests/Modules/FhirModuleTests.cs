@@ -63,6 +63,28 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Modules
             Assert.Throws<ArgumentNullException>(() => new FhirModule(null));
         }
 
+        [Fact]
+        public void GivenFirelyMode_WhenSearchModuleAlsoLoaded_ThenFirelyFhirPathProviderIsRegistered()
+        {
+            var provider = BuildProviderWithSearchModule(FhirSdkMode.Firely);
+
+            var fhirPathProvider = provider.GetRequiredService<Microsoft.Health.Fhir.Core.Features.Search.FhirPath.IFhirPathProvider>();
+
+            Assert.IsType<Microsoft.Health.Fhir.Core.Features.Search.FhirPath.FirelyFhirPathProvider>(fhirPathProvider);
+        }
+
+        [Theory]
+        [InlineData(FhirSdkMode.Hybrid)]
+        [InlineData(FhirSdkMode.Ignixa)]
+        public void GivenHybridOrIgnixaMode_WhenSearchModuleAlsoLoaded_ThenIgnixaFhirPathProviderIsRegistered(FhirSdkMode mode)
+        {
+            var provider = BuildProviderWithSearchModule(mode);
+
+            var fhirPathProvider = provider.GetRequiredService<Microsoft.Health.Fhir.Core.Features.Search.FhirPath.IFhirPathProvider>();
+
+            Assert.IsType<Microsoft.Health.Fhir.Ignixa.FhirPath.IgnixaFhirPathProvider>(fhirPathProvider);
+        }
+
         private static IServiceProvider BuildProvider(FhirSdkMode mode)
         {
             var fhirServerConfiguration = new FhirServerConfiguration();
@@ -71,6 +93,19 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Modules
             var services = new ServiceCollection();
 
             new FhirModule(fhirServerConfiguration).Load(services);
+
+            return services.BuildServiceProvider();
+        }
+
+        private static IServiceProvider BuildProviderWithSearchModule(FhirSdkMode mode)
+        {
+            var fhirServerConfiguration = new FhirServerConfiguration();
+            fhirServerConfiguration.CoreFeatures.SdkMode = mode;
+
+            var services = new ServiceCollection();
+
+            new FhirModule(fhirServerConfiguration).Load(services);
+            new Microsoft.Health.Fhir.Api.Modules.SearchModule(fhirServerConfiguration).Load(services);
 
             return services.BuildServiceProvider();
         }

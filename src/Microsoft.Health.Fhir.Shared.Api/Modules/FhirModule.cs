@@ -112,8 +112,13 @@ namespace Microsoft.Health.Fhir.Api.Modules
             services.AddSingleton<IIgnixaSchemaContext, IgnixaSchemaContext>();
 
             // Register Ignixa FHIRPath provider for high-performance search indexing
-            // Uses delegate compilation for ~80% of common patterns, ~10x faster than Firely
-            services.AddIgnixaFhirPath(provider => provider.GetRequiredService<IIgnixaSchemaContext>().Schema);
+            // Uses delegate compilation for ~80% of common patterns, ~10x faster than Firely.
+            // Skipped in Firely mode so SearchModule's FirelyFhirPathProvider fallback registration
+            // (TryAddSingleton, which no-ops if a provider is already registered) takes effect instead.
+            if (_sdkMode != FhirSdkMode.Firely)
+            {
+                services.AddIgnixaFhirPath(provider => provider.GetRequiredService<IIgnixaSchemaContext>().Schema);
+            }
 
             services.AddSingleton<IReadOnlyDictionary<FhirResourceFormat, Func<string, string, DateTimeOffset, ResourceElement>>>(provider =>
             {
