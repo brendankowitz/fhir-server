@@ -7,6 +7,8 @@ using EnsureThat;
 using MediatR;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Health.Extensions.DependencyInjection;
+using Microsoft.Health.Fhir.Api.Configs;
+using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Operations;
 using Microsoft.Health.Fhir.Core.Features.Operations.Everything;
@@ -23,6 +25,14 @@ namespace Microsoft.Health.Fhir.Api.Modules
     /// </summary>
     public class OperationsModule : IStartupModule
     {
+        private readonly FhirSdkMode _sdkMode;
+
+        public OperationsModule(FhirServerConfiguration fhirServerConfiguration)
+        {
+            EnsureArg.IsNotNull(fhirServerConfiguration, nameof(fhirServerConfiguration));
+            _sdkMode = fhirServerConfiguration.CoreFeatures.SdkMode;
+        }
+
         public void Load(IServiceCollection services)
         {
             EnsureArg.IsNotNull(services, nameof(services));
@@ -51,10 +61,20 @@ namespace Microsoft.Health.Fhir.Api.Modules
                 .AsSelf()
                 .AsImplementedInterfaces();
 
-            services.Add<ImportResourceParser>()
-                .Transient()
-                .AsSelf()
-                .AsImplementedInterfaces();
+            if (_sdkMode == FhirSdkMode.Firely)
+            {
+                services.Add<FirelyImportResourceParser>()
+                    .Transient()
+                    .AsSelf()
+                    .AsService<IImportResourceParser>();
+            }
+            else
+            {
+                services.Add<ImportResourceParser>()
+                    .Transient()
+                    .AsSelf()
+                    .AsService<IImportResourceParser>();
+            }
 
             services.Add<ImportErrorStoreFactory>()
                 .Transient()
