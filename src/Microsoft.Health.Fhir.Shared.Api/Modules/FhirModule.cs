@@ -19,12 +19,14 @@ using Microsoft.Extensions.Options;
 using Microsoft.Health.Core.Features.Context;
 using Microsoft.Health.Core.Features.Security;
 using Microsoft.Health.Extensions.DependencyInjection;
+using Microsoft.Health.Fhir.Api.Configs;
 using Microsoft.Health.Fhir.Api.Features.Context;
 using Microsoft.Health.Fhir.Api.Features.Filters;
 using Microsoft.Health.Fhir.Api.Features.Formatters;
 using Microsoft.Health.Fhir.Api.Features.Health;
 using Microsoft.Health.Fhir.Api.Features.Resources;
 using Microsoft.Health.Fhir.Api.Features.Resources.Bundle;
+using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Conformance;
 using Microsoft.Health.Fhir.Core.Features.Context;
@@ -46,6 +48,14 @@ namespace Microsoft.Health.Fhir.Api.Modules
     /// </summary>
     public class FhirModule : IStartupModule
     {
+        private readonly FhirSdkMode _sdkMode;
+
+        public FhirModule(FhirServerConfiguration fhirServerConfiguration)
+        {
+            EnsureArg.IsNotNull(fhirServerConfiguration, nameof(fhirServerConfiguration));
+            _sdkMode = fhirServerConfiguration.CoreFeatures.SdkMode;
+        }
+
         /// <inheritdoc />
         public void Load(IServiceCollection services)
         {
@@ -115,6 +125,12 @@ namespace Microsoft.Health.Fhir.Api.Modules
                     {
                         FhirResourceFormat.Json, (str, version, lastModified) =>
                         {
+                            if (_sdkMode == FhirSdkMode.Firely)
+                            {
+                                var resource = jsonParser.Parse<Resource>(str);
+                                return SetMetadata(resource, version, lastModified);
+                            }
+
                             // Use Ignixa for JSON deserialization
                             var resourceNode = ignixaSerializer.Parse(str);
                             var ignixaElement = new IgnixaResourceElement(resourceNode, schemaContext.Schema);
