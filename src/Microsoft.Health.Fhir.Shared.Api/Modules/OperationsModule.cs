@@ -63,14 +63,14 @@ namespace Microsoft.Health.Fhir.Api.Modules
 
             if (_sdkMode == FhirSdkMode.Firely)
             {
-                services.Add<FirelyImportResourceParser>()
+                services.Add<ImportResourceParser>()
                     .Transient()
                     .AsSelf()
                     .AsService<IImportResourceParser>();
             }
             else
             {
-                services.Add<ImportResourceParser>()
+                services.Add<IgnixaImportResourceParser>()
                     .Transient()
                     .AsSelf()
                     .AsService<IImportResourceParser>();

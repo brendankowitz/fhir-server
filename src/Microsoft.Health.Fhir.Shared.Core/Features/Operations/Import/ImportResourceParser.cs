@@ -1,139 +1,103 @@
-﻿// -------------------------------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
 using System;
-using System.Text.Json.Nodes;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text.RegularExpressions;
 using EnsureThat;
-using Ignixa.Serialization.SourceNodes;
+using Hl7.Fhir.Model;
+using Hl7.Fhir.Serialization;
 using Microsoft.Health.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
+using Microsoft.Health.Fhir.Core.Features.Resources;
 using Microsoft.Health.Fhir.Core.Models;
-using Microsoft.Health.Fhir.Ignixa;
 
 namespace Microsoft.Health.Fhir.Core.Features.Operations.Import
 {
+    /// <summary>
+    /// Firely-based <see cref="IImportResourceParser"/> selected by <see cref="Microsoft.Health.Fhir.Core.Configs.FhirSdkMode.Firely"/>.
+    /// Restored from the pre-Ignixa implementation (git commit 5b0a390df^) so force-Firely mode has a
+    /// working $import path; the Ignixa-based <see cref="IgnixaImportResourceParser"/> remains the
+    /// implementation used in Hybrid/Ignixa mode.
+    /// </summary>
     public class ImportResourceParser : IImportResourceParser
     {
         private static readonly Regex ResourceIdValidationRegex = new Regex(
             "^[A-Za-z0-9\\-\\.]{1,64}$",
             RegexOptions.Compiled);
 
-        private readonly IIgnixaJsonSerializer _serializer;
-        private readonly IResourceWrapperFactory _resourceFactory;
-        private readonly IIgnixaSchemaContext _schemaContext;
+        private FhirJsonParser _parser;
+        private IResourceWrapperFactory _resourceFactory;
 
-        public ImportResourceParser(
-            IIgnixaJsonSerializer serializer,
-            IResourceWrapperFactory resourceFactory,
-            IIgnixaSchemaContext schemaContext)
+        public ImportResourceParser(FhirJsonParser parser, IResourceWrapperFactory resourceFactory)
         {
-            _serializer = EnsureArg.IsNotNull(serializer, nameof(serializer));
+            _parser = EnsureArg.IsNotNull(parser, nameof(parser));
             _resourceFactory = EnsureArg.IsNotNull(resourceFactory, nameof(resourceFactory));
-            _schemaContext = EnsureArg.IsNotNull(schemaContext, nameof(schemaContext));
         }
 
         public ImportResource Parse(long index, long offset, int length, string rawResource, ImportMode importMode)
         {
-            var resourceNode = _serializer.Parse(rawResource)
-                ?? throw new InvalidOperationException("Failed to parse resource from raw JSON.");
-            ValidateResourceId(resourceNode.Id);
-            CheckConditionalReferenceInResource(resourceNode, importMode);
+            var resource = _parser.Parse<Resource>(rawResource);
+            ValidateResourceId(resource?.Id);
+            CheckConditionalReferenceInResource(resource, importMode);
 
-            var lastUpdatedIsNull = importMode == ImportMode.InitialLoad || resourceNode.Meta.LastUpdated == null;
-            var lastUpdated = lastUpdatedIsNull ? Clock.UtcNow : resourceNode.Meta.LastUpdated.Value;
-            resourceNode.Meta.LastUpdated = new DateTimeOffset(lastUpdated.DateTime.TruncateToMillisecond(), lastUpdated.Offset);
-            if (!lastUpdatedIsNull && resourceNode.Meta.LastUpdated.Value > Clock.UtcNow.AddSeconds(10)) // 5 sec is the max for the computers in the domain
+            if (resource.Meta == null)
+            {
+                resource.Meta = new Meta();
+            }
+
+            var lastUpdatedIsNull = importMode == ImportMode.InitialLoad || resource.Meta.LastUpdated == null;
+            var lastUpdated = lastUpdatedIsNull ? Clock.UtcNow : resource.Meta.LastUpdated.Value;
+            resource.Meta.LastUpdated = new DateTimeOffset(lastUpdated.DateTime.TruncateToMillisecond(), lastUpdated.Offset);
+            if (!lastUpdatedIsNull && resource.Meta.LastUpdated.Value > Clock.UtcNow.AddSeconds(10)) // 5 sec is the max for the computers in the domain
             {
                 throw new NotSupportedException("LastUpdated in the resource cannot be in the future.");
             }
 
             var keepVersion = true;
-            if (lastUpdatedIsNull || string.IsNullOrEmpty(resourceNode.Meta.VersionId) || !int.TryParse(resourceNode.Meta.VersionId, out var _))
+            if (lastUpdatedIsNull || string.IsNullOrEmpty(resource.Meta.VersionId) || !int.TryParse(resource.Meta.VersionId, out var _))
             {
-                resourceNode.Meta.VersionId = "1";
+                resource.Meta.VersionId = "1";
                 keepVersion = false;
             }
 
-            var ignixaElement = new IgnixaResourceElement(resourceNode, _schemaContext.Schema);
+            var resourceElement = resource.ToResourceElement();
 
-            var isDeleted = ignixaElement.IsSoftDeleted();
+            var isDeleted = resourceElement.IsSoftDeleted();
 
             if (isDeleted)
             {
-                RemoveSoftDeletedExtension(resourceNode);
+                resource.Meta.RemoveExtension(KnownFhirPaths.AzureSoftDeletedExtensionUrl);
             }
 
-            // Use the extension method to create the wrapper directly from IgnixaResourceElement
-            var resourceWrapper = _resourceFactory.Create(ignixaElement, isDeleted, true, keepVersion);
+            var resourceWapper = _resourceFactory.Create(resourceElement, isDeleted, true, keepVersion);
 
-            return new ImportResource(index, offset, length, !lastUpdatedIsNull, keepVersion, isDeleted, resourceWrapper);
+            return new ImportResource(index, offset, length, !lastUpdatedIsNull, keepVersion, isDeleted, resourceWapper);
         }
 
-        private void CheckConditionalReferenceInResource(ResourceJsonNode resource, ImportMode importMode)
+        private static void CheckConditionalReferenceInResource(Resource resource, ImportMode importMode)
         {
             if (importMode == ImportMode.IncrementalLoad)
             {
                 return;
             }
 
-            // Create IgnixaResourceElement for FhirPath evaluation
-            var ignixaElement = new IgnixaResourceElement(resource, _schemaContext.Schema);
-
-            // Use IReferenceMetadataProvider to identify reference fields for this resource type
-            var referenceMetadata = _schemaContext.ReferenceMetadataProvider.GetMetadata(resource.ResourceType);
-            foreach (var field in referenceMetadata)
+            IEnumerable<ResourceReference> references = resource.GetAllChildren<ResourceReference>();
+            foreach (ResourceReference reference in references)
             {
-                // Strip [x] suffix for choice types - FhirPath handles polymorphic fields
-                var elementPath = field.ElementPath.EndsWith("[x]", StringComparison.Ordinal)
-                    ? field.ElementPath.Substring(0, field.ElementPath.Length - 3)
-                    : field.ElementPath;
+                if (string.IsNullOrWhiteSpace(reference.Reference))
+                {
+                    continue;
+                }
 
-                // Use FhirPath to check if any reference contains '?' (conditional reference)
-                // FhirPath naturally handles collections and nested paths
-                var fhirPath = $"{elementPath}.reference.contains('?')";
-                if (ignixaElement.Predicate(fhirPath))
+                if (reference.Reference.Contains('?', StringComparison.Ordinal))
                 {
                     throw new NotSupportedException($"Conditional reference is not supported for $import in {ImportMode.InitialLoad}.");
                 }
-            }
-        }
-
-        private static void RemoveSoftDeletedExtension(ResourceJsonNode resource)
-        {
-            var metaNode = resource.MutableNode["meta"];
-            if (metaNode is not JsonObject metaObject)
-            {
-                return;
-            }
-
-            if (!metaObject.TryGetPropertyValue("extension", out var extensionNode) || extensionNode is not JsonArray extensionArray)
-            {
-                return;
-            }
-
-            // Remove the soft-deleted extension
-            for (int i = extensionArray.Count - 1; i >= 0; i--)
-            {
-                if (extensionArray[i] is JsonObject extensionObj &&
-                    extensionObj.TryGetPropertyValue("url", out var urlNode) &&
-                    urlNode is JsonValue urlValue)
-                {
-                    var url = urlValue.GetValue<string>();
-                    if (string.Equals(url, KnownFhirPaths.AzureSoftDeletedExtensionUrl, StringComparison.OrdinalIgnoreCase))
-                    {
-                        extensionArray.RemoveAt(i);
-                    }
-                }
-            }
-
-            // Clean up empty extension array
-            if (extensionArray.Count == 0)
-            {
-                metaObject.Remove("extension");
             }
         }
 

@@ -24,13 +24,13 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Modules
     public class OperationsModuleTests
     {
         [Fact]
-        public void GivenFirelyMode_WhenLoaded_ThenFirelyImportResourceParserIsRegistered()
+        public void GivenFirelyMode_WhenLoaded_ThenImportResourceParserIsRegistered()
         {
             var provider = BuildProvider(FhirSdkMode.Firely);
 
             var parser = provider.GetRequiredService<IImportResourceParser>();
 
-            Assert.IsType<FirelyImportResourceParser>(parser);
+            Assert.IsType<ImportResourceParser>(parser);
         }
 
         [Theory]
@@ -42,7 +42,7 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Modules
 
             var parser = provider.GetRequiredService<IImportResourceParser>();
 
-            Assert.IsType<ImportResourceParser>(parser);
+            Assert.IsType<IgnixaImportResourceParser>(parser);
         }
 
         [Fact]

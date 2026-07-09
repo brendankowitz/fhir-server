@@ -27,7 +27,7 @@ namespace Microsoft.Health.Fhir.Shared.Core.UnitTests.Features.Operations.Import
 {
     [Trait(Traits.OwningTeam, OwningTeam.FhirImport)]
     [Trait(Traits.Category, Categories.Import)]
-    public class ImportResourceParserTests
+    public class IgnixaImportResourceParserTests
     {
         private readonly FhirJsonSerializer _jsonSerializer = new FhirJsonSerializer();
 
@@ -37,9 +37,9 @@ namespace Microsoft.Health.Fhir.Shared.Core.UnitTests.Features.Operations.Import
 
         private readonly ResourceWrapperFactory _wrapperFactory;
 
-        private readonly ImportResourceParser _importResourceParser;
+        private readonly IgnixaImportResourceParser _ignixaImportResourceParser;
 
-        public ImportResourceParserTests()
+        public IgnixaImportResourceParserTests()
         {
             var requestContextAccessor = Substitute.For<RequestContextAccessor<IFhirRequestContext>>();
 
@@ -55,7 +55,7 @@ namespace Microsoft.Health.Fhir.Shared.Core.UnitTests.Features.Operations.Import
                                     Substitute.For<ISearchParameterDefinitionManager>(),
                                     Deserializers.ResourceDeserializer);
 
-            _importResourceParser = new(_ignixaSerializer, _wrapperFactory, _schemaContext);
+            _ignixaImportResourceParser = new(_ignixaSerializer, _wrapperFactory, _schemaContext);
         }
 
         [RetryFact(MaxRetries = 3, DelayBetweenRetriesMs = 5000)]
@@ -72,7 +72,7 @@ namespace Microsoft.Health.Fhir.Shared.Core.UnitTests.Features.Operations.Import
             patient.Meta.AddExtension(KnownFhirPaths.AzureSoftDeletedExtensionUrl, new FhirString("soft-deleted"));
 
             string patientAsString = _jsonSerializer.SerializeToString(patient);
-            var importResource = _importResourceParser.Parse(0, 0, 0, patientAsString, ImportMode.IncrementalLoad);
+            var importResource = _ignixaImportResourceParser.Parse(0, 0, 0, patientAsString, ImportMode.IncrementalLoad);
 
             Assert.DoesNotContain(KnownFhirPaths.AzureSoftDeletedExtensionUrl, importResource.ResourceWrapper.RawResource.Data);
             Assert.DoesNotContain("soft-deleted", importResource.ResourceWrapper.RawResource.Data);
@@ -102,7 +102,7 @@ namespace Microsoft.Health.Fhir.Shared.Core.UnitTests.Features.Operations.Import
             string patientAsString = _jsonSerializer.SerializeToString(patient);
             try
             {
-                _importResourceParser.Parse(0, 0, 0, patientAsString, ImportMode.IncrementalLoad);
+                _ignixaImportResourceParser.Parse(0, 0, 0, patientAsString, ImportMode.IncrementalLoad);
                 Assert.True(validId);
             }
             catch (BadRequestException)
