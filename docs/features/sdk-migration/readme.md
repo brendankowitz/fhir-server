@@ -33,6 +33,8 @@ A unified FHIR server using the Ignixa SDK that:
 | Total Firely usages | 602+ |
 | Version-specific projects | 16 (4 versions x 4 layers) |
 
+See [provider-map.md](provider-map.md) for the current Firely/Ignixa implementation-pair inventory.
+
 ## Investigations
 
 | Investigation | Status | Verdict |
