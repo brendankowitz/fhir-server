@@ -19,6 +19,7 @@
     <PackageReference Include="Ignixa.Specification" />
     <PackageReference Include="Ignixa.FhirPath" />
     <PackageReference Include="Ignixa.Validation" />
+    <PackageReference Include="Ignixa.PackageManagement" />
 
     <!-- Common utilities -->
     <PackageReference Include="Ensure.That" />
