@@ -39,17 +39,17 @@ A unified FHIR server using the Ignixa SDK that:
 |--------------|--------|---------|
 | [Complete Firely Replacement with Ignixa](investigations/complete-ignixa-replacement.md) | In Progress | Pending |
 | [Ignixa FHIRPath Provider Migration](investigations/ignixa-fhirpath-provider.md) | In Progress | Recommended |
-| [Dual Provider Feature Flags](investigations/dual-provider-feature-flags.md) | Complete | Single `SdkMode` enum flag (Hybrid/Firely/Ignixa); force-Firely is cheap, force-Ignixa blocked on formatter-selection defect below |
-| [Abstraction Propagation Gap Audit](investigations/abstraction-propagation-gap-audit.md) | Complete | Abstractions exist but propagation stopped at first consumer; 4 layers (bundle pipeline, validation, XML, ad-hoc FHIRPath) have no abstraction at all |
-| [Shim Minimization Audit](investigations/shim-minimization-audit.md) | Complete | 27 shims cataloged (S1-S27); headline defect confirmed independently by two other investigations (see below) |
-| [Validation SDK Dependency](investigations/validation-sdk-dependency.md) | Complete | Non-blocker for objective 2; `Ignixa` package pin (0.0.163) predates PR #310's validation work, which ships from 0.6.7 — version bump is a P0 prerequisite |
-| [XML Pipeline Ignixa Adoption](investigations/xml-pipeline-ignixa-adoption.md) | Complete | Defer as explicit objective-5 carve-out; Ignixa has no production XML support upstream, and the SupportsXml=false 406 mechanism already covers a strict Ignixa-only deployment |
+| [Dual Provider Feature Flags](investigations/dual-provider-feature-flags.md) | Merged (ADR-2607) | Single `SdkMode` enum flag (Hybrid/Firely/Ignixa); force-Firely is cheap, force-Ignixa blocked on formatter-selection defect below |
+| [Abstraction Propagation Gap Audit](investigations/abstraction-propagation-gap-audit.md) | Merged (ADR-2607) | Abstractions exist but propagation stopped at first consumer; 4 layers (bundle pipeline, validation, XML, ad-hoc FHIRPath) have no abstraction at all |
+| [Shim Minimization Audit](investigations/shim-minimization-audit.md) | Merged (ADR-2607) | 27 shims cataloged (S1-S27); headline defect confirmed independently by two other investigations (see below) |
+| [Validation SDK Dependency](investigations/validation-sdk-dependency.md) | Merged (ADR-2607) | Non-blocker for objective 2; `Ignixa` package pin (0.0.163) predates PR #310's validation work, which ships from 0.6.7 — version bump is a P0 prerequisite |
+| [XML Pipeline Ignixa Adoption](investigations/xml-pipeline-ignixa-adoption.md) | Merged (ADR-2607) | Defer as explicit objective-5 carve-out; Ignixa has no production XML support upstream, and the SupportsXml=false 406 mechanism already covers a strict Ignixa-only deployment |
 
 **Cross-cutting critical finding (confirmed independently by 3 of 5 investigations above):** the Ignixa MVC JSON formatters are registered but never selected at runtime. `IgnixaFormatterConfiguration` (`IConfigureOptions<MvcOptions>`) inserts them at index 0, but `FormatterConfiguration` (`IPostConfigureOptions`, `FhirModule.cs:146`) runs afterward and re-inserts the legacy Firely formatters ahead of them. Since the legacy formatter claims every `[FromBody]` type controllers use, **the HTTP boundary is 100% Firely today** — the existing test-readiness report's claim that Ignixa formatters were "E2E validated" does not hold. This is the top-priority item feeding the ADR.
 
 ## Related ADRs
 
-*Pending — see `adr-2607-ignixa-merge-readiness.md` once synthesized from the investigations above.*
+- [ADR-2607: Ignixa Merge Readiness — SdkMode Flag, Gap Register, and Deferral Policy](adr-2607-ignixa-merge-readiness.md) (Proposed) — synthesizes the five 2026-07-08 investigations; implementation backlog in [user-stories.md](user-stories.md)
 
 ## Notes
 
