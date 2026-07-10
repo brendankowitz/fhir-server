@@ -44,6 +44,7 @@ using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Messages.Patch;
 using Microsoft.Health.Fhir.Core.Messages.Upsert;
 using Microsoft.Health.Fhir.Core.Models;
+using Microsoft.Health.Fhir.Ignixa;
 using Microsoft.Health.JobManagement;
 using Microsoft.VisualBasic;
 using Newtonsoft.Json;
@@ -70,6 +71,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Persistence
         private readonly ResourceIdProvider _resourceIdProvider;
         private readonly FhirRequestContextAccessor _contextAccessor;
         private readonly IAuditLogger _auditLogger;
+        private readonly IIgnixaSchemaContext _schemaContext;
         private readonly ILogger<BulkUpdateService> _logger;
 
         internal const string DefaultCallerAgent = "Microsoft.Health.Fhir.Server";
@@ -82,6 +84,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Persistence
             ResourceIdProvider resourceIdProvider,
             FhirRequestContextAccessor contextAccessor,
             IAuditLogger auditLogger,
+            IIgnixaSchemaContext schemaContext,
             ILogger<BulkUpdateService> logger)
         {
             _resourceWrapperFactory = EnsureArg.IsNotNull(resourceWrapperFactory, nameof(resourceWrapperFactory));
@@ -91,6 +94,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Persistence
             _resourceIdProvider = EnsureArg.IsNotNull(resourceIdProvider, nameof(resourceIdProvider));
             _contextAccessor = EnsureArg.IsNotNull(contextAccessor, nameof(contextAccessor));
             _auditLogger = EnsureArg.IsNotNull(auditLogger, nameof(auditLogger));
+            _schemaContext = EnsureArg.IsNotNull(schemaContext, nameof(schemaContext));
             _logger = EnsureArg.IsNotNull(logger, nameof(logger));
         }
 
@@ -642,9 +646,25 @@ namespace Microsoft.Health.Fhir.Core.Features.Persistence
             return updateWrapper;
         }
 
-        private static ResourceElement StampLastUpdated(ResourceElement resourceElement)
+        private ResourceElement StampLastUpdated(ResourceElement resourceElement)
         {
             var lastUpdated = Clock.UtcNow.UtcDateTime.TruncateToMillisecond();
+
+            var resourceJsonNode = resourceElement.GetIgnixaNode();
+            if (resourceJsonNode != null)
+            {
+                resourceJsonNode.Meta.LastUpdated = lastUpdated;
+
+                // Rebuild rather than reuse resourceElement in place: ResourceElement.LastUpdated (used by
+                // ResourceWrapper's constructor to set LastModified) falls back to a cached ITypedElement
+                // snapshot captured before this mutation unless ResourceInstance is an IResourceElement.
+                // Wrapping the mutated node in a fresh IgnixaResourceElement (same pattern as
+                // CreateResourceHandler/UpsertResourceHandler) makes LastUpdated/Id/VersionId read directly
+                // off the node, so the stamp is never stale downstream.
+                var ignixaElement = new IgnixaResourceElement(resourceJsonNode, _schemaContext.Schema);
+                return new ResourceElement(ignixaElement.ToTypedElement(), ignixaElement);
+            }
+
             var resource = resourceElement.ToPoco<Resource>();
             resource.Meta ??= new Meta();
             resource.Meta.LastUpdated = lastUpdated;

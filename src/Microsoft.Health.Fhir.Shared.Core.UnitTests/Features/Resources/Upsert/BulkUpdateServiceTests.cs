@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using DotLiquid;
@@ -57,6 +58,7 @@ namespace Microsoft.Health.Fhir.Shared.Core.UnitTests.Features.Resources.Upsert
         private readonly ResourceIdProvider _resourceIdProvider = Substitute.For<ResourceIdProvider>();
         private readonly FhirRequestContextAccessor _contextAccessor = Substitute.For<FhirRequestContextAccessor>();
         private readonly IAuditLogger _auditLogger = Substitute.For<IAuditLogger>();
+        private readonly IIgnixaSchemaContext _schemaContext = new IgnixaSchemaContext(ModelInfoProvider.Instance);
         private readonly ILogger<BulkUpdateService> _logger = Substitute.For<ILogger<BulkUpdateService>>();
         private readonly ResourceDeserializer _resourceDeserializer = Deserializers.ResourceDeserializer;
         private readonly BulkUpdateService _service;
@@ -111,6 +113,7 @@ namespace Microsoft.Health.Fhir.Shared.Core.UnitTests.Features.Resources.Upsert
                 _resourceIdProvider,
                 _contextAccessor,
                 _auditLogger,
+                _schemaContext,
                 _logger);
         }
 
@@ -275,6 +278,69 @@ namespace Microsoft.Health.Fhir.Shared.Core.UnitTests.Features.Resources.Upsert
             // Assert
             var updatedWrapper = Assert.Single(capturedOperations).Wrapper;
             Assert.True(updatedWrapper.LastModified > beforeUpdate);
+        }
+
+        // The patch pipeline (FhirPathPatchPayload.GetPatchedResourceElement) always round-trips
+        // through a Firely POCO before StampLastUpdated is invoked, so today no code path reaches
+        // StampLastUpdated with a node-backed ResourceElement via the public UpdateMultipleAsync API.
+        // These two tests exercise StampLastUpdated directly via reflection to cover its native branch
+        // ahead of a future task that makes the patch pipeline node-native.
+        [Fact]
+        public void StampLastUpdated_WhenResourceIsIgnixaBacked_MutatesNodeAndRebuildsWrapperWithFreshLastUpdated()
+        {
+            // Arrange
+            var patient = Samples.GetDefaultPatient().ToPoco<Patient>();
+            patient.Id = Guid.NewGuid().ToString();
+            patient.VersionId = "1";
+            patient.Meta = new Meta { LastUpdated = Clock.UtcNow.AddDays(-1) };
+
+            var ignixaSerializer = new IgnixaJsonSerializer();
+            var ignixaElement = new IgnixaResourceElement(ignixaSerializer.Parse(patient.ToJson()), _schemaContext.Schema);
+            ResourceElement nodeBackedResource = ignixaElement.ToResourceElement();
+            Assert.NotNull(nodeBackedResource.GetIgnixaNode());
+
+            var beforeStamp = Clock.UtcNow.AddSeconds(-1);
+            var stampLastUpdated = typeof(BulkUpdateService).GetMethod("StampLastUpdated", BindingFlags.NonPublic | BindingFlags.Instance);
+
+            // Act
+            var stamped = (ResourceElement)stampLastUpdated.Invoke(_service, new object[] { nodeBackedResource });
+
+            // Assert
+            var stampedNode = stamped.GetIgnixaNode();
+            Assert.NotNull(stampedNode);
+            Assert.True(stampedNode.Meta.LastUpdated > beforeStamp);
+
+            // This is the regression guard for the reuse-vs-rebuild bug class found earlier in this plan:
+            // ResourceElement.LastUpdated (which ResourceWrapper's constructor reads to set LastModified)
+            // falls back to a cached ITypedElement snapshot captured before the mutation unless the
+            // returned ResourceElement was rebuilt around a fresh IgnixaResourceElement. If StampLastUpdated
+            // ever regresses to mutating and reusing the original instance in place, this assertion fails
+            // because .LastUpdated would still report the stale pre-mutation timestamp.
+            Assert.True(stamped.LastUpdated > beforeStamp);
+            Assert.NotSame(nodeBackedResource, stamped);
+        }
+
+        [Fact]
+        public void StampLastUpdated_WhenResourceIsFirelyBacked_TakesPocoPathAndReturnsFreshFirelyResourceElement()
+        {
+            // Arrange
+            var patient = Samples.GetDefaultPatient().ToPoco<Patient>();
+            patient.Id = Guid.NewGuid().ToString();
+            patient.VersionId = "1";
+            patient.Meta = new Meta { LastUpdated = Clock.UtcNow.AddDays(-1) };
+            ResourceElement firelyBackedResource = patient.ToResourceElement();
+            Assert.Null(firelyBackedResource.GetIgnixaNode());
+
+            var beforeStamp = Clock.UtcNow.AddSeconds(-1);
+            var stampLastUpdated = typeof(BulkUpdateService).GetMethod("StampLastUpdated", BindingFlags.NonPublic | BindingFlags.Instance);
+
+            // Act
+            var stamped = (ResourceElement)stampLastUpdated.Invoke(_service, new object[] { firelyBackedResource });
+
+            // Assert - unchanged POCO fallback path
+            Assert.Null(stamped.GetIgnixaNode());
+            Assert.True(stamped.LastUpdated > beforeStamp);
+            Assert.True(stamped.ToPoco<Patient>().Meta.LastUpdated > beforeStamp);
         }
 
         [Theory]
