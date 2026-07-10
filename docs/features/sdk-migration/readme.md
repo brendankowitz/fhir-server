@@ -35,6 +35,8 @@ A unified FHIR server using the Ignixa SDK that:
 
 See [provider-map.md](provider-map.md) for the current Firely/Ignixa implementation-pair inventory.
 
+See [ignixa-upstream-gaps.md](ignixa-upstream-gaps.md) for the running tab of Ignixa SDK gaps tracked as upstream issues.
+
 ## Investigations
 
 | Investigation | Status | Verdict |
