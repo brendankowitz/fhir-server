@@ -48,6 +48,18 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
         /// These resources have complex nested types (ElementDefinition, etc.) that
         /// are not properly validated by Ignixa.
         /// </summary>
+        /// <remarks>
+        /// Evidence bar for removing a type from this list: Ignixa must reject an intentionally-invalid
+        /// instance of the type through the exact validation path this class uses (schema.Validate at
+        /// <see cref="ValidationDepth.Compatibility"/>). Ignixa 0.6.7 (PR #310) ships conformance checks
+        /// for CodeSystem (CodeSystemPropertyTypeCheck) and ValueSet (ValueSetIncludeSystemCheck,
+        /// ValueSetFilterCheck), but those checks are registered in the profile (Full) tier and are NOT
+        /// executed at Compatibility depth (see ValidationSchema.Validate / StructureDefinitionSchemaBuilder).
+        /// Verified by IgnixaResourceValidatorTests' negative conformance tests: invalid CodeSystem/ValueSet
+        /// instances are caught at Full depth but pass at Compatibility depth. CodeSystem and ValueSet
+        /// therefore stay on this list; StructureDefinition and the remaining types predate 0.6.7 and have
+        /// no conformance evidence backing removal. See docs/features/sdk-migration/investigations/validation-sdk-dependency.md.
+        /// </remarks>
         private static readonly HashSet<string> ConformanceResourceTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "StructureDefinition",
@@ -68,6 +80,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
 
         private readonly IIgnixaSchemaContext _schemaContext;
         private readonly ModelAttributeValidator _fallbackValidator;
+        private readonly bool _skipFallbackOnSuccess;
         private readonly ConcurrentDictionary<string, ValidationSchema> _schemaCache;
         private readonly StructureDefinitionSchemaBuilder _schemaBuilder;
         private readonly ValidationSettings _validationSettings;
@@ -77,15 +90,23 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
         /// </summary>
         /// <param name="schemaContext">The Ignixa schema context providing type definitions.</param>
         /// <param name="fallbackValidator">The fallback validator for non-Ignixa resources.</param>
+        /// <param name="skipFallbackOnSuccess">
+        /// When true, a resource that passes Ignixa schema validation is accepted without re-running the
+        /// Firely fallback validator. Set for Ignixa mode, where Ignixa validation is authoritative. Hybrid
+        /// mode passes false so it keeps dual-validating as a safety net. Conformance types (see
+        /// <see cref="ConformanceResourceTypes"/>) always route to the fallback regardless of this flag.
+        /// </param>
         public IgnixaResourceValidator(
             IIgnixaSchemaContext schemaContext,
-            ModelAttributeValidator fallbackValidator)
+            ModelAttributeValidator fallbackValidator,
+            bool skipFallbackOnSuccess)
         {
             EnsureArg.IsNotNull(schemaContext, nameof(schemaContext));
             EnsureArg.IsNotNull(fallbackValidator, nameof(fallbackValidator));
 
             _schemaContext = schemaContext;
             _fallbackValidator = fallbackValidator;
+            _skipFallbackOnSuccess = skipFallbackOnSuccess;
             _schemaCache = new ConcurrentDictionary<string, ValidationSchema>(StringComparer.OrdinalIgnoreCase);
             _schemaBuilder = new StructureDefinitionSchemaBuilder();
 
@@ -177,6 +198,11 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
             if (!result.IsValid)
             {
                 return false;
+            }
+
+            if (_skipFallbackOnSuccess)
+            {
+                return true;
             }
 
             return _fallbackValidator.TryValidate(value, validationResults, recurse);

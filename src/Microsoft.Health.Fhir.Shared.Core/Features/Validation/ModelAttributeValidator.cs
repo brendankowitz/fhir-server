@@ -22,7 +22,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
             @"^\d{4}(-\d{2}(-\d{2})?)?(Z|[+-]\d{2}:\d{2})$",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-        public bool TryValidate(ResourceElement value, ICollection<ValidationResult> validationResults = null, bool recurse = false)
+        public virtual bool TryValidate(ResourceElement value, ICollection<ValidationResult> validationResults = null, bool recurse = false)
         {
             var resource = value.ToPoco();
             var isValid = DotNetAttributeValidation.TryValidate(resource, validationResults, recurse);
