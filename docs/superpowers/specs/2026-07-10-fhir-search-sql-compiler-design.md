@@ -1,8 +1,8 @@
 # FHIR Search SQL Compiler North-Star Design
 
-**Status:** Proposed  
-**Date:** 2026-07-10  
-**Scope:** Search parsing, semantic translation, SQL planning, SQL generation, execution, and migration  
+**Status:** Proposed
+**Date:** 2026-07-10
+**Scope:** Search parsing, semantic translation, SQL planning, SQL generation, execution, and migration
 
 ## Executive recommendation
 
