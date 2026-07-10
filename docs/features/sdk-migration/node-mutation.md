@@ -7,9 +7,12 @@ Ignixa-node-backed, and the difference matters after mutation:
   `IResourceElement`, so `ResourceElement.LastUpdated`/`.ToPoco()`/`.Instance` fall back to a cached
   `ITypedElement` snapshot captured at construction. That snapshot goes stale after the underlying
   node is mutated in place.
-- **`IgnixaResourceElement`** (set by the 4 handler call sites via `RebuildResourceElement`, and by
-  the input formatter) -- implements `IResourceElement`, so scalar reads go straight to the live node
-  and stay fresh after mutation.
+- **`IgnixaResourceElement`** (set by the 4 handler call sites via `RebuildResourceElement`) --
+  implements `IResourceElement`, so scalar reads go straight to the live node and stay fresh after
+  mutation. Note: resources arriving from HTTP request bodies (via the input formatter) are NOT
+  in this shape; they arrive as bare `ResourceJsonNode` (the stale bucket below), and therefore
+  also require `RebuildResourceElement` after any in-place mutation—see `ConditionalUpsertResourceHandler`
+  for the pattern.
 
 `GetIgnixaNode()` deliberately accepts both shapes (it only needs the raw node), which is why this
 hazard is invisible at the type level -- nothing stops you from mutating a node and returning the
