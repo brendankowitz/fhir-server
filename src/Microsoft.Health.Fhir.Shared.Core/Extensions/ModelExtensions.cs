@@ -5,9 +5,11 @@
 
 using System;
 using System.Linq;
+using System.Text.Json.Nodes;
 using EnsureThat;
 using Hl7.Fhir.ElementModel;
 using Hl7.Fhir.Model;
+using Ignixa.Serialization.SourceNodes;
 using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Models;
@@ -107,6 +109,13 @@ namespace Microsoft.Health.Fhir.Core.Extensions
         {
             EnsureArg.IsNotNull(resource, nameof(resource));
 
+            var resourceJsonNode = resource.GetIgnixaNode();
+            if (resourceJsonNode != null)
+            {
+                AddSoftDeletedExtensionNative(resourceJsonNode);
+                return resource;
+            }
+
             Resource poco = resource.ToPoco();
             poco.Meta ??= new Meta();
 
@@ -121,6 +130,42 @@ namespace Microsoft.Health.Fhir.Core.Extensions
             }
 
             return poco.ToResourceElement();
+        }
+
+        private static void AddSoftDeletedExtensionNative(ResourceJsonNode resource)
+        {
+            var metaNode = resource.MutableNode["meta"] as JsonObject;
+            if (metaNode == null)
+            {
+                metaNode = new JsonObject();
+                resource.MutableNode["meta"] = metaNode;
+            }
+
+            if (metaNode.TryGetPropertyValue("extension", out var extensionNode) && extensionNode is JsonArray extensionArray)
+            {
+                foreach (var ext in extensionArray)
+                {
+                    if (ext is JsonObject extObj &&
+                        extObj.TryGetPropertyValue("url", out var urlNode) &&
+                        urlNode is JsonValue urlValue &&
+                        string.Equals(urlValue.GetValue<string>(), KnownFhirPaths.AzureSoftDeletedExtensionUrl, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Already present -- nothing to add.
+                        return;
+                    }
+                }
+            }
+            else
+            {
+                extensionArray = new JsonArray();
+                metaNode["extension"] = extensionArray;
+            }
+
+            extensionArray.Add(new JsonObject
+            {
+                ["url"] = KnownFhirPaths.AzureSoftDeletedExtensionUrl,
+                ["valueString"] = "soft-deleted",
+            });
         }
 
         public static SearchParameterInfo ToInfo(this SearchParameter searchParam)

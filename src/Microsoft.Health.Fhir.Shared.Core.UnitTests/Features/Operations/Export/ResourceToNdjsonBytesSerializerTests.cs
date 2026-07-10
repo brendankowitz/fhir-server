@@ -99,6 +99,73 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Operations.Export
             Assert.Equal(_expectedBytes, actualBytes);
         }
 
+        [Fact]
+        public void GivenAnIgnixaBackedResourceWithoutSoftDeletedExtension_WhenSerializedWithAddSoftDeletedExtension_ThenExtensionIsAddedAndIgnixaSerializerIsUsed()
+        {
+            ResourceElement nodeBackedElement = CreateIgnixaBackedElement();
+
+            string actual = _serializer.StringSerialize(nodeBackedElement, addSoftDeletedExtension: true);
+
+            // The native branch mutates the node in place and returns the same ResourceElement, so
+            // SerializeToJson's GetIgnixaNode() check should still succeed -- meaning the Ignixa serializer,
+            // not the Firely fallback, produced this string. Comparing against the Ignixa serializer's own
+            // output for the (now-mutated) node is a direct way to assert which path was taken.
+            Assert.NotNull(nodeBackedElement.GetIgnixaNode());
+            string expected = _ignixaSerializer.Serialize(nodeBackedElement.GetIgnixaNode(), pretty: false);
+            Assert.Equal(expected, actual);
+
+            Assert.Contains(KnownFhirPaths.AzureSoftDeletedExtensionUrl, actual, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void GivenAnIgnixaBackedResource_WhenAddSoftDeletedExtensionCalledTwice_ThenExtensionIsNotDuplicated()
+        {
+            ResourceElement nodeBackedElement = CreateIgnixaBackedElement();
+
+            _serializer.StringSerialize(nodeBackedElement, addSoftDeletedExtension: true);
+            string actual = _serializer.StringSerialize(nodeBackedElement, addSoftDeletedExtension: true);
+
+            int occurrences = actual.Split(KnownFhirPaths.AzureSoftDeletedExtensionUrl, StringSplitOptions.None).Length - 1;
+            Assert.Equal(1, occurrences);
+        }
+
+        [Fact]
+        public void GivenAFirelyBackedResource_WhenSerializedWithAddSoftDeletedExtension_ThenExistingPocoFallbackPathIsUnchanged()
+        {
+            ResourceElement firelyBackedElement = _resource.ToResourceElement();
+            Assert.Null(firelyBackedElement.GetIgnixaNode());
+
+            // Compute the expected JSON from an independent deep copy *before* invoking the mutating call:
+            // Firely's ITypedElement.ToPoco<T>() unwraps back to the same POCO instance that was wrapped by
+            // ToTypedElement(), so the POCO fallback path in TryAddSoftDeletedExtension mutates _resource's
+            // own Meta.Extension list in place. Copying afterwards would observe the already-mutated state.
+            Observation expectedResource = (Observation)_resource.DeepCopy();
+            expectedResource.Meta ??= new Meta();
+            expectedResource.Meta.Extension.Add(
+                new Extension
+                {
+                    Url = KnownFhirPaths.AzureSoftDeletedExtensionUrl,
+                    Value = new FhirString("soft-deleted"),
+                });
+            string expected = new FhirJsonSerializer().SerializeToString(expectedResource);
+
+            string actual = _serializer.StringSerialize(firelyBackedElement, addSoftDeletedExtension: true);
+
+            Assert.Equal(expected, actual);
+        }
+
+        private ResourceElement CreateIgnixaBackedElement()
+        {
+            var serializer = new IgnixaJsonSerializer();
+            var schemaContext = new IgnixaSchemaContext(ModelInfoProvider.Instance);
+            var ignixaElement = new IgnixaResourceElement(serializer.Parse(new FhirJsonSerializer().SerializeToString(_resource)), schemaContext.Schema);
+
+            ResourceElement nodeBackedElement = ignixaElement.ToResourceElement();
+            Assert.NotNull(nodeBackedElement.GetIgnixaNode());
+
+            return nodeBackedElement;
+        }
+
         private ResourceWrapper CreateResourceWrapper(RawResource rawResource)
         {
             return new ResourceWrapper(
