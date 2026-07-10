@@ -65,10 +65,26 @@ namespace Microsoft.Health.Fhir.Core.Features.Resources.Upsert
         public override async Task<UpsertResourceResponse> HandleSingleMatch(ConditionalUpsertResourceRequest request, SearchResultEntry match, CancellationToken cancellationToken)
         {
             ResourceWrapper resourceWrapper = match.Resource;
-            Resource resource = request.Resource.ToPoco();
             var version = WeakETag.FromVersionId(resourceWrapper.Version);
 
-            // One Match, no resource id provided OR (resource id provided and it matches the found resource): The server performs the update against the matching resource
+            var resourceJsonNode = request.Resource.GetIgnixaNode();
+            if (resourceJsonNode != null)
+            {
+                // Native path: stamp the id directly on the node, no POCO round-trip.
+                if (string.IsNullOrEmpty(resourceJsonNode.Id) || string.Equals(resourceJsonNode.Id, resourceWrapper.ResourceId, StringComparison.Ordinal))
+                {
+                    resourceJsonNode.Id = resourceWrapper.ResourceId;
+                    return await _mediator.Send<UpsertResourceResponse>(new UpsertResourceRequest(request.Resource, request.BundleResourceContext, version), cancellationToken);
+                }
+                else
+                {
+                    throw new BadRequestException(string.Format(Core.Resources.ConditionalUpdateMismatchedIds, resourceWrapper.ResourceId, resourceJsonNode.Id));
+                }
+            }
+
+            // Fallback to POCO path for non-Ignixa resources
+            Resource resource = request.Resource.ToPoco();
+
             if (string.IsNullOrEmpty(resource.Id) || string.Equals(resource.Id, resourceWrapper.ResourceId, StringComparison.Ordinal))
             {
                 resource.Id = resourceWrapper.ResourceId;

@@ -195,6 +195,47 @@ public class ConditionalUpsertResourceHandlerTests
             .Send<UpsertResourceResponse>(Arg.Any<CreateResourceRequest>(), Arg.Any<CancellationToken>());
     }
 
+    [Fact]
+    public async Task GivenAConditionalUpsertResourceHandler_WhenRequestResourceIsIgnixaBacked_ThenIdIsStampedOnNodeWithoutPocoRoundTrip()
+    {
+        // Arrange
+        var searchResult = GetSearchResult(Samples.GetDefaultPatient());
+        string matchedResourceId = searchResult.Results.Single().Resource.ResourceId;
+
+        _searchService.SearchAsync(
+          Arg.Any<string>(),
+          Arg.Any<IReadOnlyList<Tuple<string, string>>>(),
+          Arg.Any<CancellationToken>())
+          .Returns(Task.FromResult(searchResult));
+
+        _authService
+            .CheckAccess(DataActions.Read | DataActions.Write | DataActions.Search | DataActions.Update, CancellationToken.None)
+            .Returns(DataActions.Search | DataActions.Update);
+
+        Patient patient = Samples.GetDefaultPatient().ToPoco<Patient>();
+        patient.Id = null;
+
+        var serializer = new IgnixaJsonSerializer();
+        var schemaContext = new IgnixaSchemaContext(ModelInfoProvider.Instance);
+        var ignixaElement = new IgnixaResourceElement(serializer.Parse(patient.ToJson()), schemaContext.Schema);
+        ResourceElement ignixaBackedResource = ignixaElement.ToResourceElement();
+
+        Assert.NotNull(ignixaBackedResource.GetIgnixaNode());
+
+        var conditionalParameters = new List<Tuple<string, string>> { new("name", "John") };
+        var request = new ConditionalUpsertResourceRequest(ignixaBackedResource, conditionalParameters, null);
+
+        // Act
+        await _conditionalUpsertHandler.Handle(request, CancellationToken.None);
+
+        // Assert - the id was stamped directly on the Ignixa node, no POCO round-trip occurred
+        await _mediator
+            .Received()
+            .Send<UpsertResourceResponse>(
+                Arg.Is<UpsertResourceRequest>(r => r.Resource.GetIgnixaNode() != null && r.Resource.GetIgnixaNode().Id == matchedResourceId),
+                Arg.Any<CancellationToken>());
+    }
+
     private SearchResult GetSearchResult(ResourceElement resourceElement)
     {
         var resource = resourceElement.ToPoco();
