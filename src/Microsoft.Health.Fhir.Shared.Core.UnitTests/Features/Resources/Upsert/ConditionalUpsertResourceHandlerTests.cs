@@ -54,6 +54,7 @@ public class ConditionalUpsertResourceHandlerTests
         IResourceWrapperFactory resourceWrapperFactory = Substitute.For<IResourceWrapperFactory>();
         ResourceIdProvider resourceIdProvider = Substitute.For<ResourceIdProvider>();
         ILogger<ConditionalUpsertResourceHandler> logger = Substitute.For<ILogger<ConditionalUpsertResourceHandler>>();
+        IIgnixaSchemaContext schemaContext = new IgnixaSchemaContext(ModelInfoProvider.Instance);
 
         _conditionalUpsertHandler = new ConditionalUpsertResourceHandler(
             fhirDataStore,
@@ -63,7 +64,8 @@ public class ConditionalUpsertResourceHandlerTests
             _mediator,
             resourceIdProvider,
             _authService,
-            logger);
+            logger,
+            schemaContext);
     }
 
     [Fact]
@@ -228,11 +230,21 @@ public class ConditionalUpsertResourceHandlerTests
         // Act
         await _conditionalUpsertHandler.Handle(request, CancellationToken.None);
 
-        // Assert - the id was stamped directly on the Ignixa node, no POCO round-trip occurred
+        // Assert - the id was stamped directly on the Ignixa node, no POCO round-trip occurred at the
+        // API-formatter level, the id is visible through the resource's wrapper (ToPoco), which is what
+        // the downstream UpsertResourceHandler actually reads, AND the wrapper handed to the mediator was
+        // freshly rebuilt (not request.Resource by reference) - ResourceElement.Instance is captured once
+        // at construction, so reusing the original instance after mutating the shared node risks handing
+        // downstream code a stale wrapper. Asserting reference-inequality is what actually distinguishes
+        // "rebuilt the wrapper after mutation" from "mutated the node but reused the old wrapper".
         await _mediator
             .Received()
             .Send<UpsertResourceResponse>(
-                Arg.Is<UpsertResourceRequest>(r => r.Resource.GetIgnixaNode() != null && r.Resource.GetIgnixaNode().Id == matchedResourceId),
+                Arg.Is<UpsertResourceRequest>(r =>
+                    r.Resource.GetIgnixaNode() != null &&
+                    r.Resource.GetIgnixaNode().Id == matchedResourceId &&
+                    r.Resource.ToPoco<Patient>().Id == matchedResourceId &&
+                    !ReferenceEquals(r.Resource, ignixaBackedResource)),
                 Arg.Any<CancellationToken>());
     }
 

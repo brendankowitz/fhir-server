@@ -20,6 +20,8 @@ using Microsoft.Health.Fhir.Core.Features.Security;
 using Microsoft.Health.Fhir.Core.Features.Security.Authorization;
 using Microsoft.Health.Fhir.Core.Messages.Create;
 using Microsoft.Health.Fhir.Core.Messages.Upsert;
+using Microsoft.Health.Fhir.Core.Models;
+using Microsoft.Health.Fhir.Ignixa;
 
 namespace Microsoft.Health.Fhir.Core.Features.Resources.Upsert
 {
@@ -29,6 +31,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Resources.Upsert
     public sealed class ConditionalUpsertResourceHandler : ConditionalResourceHandler<ConditionalUpsertResourceRequest, UpsertResourceResponse>
     {
         private readonly IMediator _mediator;
+        private readonly IIgnixaSchemaContext _schemaContext;
 
         public ConditionalUpsertResourceHandler(
             IFhirDataStore fhirDataStore,
@@ -38,12 +41,15 @@ namespace Microsoft.Health.Fhir.Core.Features.Resources.Upsert
             IMediator mediator,
             ResourceIdProvider resourceIdProvider,
             IAuthorizationService<DataActions> authorizationService,
-            ILogger<ConditionalUpsertResourceHandler> logger)
+            ILogger<ConditionalUpsertResourceHandler> logger,
+            IIgnixaSchemaContext schemaContext)
             : base(searchService, fhirDataStore, conformanceProvider, resourceWrapperFactory, resourceIdProvider, authorizationService, logger)
         {
             EnsureArg.IsNotNull(mediator, nameof(mediator));
+            EnsureArg.IsNotNull(schemaContext, nameof(schemaContext));
 
             _mediator = mediator;
+            _schemaContext = schemaContext;
         }
 
         public override async Task<UpsertResourceResponse> HandleNoMatch(ConditionalUpsertResourceRequest request, CancellationToken cancellationToken)
@@ -73,8 +79,16 @@ namespace Microsoft.Health.Fhir.Core.Features.Resources.Upsert
                 // Native path: stamp the id directly on the node, no POCO round-trip.
                 if (string.IsNullOrEmpty(resourceJsonNode.Id) || string.Equals(resourceJsonNode.Id, resourceWrapper.ResourceId, StringComparison.Ordinal))
                 {
+                    // Mutate the shared node, then rebuild the wrapper - mirrors the native-path pattern
+                    // in CreateResourceHandler/UpsertResourceHandler. ResourceElement.Instance is immutable
+                    // ({ get; }, captured at construction) and IgnixaResourceElement's own contract requires
+                    // InvalidateCaches (or a fresh instance) after mutating the underlying node for
+                    // downstream reads to be guaranteed fresh, so reusing request.Resource directly here
+                    // would leave that contract unmet.
                     resourceJsonNode.Id = resourceWrapper.ResourceId;
-                    return await _mediator.Send<UpsertResourceResponse>(new UpsertResourceRequest(request.Resource, request.BundleResourceContext, version), cancellationToken);
+                    var ignixaElement = new IgnixaResourceElement(resourceJsonNode, _schemaContext.Schema);
+                    var updatedResource = new ResourceElement(ignixaElement.ToTypedElement(), ignixaElement);
+                    return await _mediator.Send<UpsertResourceResponse>(new UpsertResourceRequest(updatedResource, request.BundleResourceContext, version), cancellationToken);
                 }
                 else
                 {
