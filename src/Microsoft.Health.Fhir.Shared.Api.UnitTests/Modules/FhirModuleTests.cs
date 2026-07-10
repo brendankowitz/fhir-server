@@ -11,6 +11,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Health.Fhir.Api.Configs;
 using Microsoft.Health.Fhir.Api.Modules;
 using Microsoft.Health.Fhir.Core.Configs;
+using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Ignixa;
@@ -51,10 +52,7 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Modules
             var element = deserializers[FhirResourceFormat.Json](patientJson, "1", DateTimeOffset.UtcNow);
 
             Assert.Equal("Patient", element.InstanceType);
-
-            // Ignixa's IgnixaResourceElement.ToTypedElement() produces a TypedElementAdapter-backed
-            // ITypedElement (the Ignixa.Extensions.FirelySdk shim), distinct from Firely's PocoElementNode.
-            Assert.Equal("TypedElementAdapter", element.Instance.GetType().Name);
+            Assert.NotNull(element.GetIgnixaNode());
         }
 
         [Fact]

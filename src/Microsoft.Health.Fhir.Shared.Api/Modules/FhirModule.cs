@@ -144,8 +144,9 @@ namespace Microsoft.Health.Fhir.Api.Modules
                             ignixaElement.SetVersionId(version);
                             ignixaElement.SetLastUpdated(lastModified);
 
-                            // Convert to ResourceElement for backward compatibility
-                            return new ResourceElement(ignixaElement.ToTypedElement());
+                            // Convert to ResourceElement for backward compatibility, preserving the node
+                            // (two-arg ctor) so GetIgnixaNode() works for DB-read resources.
+                            return new ResourceElement(ignixaElement.ToTypedElement(), resourceNode);
                         }
                     },
                     {
