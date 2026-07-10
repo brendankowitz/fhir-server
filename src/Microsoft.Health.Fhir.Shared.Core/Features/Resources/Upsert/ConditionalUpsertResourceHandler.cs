@@ -80,14 +80,10 @@ namespace Microsoft.Health.Fhir.Core.Features.Resources.Upsert
                 if (string.IsNullOrEmpty(resourceJsonNode.Id) || string.Equals(resourceJsonNode.Id, resourceWrapper.ResourceId, StringComparison.Ordinal))
                 {
                     // Mutate the shared node, then rebuild the wrapper - mirrors the native-path pattern
-                    // in CreateResourceHandler/UpsertResourceHandler. ResourceElement.Instance is immutable
-                    // ({ get; }, captured at construction) and IgnixaResourceElement's own contract requires
-                    // InvalidateCaches (or a fresh instance) after mutating the underlying node for
-                    // downstream reads to be guaranteed fresh, so reusing request.Resource directly here
-                    // would leave that contract unmet.
+                    // in CreateResourceHandler/UpsertResourceHandler. See RebuildResourceElement for why
+                    // reusing request.Resource directly here would leave that contract unmet.
                     resourceJsonNode.Id = resourceWrapper.ResourceId;
-                    var ignixaElement = new IgnixaResourceElement(resourceJsonNode, _schemaContext.Schema);
-                    var updatedResource = new ResourceElement(ignixaElement.ToTypedElement(), ignixaElement);
+                    var updatedResource = resourceJsonNode.RebuildResourceElement(_schemaContext);
                     return await _mediator.Send<UpsertResourceResponse>(new UpsertResourceRequest(updatedResource, request.BundleResourceContext, version), cancellationToken);
                 }
                 else

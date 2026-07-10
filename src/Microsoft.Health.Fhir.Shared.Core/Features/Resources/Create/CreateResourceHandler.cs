@@ -104,8 +104,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Resources.Create
                 resourceJsonNode.Meta.LastUpdated = resource.Meta.LastUpdated.Value;
 
                 // Create IgnixaResourceElement and pass it as ResourceInstance for direct property access
-                var ignixaElement = new IgnixaResourceElement(resourceJsonNode, _schemaContext.Schema);
-                resourceElement = new ResourceElement(ignixaElement.ToTypedElement(), ignixaElement);
+                resourceElement = resourceJsonNode.RebuildResourceElement(_schemaContext);
             }
             else
             {

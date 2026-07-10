@@ -3,6 +3,8 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
+using EnsureThat;
+using Ignixa.Serialization.SourceNodes;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Models;
@@ -57,5 +59,29 @@ public static class IgnixaResourceElementExtensions
         bool keepVersion = false)
     {
         return factory.Create(resource.ToResourceElement(), deleted, keepMeta, keepVersion);
+    }
+
+    /// <summary>
+    /// Rebuilds a fresh <see cref="ResourceElement"/> wrapper after <paramref name="resourceJsonNode"/>
+    /// has been mutated in place.
+    /// </summary>
+    /// <remarks>
+    /// After mutating a <see cref="ResourceJsonNode"/> held by a <see cref="ResourceElement"/>, always
+    /// rebuild via this method rather than reusing the original <see cref="ResourceElement"/> instance.
+    /// The original instance's cached <c>Instance</c>/<c>ToPoco()</c> views can go stale after in-place
+    /// node mutation -- this bit a Phase 3 task in production
+    /// (see docs/features/sdk-migration/node-mutation.md for the full rule and the two shapes of
+    /// ResourceInstance that make this hazard non-obvious at the type level).
+    /// Reuse-in-place is permitted ONLY when every downstream consumer of the returned value is proven
+    /// to read exclusively via <c>GetIgnixaNode()</c> -- and that proof must be recorded in a comment
+    /// at the call site, not assumed.
+    /// </remarks>
+    public static ResourceElement RebuildResourceElement(this ResourceJsonNode resourceJsonNode, IIgnixaSchemaContext schemaContext)
+    {
+        EnsureArg.IsNotNull(resourceJsonNode, nameof(resourceJsonNode));
+        EnsureArg.IsNotNull(schemaContext, nameof(schemaContext));
+
+        var ignixaElement = new IgnixaResourceElement(resourceJsonNode, schemaContext.Schema);
+        return new ResourceElement(ignixaElement.ToTypedElement(), ignixaElement);
     }
 }

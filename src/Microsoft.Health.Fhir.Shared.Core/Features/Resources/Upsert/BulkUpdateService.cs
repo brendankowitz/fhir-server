@@ -658,11 +658,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Persistence
                 // Rebuild rather than reuse resourceElement in place: ResourceElement.LastUpdated (used by
                 // ResourceWrapper's constructor to set LastModified) falls back to a cached ITypedElement
                 // snapshot captured before this mutation unless ResourceInstance is an IResourceElement.
-                // Wrapping the mutated node in a fresh IgnixaResourceElement (same pattern as
-                // CreateResourceHandler/UpsertResourceHandler) makes LastUpdated/Id/VersionId read directly
-                // off the node, so the stamp is never stale downstream.
-                var ignixaElement = new IgnixaResourceElement(resourceJsonNode, _schemaContext.Schema);
-                return new ResourceElement(ignixaElement.ToTypedElement(), ignixaElement);
+                // See RebuildResourceElement for why.
+                return resourceJsonNode.RebuildResourceElement(_schemaContext);
             }
 
             var resource = resourceElement.ToPoco<Resource>();
