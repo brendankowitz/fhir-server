@@ -36,7 +36,7 @@ using Xunit;
 using static Hl7.Fhir.Model.Bundle;
 using Task = System.Threading.Tasks.Task;
 
-namespace Microsoft.Health.Fhir.Core.UnitTests.Ignixa;
+namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Formatters;
 
 [Trait(Traits.OwningTeam, OwningTeam.Fhir)]
 [Trait(Traits.Category, Categories.Serialization)]
@@ -267,9 +267,9 @@ public class IgnixaFhirJsonOutputFormatterTests
 
         var (rawBundle, bundle) = CreateBundleWithRawEntries(patient, observation.ToResourceElement());
 
-        var json = await WriteObject(rawBundle, typeof(Bundle));
+        var json = await WriteObject(rawBundle, typeof(Hl7.Fhir.Model.Bundle));
 
-        var parsed = Parser.Parse<Bundle>(json);
+        var parsed = Parser.Parse<Hl7.Fhir.Model.Bundle>(json);
         Assert.Equal(2, parsed.Entry.Count);
         Assert.All(parsed.Entry, entry => Assert.NotNull(entry.Resource));
         Assert.True(parsed.IsExactly(bundle));
@@ -280,9 +280,9 @@ public class IgnixaFhirJsonOutputFormatterTests
     {
         var (rawBundle, _) = CreateBundleWithRawEntries(Samples.GetDefaultPatient());
 
-        var json = await WriteObject(rawBundle, typeof(Bundle), "?_summary=count");
+        var json = await WriteObject(rawBundle, typeof(Hl7.Fhir.Model.Bundle), "?_summary=count");
 
-        var parsed = Parser.Parse<Bundle>(json);
+        var parsed = Parser.Parse<Hl7.Fhir.Model.Bundle>(json);
         Assert.Empty(parsed.Entry);
         Assert.Equal(1, parsed.Total);
     }
@@ -299,9 +299,9 @@ public class IgnixaFhirJsonOutputFormatterTests
 
         var (rawBundle, _) = CreateBundleWithRawEntries(patient.ToResourceElement());
 
-        var json = await WriteObject(rawBundle, typeof(Bundle), "?_elements=active");
+        var json = await WriteObject(rawBundle, typeof(Hl7.Fhir.Model.Bundle), "?_elements=active");
 
-        var parsed = Parser.Parse<Bundle>(json);
+        var parsed = Parser.Parse<Hl7.Fhir.Model.Bundle>(json);
         var entry = Assert.Single(parsed.Entry);
         var parsedPatient = Assert.IsType<Patient>(entry.Resource);
         Assert.True(parsedPatient.Active);
@@ -327,9 +327,9 @@ public class IgnixaFhirJsonOutputFormatterTests
 
         rawBundle.Entry.Add(new EntryComponent { Resource = operationOutcome });
 
-        var json = await WriteObject(rawBundle, typeof(Bundle));
+        var json = await WriteObject(rawBundle, typeof(Hl7.Fhir.Model.Bundle));
 
-        var parsed = Parser.Parse<Bundle>(json);
+        var parsed = Parser.Parse<Hl7.Fhir.Model.Bundle>(json);
         Assert.Equal(2, parsed.Entry.Count);
         Assert.All(parsed.Entry, entry => Assert.NotNull(entry.Resource));
         var parsedOutcome = Assert.IsType<OperationOutcome>(parsed.Entry[1].Resource);
@@ -370,11 +370,11 @@ public class IgnixaFhirJsonOutputFormatterTests
     // Helpers
     // ------------------------------------------------------------------
 
-    private (Bundle rawBundle, Bundle bundle) CreateBundleWithRawEntries(params ResourceElement[] resources)
+    private (Hl7.Fhir.Model.Bundle rawBundle, Hl7.Fhir.Model.Bundle bundle) CreateBundleWithRawEntries(params ResourceElement[] resources)
     {
         string id = Guid.NewGuid().ToString();
-        var rawBundle = new Bundle();
-        var bundle = new Bundle();
+        var rawBundle = new Hl7.Fhir.Model.Bundle();
+        var bundle = new Hl7.Fhir.Model.Bundle();
 
         rawBundle.Id = bundle.Id = id;
         rawBundle.Type = bundle.Type = BundleType.Searchset;

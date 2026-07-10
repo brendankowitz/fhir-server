@@ -27,7 +27,7 @@ using NSubstitute;
 using Xunit;
 using Task = System.Threading.Tasks.Task;
 
-namespace Microsoft.Health.Fhir.Core.UnitTests.Ignixa;
+namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Formatters;
 
 [Trait(Traits.OwningTeam, OwningTeam.Fhir)]
 [Trait(Traits.Category, Categories.Serialization)]

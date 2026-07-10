@@ -67,7 +67,15 @@ namespace Microsoft.Health.Fhir.Api.Modules.FeatureFlags.SdkMode
 
         private static void RegisterIgnixaJsonFormatters(IServiceCollection services)
         {
-            services.AddIgnixaMvcFormatters();
+            services.Add<IgnixaFhirJsonInputFormatter>()
+                .Singleton()
+                .AsSelf()
+                .AsService<TextInputFormatter>();
+
+            services.Add<IgnixaFhirJsonOutputFormatter>()
+                .Singleton()
+                .AsSelf()
+                .AsService<TextOutputFormatter>();
         }
 
         private static void RegisterFirelyJsonFormatters(IServiceCollection services)
