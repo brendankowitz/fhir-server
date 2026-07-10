@@ -5,6 +5,8 @@ serves `SdkMode.Ignixa`/`Hybrid`, and where the selection happens. Keep this
 current as new seams gain per-mode implementations (each new US-1x/2x story
 that adds one should add a row here as part of its done-criteria).
 
+See [node-mutation.md](node-mutation.md) for the rule on rebuilding vs. reusing a ResourceElement after mutating its underlying node.
+
 | Seam | Firely implementation | Ignixa implementation | Selected by |
 |---|---|---|---|
 | JSON input formatter | `Shared.Api/Features/Formatters/FhirJsonInputFormatter.cs` | `Shared.Api/Features/Formatters/IgnixaFhirJsonInputFormatter.cs` | `Shared.Api/Modules/FeatureFlags/SdkMode/SdkModeFeatureModule.cs` |

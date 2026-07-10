@@ -650,6 +650,10 @@ namespace Microsoft.Health.Fhir.Core.Features.Persistence
         {
             var lastUpdated = Clock.UtcNow.UtcDateTime.TruncateToMillisecond();
 
+            // NOTE: this native branch is currently unreachable via the public API -- FhirPathPatchPayload.GetPatchedResourceElement
+            // always round-trips through a Firely POCO before this method runs, so GetIgnixaNode() is always null here today.
+            // It activates once the patch pipeline goes node-native; re-verify end-to-end via UpdateMultipleAsync at that point,
+            // not just via the reflection-invoked unit tests that currently cover it (see docs/features/sdk-migration/node-mutation.md).
             var resourceJsonNode = resourceElement.GetIgnixaNode();
             if (resourceJsonNode != null)
             {
