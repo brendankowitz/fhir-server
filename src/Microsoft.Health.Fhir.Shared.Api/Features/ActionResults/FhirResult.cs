@@ -161,9 +161,15 @@ namespace Microsoft.Health.Fhir.Api.Features.ActionResults
 
         protected override object GetResultToSerialize()
         {
-            if (Result is ResourceElement)
+            if (Result is ResourceElement resourceElement)
             {
-                return (Result as ResourceElement)?.ToPoco();
+                var ignixaNode = resourceElement.GetIgnixaNode();
+                if (ignixaNode != null)
+                {
+                    return ignixaNode;
+                }
+
+                return resourceElement.ToPoco();
             }
             else if (Result is RawResourceElement)
             {

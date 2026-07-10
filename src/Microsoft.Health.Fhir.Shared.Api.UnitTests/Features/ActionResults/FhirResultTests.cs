@@ -4,7 +4,10 @@
 // -------------------------------------------------------------------------------------------------
 
 using System.Net;
-using System.Threading.Tasks;
+using System.Reflection;
+using Hl7.Fhir.Model;
+using Hl7.Fhir.Serialization;
+using Ignixa.Serialization.SourceNodes;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
@@ -12,11 +15,16 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Primitives;
 using Microsoft.Health.Core.Features.Context;
 using Microsoft.Health.Fhir.Api.Features.ActionResults;
+using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Context;
+using Microsoft.Health.Fhir.Core.Features.Persistence;
+using Microsoft.Health.Fhir.Core.Models;
+using Microsoft.Health.Fhir.Ignixa;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Test.Utilities;
 using NSubstitute;
 using Xunit;
+using Task = System.Threading.Tasks.Task;
 
 namespace Microsoft.Health.Fhir.Api.UnitTests.Features.ActionResults
 {
@@ -106,6 +114,73 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.ActionResults
             Assert.True(context.HttpContext.Response.Headers.TryGetValue("testKey2", out StringValues testKey2));
             Assert.Equal(new StringValues("3"), testKey1);
             Assert.Equal(new StringValues("2"), testKey2);
+        }
+
+        [Fact]
+        public void GivenAnIgnixaNodeBackedResourceElement_WhenGettingResultToSerialize_ThenTheUnderlyingNodeIsReturned()
+        {
+            var patient = Samples.GetDefaultPatient().ToPoco<Patient>();
+
+            var serializer = new IgnixaJsonSerializer();
+            var schemaContext = new IgnixaSchemaContext(ModelInfoProvider.Instance);
+            var ignixaElement = new IgnixaResourceElement(serializer.Parse(patient.ToJson()), schemaContext.Schema);
+            ResourceElement ignixaBackedResource = ignixaElement.ToResourceElement();
+
+            Assert.NotNull(ignixaBackedResource.GetIgnixaNode());
+
+            var fhirResult = new FhirResult(ignixaBackedResource);
+
+            var resultToSerialize = GetResultToSerialize(fhirResult);
+
+            var node = Assert.IsType<ResourceJsonNode>(resultToSerialize);
+            Assert.Same(ignixaBackedResource.GetIgnixaNode(), node);
+        }
+
+        [Fact]
+        public void GivenAFirelyBackedResourceElement_WhenGettingResultToSerialize_ThenAPocoIsReturned()
+        {
+            ResourceElement firelyBackedResource = Samples.GetDefaultPatient();
+
+            Assert.Null(firelyBackedResource.GetIgnixaNode());
+
+            var fhirResult = new FhirResult(firelyBackedResource);
+
+            var resultToSerialize = GetResultToSerialize(fhirResult);
+
+            var poco = Assert.IsType<Patient>(resultToSerialize);
+            Assert.Equal(firelyBackedResource.Id, poco.Id);
+        }
+
+        [Fact]
+        public void GivenARawResourceElement_WhenGettingResultToSerialize_ThenTheRawResourceElementIsReturnedUnchanged()
+        {
+            var patient = Samples.GetDefaultPatient().ToPoco<Patient>();
+            patient.Id = "example";
+            patient.VersionId = "1";
+
+            var wrapper = new ResourceWrapper(
+                patient.ToResourceElement(),
+                new RawResource(patient.ToJson(), FhirResourceFormat.Json, isMetaSet: false),
+                null,
+                false,
+                null,
+                null,
+                null);
+            var rawResourceElement = new RawResourceElement(wrapper);
+
+            var fhirResult = new FhirResult(rawResourceElement);
+
+            var resultToSerialize = GetResultToSerialize(fhirResult);
+
+            Assert.Same(rawResourceElement, resultToSerialize);
+        }
+
+        private static object GetResultToSerialize(FhirResult fhirResult)
+        {
+            var methodInfo = typeof(FhirResult).GetMethod(
+                "GetResultToSerialize",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            return methodInfo.Invoke(fhirResult, System.Array.Empty<object>());
         }
     }
 }
