@@ -2,11 +2,41 @@
 
 This document attempts to describe how search is implemented for the FHIR service. The [FHIR specification](https://www.hl7.org/fhir/search.html) has more information on how search is defined.
 
-Search functionality consists of three areas:
+Search functionality consists of four areas:
 
+- [Request compilation](#Request-compilation)
 - [Extraction](#Extraction)
 - [Persistence](#Persistence)
 - [Search](#Search)
+
+## Request compilation
+
+When the FHIR service handles a search request, `ExpressionParser` first parses each query parameter
+into a **semantic predicate** — a `SearchParameterPredicateExpression` — before any backend-specific
+translation occurs.
+
+A semantic predicate retains everything the parser resolved:
+
+| Property | Description |
+|---|---|
+| `Parameter` | The resolved `SearchParameterInfo` identity (name, type, URL). |
+| `Comparator` | The FHIR comparator (`eq`, `gt`, `le`, …) applied to the query value. |
+| `Modifier` | The optional search modifier (e.g. `:exact`, `:text`, `:missing`). |
+| `ComponentIndex` | The zero-based composite-component position, or `null` for non-composite parameters. |
+| `Value` | The normalized `ISearchValue` (e.g. `DateTimeSearchValue`, `TokenSearchValue`). |
+
+Semantic predicates deliberately **do not** reference persisted field names or any backend schema.
+
+### Strangler-migration compatibility
+
+The current stage uses a *strangler-fig* approach so that all existing consumers remain unchanged.
+`LegacyExpressionLowerer` immediately converts each `SearchParameterPredicateExpression` into the
+existing `FieldName` / `BinaryExpression` / `StringExpression` representation that the public
+`ExpressionParser` API has always returned. SQL Server, Cosmos DB, member-match, and all other
+current consumers therefore retain identical behavior without modification.
+
+The next migration stage will preserve the complete semantic expression tree on `SearchOptions`,
+enabling a logical planning layer to reason over the full query before lowering to a backend dialect.
 
 ## Extraction
 
