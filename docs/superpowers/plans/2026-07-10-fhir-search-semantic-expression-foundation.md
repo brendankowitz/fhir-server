@@ -245,45 +245,34 @@ public virtual Expression VisitSearchParameterPredicate(SearchParameterPredicate
 
 - [ ] **Step 4b: Add a regression test for the visitor guard**
 
-Add this test to `SearchValueExpressionBuilderTests` to verify that a minimal `DefaultExpressionVisitor` subclass cannot silently omit semantic predicates:
+Add this test to `SearchValueExpressionBuilderTests` to verify that a `DefaultExpressionVisitor` subclass cannot silently omit semantic predicates:
 
 ```csharp
 [Fact]
-public void GivenSemanticPredicateVisitor_WhenNoOverride_ThenThrowsInvalidOperationException()
+public void GivenSemanticPredicate_WhenDispatchedToDefaultExpressionVisitorSubclass_ThenInvalidOperationExceptionIsThrown()
 {
     // Arrange
+    SearchParameterInfo searchParameter = CreateSearchParameter(SearchParamType.Date);
+    var value = DateTimeSearchValue.Parse("2026-07");
     var predicate = new SearchParameterPredicateExpression(
-        CreateSearchParameter(SearchParamType.Token),
+        searchParameter,
         modifier: null,
         SearchComparator.Eq,
         componentIndex: null,
-        TokenSearchValue.Parse("system|code"));
+        value);
 
-    var minimalVisitor = new MinimalTestVisitor();
+    // A minimal subclass that overrides nothing; any legacy SQL/Cosmos visitor is an instance of this.
+    var visitor = new MinimalDefaultExpressionVisitor();
 
     // Act & Assert
-    Assert.Throws<InvalidOperationException>(() =>
-        predicate.AcceptVisitor(minimalVisitor, context: null));
+    var ex = Assert.Throws<InvalidOperationException>(
+        () => predicate.AcceptVisitor(visitor, context: null));
+    Assert.Contains("lowered", ex.Message, StringComparison.OrdinalIgnoreCase);
 }
 
 // Helper visitor for regression testing
-private class MinimalTestVisitor : IExpressionVisitor<object, string>
+private sealed class MinimalDefaultExpressionVisitor : DefaultExpressionVisitor<object, object>
 {
-    public string VisitSearchParameter(SearchParameterExpression expression, object context) => "ignored";
-    public string VisitBinary(BinaryExpression expression, object context) => "ignored";
-    public string VisitChained(ChainedExpression expression, object context) => "ignored";
-    public string VisitMissingField(MissingFieldExpression expression, object context) => "ignored";
-    public string VisitMissingSearchParameter(MissingSearchParameterExpression expression, object context) => "ignored";
-    public string VisitNotExpression(NotExpression expression, object context) => "ignored";
-    public string VisitMultiary(MultiaryExpression expression, object context) => "ignored";
-    public string VisitUnion(UnionExpression expression, object context) => "ignored";
-    public string VisitString(StringExpression expression, object context) => "ignored";
-    public string VisitCompartment(CompartmentSearchExpression expression, object context) => "ignored";
-    public string VisitSmartCompartment(SmartCompartmentSearchExpression expression, object context) => "ignored";
-    public string VisitInclude(IncludeExpression expression, object context) => "ignored";
-    public string VisitSortParameter(SortExpression expression, object context) => "ignored";
-    public string VisitIn<T>(InExpression<T> expression, object context) => "ignored";
-    public string VisitNotReferenced(NotReferencedExpression expression, object context) => "ignored";
 }
 ```
 
@@ -301,7 +290,7 @@ Expected: PASS with one test.
 dotnet build "src\Microsoft.Health.Fhir.Core\Microsoft.Health.Fhir.Core.csproj" --framework net9.0 --no-restore -warnaserror
 ```
 
-Expected: PASS. Visitors derived from `DefaultExpressionVisitor` or `ExpressionRewriter` receive their explicit semantic-leaf behavior, while direct legacy visitors inherit the interface guard.
+Expected: PASS. Visitors derived from `ExpressionRewriter` receive the explicit identity override. Visitors derived from `DefaultExpressionVisitor` and direct `IExpressionVisitor` implementors inherit the interface guard that throws `InvalidOperationException`.
 
 - [ ] **Step 7: Commit the semantic leaf**
 
@@ -1060,14 +1049,41 @@ git commit -m "Parse search parameters into semantic expressions" -m "Co-authore
 
 - [ ] **Step 1: Document semantic-first parsing**
 
-Insert this section before `## Extraction`:
+Update `docs/SearchArchitecture.md`. The table of contents should now list a new "Request compilation" section before "Extraction". The complete section (now present in the shipped file) should include:
 
 ```markdown
 ## Request compilation
 
-Search-parameter parsing first produces semantic Core expressions. A semantic predicate retains the resolved SearchParameter, FHIR comparator and modifier, composite position, and normalized `ISearchValue`; it does not refer to persisted field names or backend schema.
+When the FHIR service handles a search request, `ExpressionParser` parses each query parameter.
+Ordinary typed search-parameter values become **semantic predicate** leaves
+(`SearchParameterPredicateExpression`) before any backend-specific translation occurs.
+Existing structural and specialized nodes remain in the expression tree alongside this new leaf
+type: the `:missing` modifier is resolved immediately to `MissingSearchParameterExpression` and
+does **not** become a `SearchParameterPredicateExpression`; it does not pass through
+`LegacyExpressionLowerer`'s predicate-override path.
 
-During the strangler migration, `LegacyExpressionLowerer` immediately converts semantic predicates into the existing `FieldName`, `BinaryExpression`, and `StringExpression` representation returned by the public parser API. SQL Server, Cosmos DB, member match, and other current consumers therefore keep their existing behavior. The next migration stage will retain complete semantic trees on `SearchOptions` for logical planning.
+A semantic predicate retains everything the parser resolved:
+
+| Property | Description |
+|---|---|
+| `Parameter` | The resolved `SearchParameterInfo` identity (name, type, URL). |
+| `Comparator` | The FHIR comparator (`eq`, `gt`, `le`, …) applied to the query value. |
+| `Modifier` | The optional search modifier where applicable (e.g. `:exact`, `:contains`, `:not`, `:text`, `:type`, `:above`, `:below`). |
+| `ComponentIndex` | The zero-based composite-component position, or `null` for non-composite parameters. |
+| `Value` | The normalized `ISearchValue` (e.g. `DateTimeSearchValue`, `TokenSearchValue`). |
+
+Semantic predicates deliberately **do not** reference persisted field names or any backend schema.
+
+### Strangler-migration compatibility
+
+The current stage uses a *strangler-fig* approach so that all existing consumers remain unchanged.
+`LegacyExpressionLowerer` immediately converts each `SearchParameterPredicateExpression` into the
+existing `FieldName` / `BinaryExpression` / `StringExpression` representation that the public
+`ExpressionParser` API has always returned. SQL Server, Cosmos DB, member-match, and all other
+current consumers therefore retain identical behavior without modification.
+
+The next migration stage will preserve the complete semantic expression tree on `SearchOptions`,
+enabling a logical planning layer to reason over the full query before lowering to a backend dialect.
 ```
 
 - [ ] **Step 2: Format changed C# files and check the diff**
