@@ -31,11 +31,11 @@ Do not create a raw `SearchQuerySyntax` model. Raw query tuples are transient pa
 1. Keep `IExpressionParser.Parse` and `ISearchParameterExpressionParser.Parse` behavior unchanged.
 2. Reuse `SearchParameterExpression`, `MultiaryExpression`, `NotExpression`, `MissingSearchParameterExpression`, and other existing structural nodes.
 3. Add only one new semantic leaf: `SearchParameterPredicateExpression`.
-4. Preserve `SearchParameterInfo`, `SearchModifier`, `SearchComparator`, component index, and normalized `ISearchValue` until legacy lowering. Exception: the `:text` modifier on token parameters preserves the raw escaped search text in `TokenSearchValue.Text` so `LegacyExpressionLowerer` can reproduce the existing legacy field expression exactly.
+4. Preserve `SearchParameterInfo`, `SearchComparator`, and typed `ISearchValue` until legacy lowering; exception: token `:text` preserves raw escaped input in `TokenSearchValue.Text`. Preserve comparator and modifier semantics through semantic predicate leaves or explicit structural/specialized nodes: `:missing` becomes `MissingSearchParameterExpression` (not a predicate leaf), multi-value `:not` becomes `NotExpression`(Or(leaves with Modifier null)).
 5. Keep `SearchValueExpressionBuilderHelper` as the authoritative legacy field-mapping implementation and call it only from `LegacyExpressionLowerer`.
 6. Make accidental delivery of a semantic leaf to SQL/Cosmos explicit through the visitor contract; no backend visitor handles semantic predicates in this plan.
 7. Preserve every existing parser test for STU3, R4, R4B, and R5.
-8. Keep semantic-leaf `ValueInsensitiveEquals` conservative by including the normalized value. Plan 5 will replace this with canonical shape hashing that distinguishes optional-value structures without including literals.
+8. Keep semantic-leaf `ValueInsensitiveEquals` conservative by including the typed value (normalized ordinarily; raw escaped token `:text` exception). Plan 5 will replace this with canonical shape hashing that distinguishes optional-value structures without including literals.
 
 ## Baseline verification
 
@@ -134,7 +134,12 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
 {
     /// <summary>
     /// Represents a semantic FHIR search predicate that captures a search parameter, an optional
-    /// modifier, a comparator, an optional component index, and a normalized search value.
+    /// modifier, a comparator, an optional component index, and a typed search value.
+    /// The value is ordinarily normalized; token `:text` deliberately retains raw escaped input in
+    /// TokenSearchValue.Text for legacy lowerer compatibility.
+    /// Modifier semantics may be represented structurally: for example, multi-value token `:not`
+    /// becomes NotExpression(Or(leaves with Modifier null)), and `:missing` becomes
+    /// MissingSearchParameterExpression instead of a predicate leaf.
     /// This node operates at the semantic level and must be lowered to legacy SQL/Cosmos tree nodes
     /// before reaching a backend expression visitor.
     /// </summary>
@@ -1068,7 +1073,7 @@ A semantic predicate retains everything the parser resolved:
 |---|---|
 | `Parameter` | The resolved `SearchParameterInfo` identity (name, type, URL). |
 | `Comparator` | The FHIR comparator (`eq`, `gt`, `le`, …) applied to the query value. |
-| `Modifier` | The optional search modifier where applicable (e.g. `:exact`, `:contains`, `:not`, `:text`, `:type`, `:above`, `:below`). |
+| `Modifier` | The optional search modifier retained on this leaf. Note: some modifier semantics are represented structurally (e.g., `:not` via `NotExpression`, `:missing` via `MissingSearchParameterExpression`). |
 | `ComponentIndex` | The zero-based composite-component position, or `null` for non-composite parameters. |
 | `Value` | The normalized `ISearchValue` for most types. Exception: token `:text` contains raw escaped search text in `TokenSearchValue.Text` for legacy lowerer compatibility. |
 
@@ -1134,8 +1139,8 @@ git commit -m "Document semantic search expression lowering" -m "Co-authored-by:
 
 Plan 1 is complete only when:
 
-- `SearchParameterPredicateExpression` captures FHIR comparator, modifier, normalized value (or raw escaped input for token `:text`), SearchParameter identity, and optional composite position;
-- `ParseSemantic` constructs semantic expressions with `SearchParameterPredicateExpression` leaves;
+- `SearchParameterPredicateExpression` captures FHIR comparator, modifier (when represented as leaf), typed value (normalized ordinarily; raw escaped token `:text` exception), SearchParameter identity, and optional composite position;
+- `ParseSemantic` constructs semantic expressions with `SearchParameterPredicateExpression` leaves for ordinary typed values, alongside specialized/structural nodes for modifiers represented structurally (`:missing`, multi-value `:not`);
 - `Parse` remains the same compatibility API and returns the same legacy expression shapes via `LegacyExpressionLowerer.Instance.Lower(ParseSemantic(...))`;
 - `SearchValueExpressionBuilderHelper` is invoked only by `LegacyExpressionLowerer`;
 - semantic validation (`ValidateSemanticPredicate`) is performed in input order during `ParseSemantic`, ensuring modifier/comparator validation precedes later value parse errors;

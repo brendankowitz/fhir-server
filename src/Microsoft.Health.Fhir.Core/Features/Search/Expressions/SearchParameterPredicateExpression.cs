@@ -13,7 +13,12 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
 {
     /// <summary>
     /// Represents a semantic FHIR search predicate that captures a search parameter, an optional
-    /// modifier, a comparator, an optional component index, and a normalized search value.
+    /// modifier, a comparator, an optional component index, and a typed search value.
+    /// The value is ordinarily normalized; token `:text` deliberately retains raw escaped input in
+    /// <see cref="TokenSearchValue.Text"/> for legacy lowerer compatibility.
+    /// Modifier semantics may be represented structurally: for example, multi-value token `:not`
+    /// becomes <see cref="NotExpression"/>(Or(leaves with Modifier null)), and `:missing` becomes
+    /// <see cref="MissingSearchParameterExpression"/> instead of a predicate leaf.
     /// This node operates at the semantic level and must be lowered to legacy SQL/Cosmos tree nodes
     /// before reaching a backend expression visitor.
     /// </summary>
@@ -23,10 +28,10 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
         /// Initializes a new instance of the <see cref="SearchParameterPredicateExpression"/> class.
         /// </summary>
         /// <param name="parameter">The search parameter this predicate is bound to. Must not be <c>null</c>.</param>
-        /// <param name="modifier">The optional search modifier applied to the parameter, or <c>null</c> if no modifier is present.</param>
+        /// <param name="modifier">The optional search modifier retained on this leaf, or <c>null</c> if none. Note: some modifier semantics are represented structurally (e.g., `:not` via <see cref="NotExpression"/>, `:missing` via <see cref="MissingSearchParameterExpression"/>).</param>
         /// <param name="comparator">The FHIR search comparator (e.g. <see cref="SearchComparator.Eq"/>). Must be a defined enum value.</param>
         /// <param name="componentIndex">The zero-based index of the composite component, or <c>null</c> for non-composite parameters. Must not be negative.</param>
-        /// <param name="value">The normalized search value. Must not be <c>null</c>.</param>
+        /// <param name="value">A typed <see cref="ISearchValue"/>: ordinarily normalized; token `:text` retains raw escaped input in <see cref="TokenSearchValue.Text"/> for legacy compatibility. Must not be <c>null</c>.</param>
         /// <exception cref="ArgumentNullException">Thrown when <paramref name="parameter"/> or <paramref name="value"/> is <c>null</c>.</exception>
         /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="comparator"/> is not a defined enum value, or <paramref name="componentIndex"/> is negative.</exception>
         public SearchParameterPredicateExpression(
@@ -62,7 +67,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
         public SearchParameterInfo Parameter { get; }
 
         /// <summary>
-        /// Gets the optional search modifier applied to the parameter, or <c>null</c> if no modifier is present.
+        /// Gets the optional search modifier retained on this predicate leaf, or <c>null</c> if none.
+        /// Note: some modifier semantics are represented structurally rather than on this leaf.
         /// </summary>
         public SearchModifier Modifier { get; }
 
@@ -77,7 +83,9 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
         public int? ComponentIndex { get; }
 
         /// <summary>
-        /// Gets the normalized search value associated with this predicate.
+        /// Gets the typed search value associated with this predicate.
+        /// Ordinarily this value is normalized; token `:text` is an exception
+        /// and retains raw escaped input for legacy lowerer compatibility.
         /// </summary>
         public ISearchValue Value { get; }
 

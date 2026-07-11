@@ -25,7 +25,7 @@ A semantic predicate retains everything the parser resolved:
 |---|---|
 | `Parameter` | The resolved `SearchParameterInfo` identity (name, type, URL). |
 | `Comparator` | The FHIR comparator (`eq`, `gt`, `le`, …) applied to the query value. |
-| `Modifier` | The optional search modifier where applicable (e.g. `:exact`, `:contains`, `:not`, `:text`, `:type`, `:above`, `:below`). |
+| `Modifier` | The optional search modifier retained on this leaf. Note: some modifier semantics are represented structurally (e.g., `:not` via `NotExpression`, `:missing` via `MissingSearchParameterExpression`). |
 | `ComponentIndex` | The zero-based composite-component position, or `null` for non-composite parameters. |
 | `Value` | The normalized `ISearchValue` for most types. Exception: token `:text` contains raw escaped search text in `TokenSearchValue.Text` for legacy lowerer compatibility. |
 

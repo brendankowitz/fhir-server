@@ -24,15 +24,19 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
 
         /// <summary>
         /// Parses the specified search parameter, modifier, and value into a semantic expression tree
-        /// whose leaves are <see cref="SearchParameterPredicateExpression"/> nodes. The semantic tree
-        /// preserves the resolved <see cref="SearchParameterInfo"/>, <see cref="SearchModifier"/>,
-        /// comparator, component index, and normalized search value, and must be lowered (for example
-        /// via <see cref="LegacyExpressionLowerer"/>) before it reaches a backend expression visitor.
+        /// with <see cref="SearchParameterPredicateExpression"/> leaves for ordinary typed values,
+        /// alongside specialized/structural nodes for modifiers represented structurally (e.g.,
+        /// <see cref="MissingSearchParameterExpression"/> for `:missing`, <see cref="NotExpression"/>
+        /// for multi-value `:not`). Preserved semantics include the resolved <see cref="SearchParameterInfo"/>,
+        /// comparator, and value (ordinarily normalized; token `:text` retains raw escaped input).
+        /// Modifier semantics are preserved either on predicate leaves or through structural nodes.
+        /// The expression must be lowered (for example via <see cref="LegacyExpressionLowerer"/>)
+        /// before it reaches a backend expression visitor.
         /// </summary>
         /// <param name="searchParameter">The search parameter being queried.</param>
         /// <param name="modifier">The optional search modifier applied to the parameter, or <c>null</c> if none.</param>
         /// <param name="value">The raw search value.</param>
-        /// <returns>A semantic <see cref="Expression"/> tree with <see cref="SearchParameterPredicateExpression"/> leaves.</returns>
+        /// <returns>A semantic <see cref="Expression"/> tree with <see cref="SearchParameterPredicateExpression"/> leaves for ordinary values, alongside specialized nodes for structural semantics.</returns>
         Expression ParseSemantic(
             SearchParameterInfo searchParameter,
             SearchModifier modifier,

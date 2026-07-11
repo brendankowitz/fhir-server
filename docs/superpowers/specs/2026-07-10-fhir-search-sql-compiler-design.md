@@ -145,7 +145,7 @@ The existing Core `Expression` hierarchy evolves into the canonical semantic rep
 
 - resolved `SearchParameterInfo` identities and types;
 - normalized `ISearchValue` values and precision (except token `:text`, which preserves raw escaped input in `TokenSearchValue.Text` for legacy lowerer compatibility);
-- the original FHIR comparator and modifier;
+- the FHIR comparator and modifier, either retained on predicate leaves or represented through explicit structural/specialized nodes (e.g., multi-value `:not` via `NotExpression`, `:missing` via `MissingSearchParameterExpression`);
 - composite component position;
 - missing/not semantics;
 - source parameter identity for diagnostics.
