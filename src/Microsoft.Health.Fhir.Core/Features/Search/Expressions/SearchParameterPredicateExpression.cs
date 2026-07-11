@@ -112,8 +112,9 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
 
         /// <inheritdoc />
         /// <remarks>
-        /// Conservative in this phase: includes the normalized <see cref="Value"/> rather than
-        /// collapsing all values of the same type. This ensures caching / deduplication is safe
+        /// Conservative in this phase: includes the typed <see cref="Value"/> rather than
+        /// collapsing all values of the same type. Ordinarily the value is normalized; token `:text`
+        /// retains raw escaped input for legacy compatibility. This ensures caching / deduplication is safe
         /// until a lowering pass can reason about value equivalence more precisely.
         /// </remarks>
         public override void AddValueInsensitiveHashCode(ref HashCode hashCode)
@@ -128,7 +129,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
 
         /// <inheritdoc />
         /// <remarks>
-        /// Conservative in this phase: includes the normalized <see cref="Value"/> in the comparison.
+        /// Conservative in this phase: includes the typed <see cref="Value"/> in the comparison.
+        /// Ordinarily the value is normalized; token `:text` retains raw escaped input for legacy compatibility.
         /// </remarks>
         public override bool ValueInsensitiveEquals(Expression other)
         {
