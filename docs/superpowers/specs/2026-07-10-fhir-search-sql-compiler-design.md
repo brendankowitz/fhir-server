@@ -144,13 +144,13 @@ The design uses cost-based exploration only where meaningful physical alternativ
 The existing Core `Expression` hierarchy evolves into the canonical semantic representation instead of adding a parallel raw-syntax model. Existing structural nodes for boolean composition, chains, reverse chains, includes, compartments, and authorization are retained where they already describe FHIR meaning. New or evolved search-predicate leaves preserve:
 
 - resolved `SearchParameterInfo` identities and types;
-- normalized `ISearchValue` values and precision;
+- normalized `ISearchValue` values and precision (except token `:text`, which preserves raw escaped input in `TokenSearchValue.Text` for legacy lowerer compatibility);
 - the original FHIR comparator and modifier;
 - composite component position;
 - missing/not semantics;
 - source parameter identity for diagnostics.
 
-Semantic expressions never contain `FieldName`, SQL columns, indexes, schema versions, surrogate IDs, statistics, or backend capabilities. In particular, a date `eq` remains a date-equality predicate; it is not converted during parsing into predicates over `DateTimeStart` and `DateTimeEnd`.
+Semantic expressions never contain `FieldName`, SQL columns, indexes, schema versions, surrogate IDs, statistics, or backend capabilities. In particular, a date `eq` remains a date-equality predicate; it is not converted during parsing into predicates over `DateTimeStart` and `DateTimeEnd`. (Note: token `:text` preserves raw escaped input for legacy compatibility; future normalization stages may introduce a dedicated representation.)
 
 `SearchOptions` remains the transitional query envelope for sort, include, total, result-shape, compartment, authorization, and paging requirements. During migration it carries both the semantic expression and the existing lowered expression. A single `LegacyExpressionLowerer` converts semantic leaves into today's `FieldName` and `BinaryExpression` shapes so SQL and Cosmos remain behaviorally unchanged until they consume logical plans.
 

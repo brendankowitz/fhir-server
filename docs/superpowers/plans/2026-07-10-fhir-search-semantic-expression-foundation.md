@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Evolve the existing Core `Expression` hierarchy with a semantic search-predicate leaf that preserves FHIR comparator, modifier, normalized value, and SearchParameter identity before one compatibility visitor lowers it to today's field-level expressions.
+**Goal:** Evolve the existing Core `Expression` hierarchy with a semantic search-predicate leaf that preserves FHIR comparator, modifier, normalized or raw value (as needed for compatibility), and SearchParameter identity before one compatibility visitor lowers it to today's field-level expressions.
 
 **Architecture:** `SearchParameterExpressionParser.ParseSemantic` creates semantic expressions using the existing `Expression` structural nodes. `LegacyExpressionLowerer` is the only component that translates those semantic predicates into `FieldName`, `BinaryExpression`, and `StringExpression` shapes. The existing `Parse` API immediately lowers semantic output, so SQL, Cosmos, member match, and all current callers remain unchanged in this increment.
 
@@ -31,7 +31,7 @@ Do not create a raw `SearchQuerySyntax` model. Raw query tuples are transient pa
 1. Keep `IExpressionParser.Parse` and `ISearchParameterExpressionParser.Parse` behavior unchanged.
 2. Reuse `SearchParameterExpression`, `MultiaryExpression`, `NotExpression`, `MissingSearchParameterExpression`, and other existing structural nodes.
 3. Add only one new semantic leaf: `SearchParameterPredicateExpression`.
-4. Preserve `SearchParameterInfo`, `SearchModifier`, `SearchComparator`, component index, and normalized `ISearchValue` until legacy lowering.
+4. Preserve `SearchParameterInfo`, `SearchModifier`, `SearchComparator`, component index, and normalized `ISearchValue` until legacy lowering. Exception: the `:text` modifier on token parameters preserves the raw escaped search text in `TokenSearchValue.Text` so `LegacyExpressionLowerer` can reproduce the existing legacy field expression exactly.
 5. Keep `SearchValueExpressionBuilderHelper` as the authoritative legacy field-mapping implementation and call it only from `LegacyExpressionLowerer`.
 6. Make accidental delivery of a semantic leaf to SQL/Cosmos explicit through the visitor contract; no backend visitor handles semantic predicates in this plan.
 7. Preserve every existing parser test for STU3, R4, R4B, and R5.
@@ -1070,7 +1070,7 @@ A semantic predicate retains everything the parser resolved:
 | `Comparator` | The FHIR comparator (`eq`, `gt`, `le`, …) applied to the query value. |
 | `Modifier` | The optional search modifier where applicable (e.g. `:exact`, `:contains`, `:not`, `:text`, `:type`, `:above`, `:below`). |
 | `ComponentIndex` | The zero-based composite-component position, or `null` for non-composite parameters. |
-| `Value` | The normalized `ISearchValue` (e.g. `DateTimeSearchValue`, `TokenSearchValue`). |
+| `Value` | The normalized `ISearchValue` for most types. Exception: token `:text` contains raw escaped search text in `TokenSearchValue.Text` for legacy lowerer compatibility. |
 
 Semantic predicates deliberately **do not** reference persisted field names or any backend schema.
 
@@ -1134,7 +1134,7 @@ git commit -m "Document semantic search expression lowering" -m "Co-authored-by:
 
 Plan 1 is complete only when:
 
-- `SearchParameterPredicateExpression` captures FHIR comparator, modifier, normalized value, SearchParameter identity, and optional composite position;
+- `SearchParameterPredicateExpression` captures FHIR comparator, modifier, normalized value (or raw escaped input for token `:text`), SearchParameter identity, and optional composite position;
 - `ParseSemantic` constructs semantic expressions with `SearchParameterPredicateExpression` leaves;
 - `Parse` remains the same compatibility API and returns the same legacy expression shapes via `LegacyExpressionLowerer.Instance.Lower(ParseSemantic(...))`;
 - `SearchValueExpressionBuilderHelper` is invoked only by `LegacyExpressionLowerer`;

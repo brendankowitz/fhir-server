@@ -27,7 +27,7 @@ A semantic predicate retains everything the parser resolved:
 | `Comparator` | The FHIR comparator (`eq`, `gt`, `le`, …) applied to the query value. |
 | `Modifier` | The optional search modifier where applicable (e.g. `:exact`, `:contains`, `:not`, `:text`, `:type`, `:above`, `:below`). |
 | `ComponentIndex` | The zero-based composite-component position, or `null` for non-composite parameters. |
-| `Value` | The normalized `ISearchValue` (e.g. `DateTimeSearchValue`, `TokenSearchValue`). |
+| `Value` | The normalized `ISearchValue` for most types. Exception: token `:text` contains raw escaped search text in `TokenSearchValue.Text` for legacy lowerer compatibility. |
 
 Semantic predicates deliberately **do not** reference persisted field names or any backend schema.
 
