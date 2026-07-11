@@ -194,6 +194,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
                 // This is a single value expression.
                 ISearchValue searchValue = parser(valueSpan.ToString());
                 searchValue = ApplyTargetTypeModifier(modifier, searchValue);
+                ValidateSemanticPredicate(searchParameter, modifier, comparator, searchValue);
 
                 return new SearchParameterPredicateExpression(
                     searchParameter,
@@ -213,10 +214,12 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
                 if (modifier?.SearchModifierCode == SearchModifierCode.Not)
                 {
                     // Each semantic predicate carries a null modifier so that lowering produces a single
-                    // outer Not (below) rather than double negation.
+                    // outer Not (below) rather than double negation. Parse then validate each part in
+                    // input order (matching legacy behavior) before parsing the next.
                     Expression[] expressions = parts.Select(part =>
                     {
                         ISearchValue searchValue = parser(part);
+                        ValidateSemanticPredicate(searchParameter, modifier: null, comparator, searchValue);
 
                         return (Expression)new SearchParameterPredicateExpression(
                             searchParameter,
@@ -230,10 +233,14 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
                 }
                 else
                 {
+                    // Parse, target-adjust, then validate each part in input order (matching legacy
+                    // behavior) before parsing the next. This ensures an earlier value's
+                    // modifier/comparator validation takes precedence over a later value's parse failure.
                     Expression[] expressions = parts.Select(part =>
                     {
                         ISearchValue searchValue = parser(part);
                         searchValue = ApplyTargetTypeModifier(modifier, searchValue);
+                        ValidateSemanticPredicate(searchParameter, modifier, comparator, searchValue);
 
                         return (Expression)new SearchParameterPredicateExpression(
                             searchParameter,
@@ -280,6 +287,85 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
                         string.Format(Core.Resources.ModifierNotSupported, modifier, searchParameter.Code));
                 }
             }
+        }
+
+        /// <summary>
+        /// Validates that the modifier/comparator/value-type combination is supported, throwing the same
+        /// <see cref="InvalidSearchOperationException"/> messages the legacy mapping would produce. This is a
+        /// small, explicit semantic validation boundary so the parser does not depend on legacy lowering for
+        /// input-order exception precedence. <see cref="LegacyExpressionLowerer"/> remains defensively validating.
+        /// </summary>
+        private static void ValidateSemanticPredicate(
+            SearchParameterInfo searchParameter,
+            SearchModifier modifier,
+            SearchComparator comparator,
+            ISearchValue searchValue)
+        {
+            switch (searchValue)
+            {
+                case DateTimeSearchValue:
+                case NumberSearchValue:
+                case QuantitySearchValue:
+                    if (modifier != null)
+                    {
+                        ThrowModifierNotSupported(modifier, searchParameter.Code);
+                    }
+
+                    break;
+
+                case ReferenceSearchValue:
+                    if (modifier != null && modifier.SearchModifierCode != SearchModifierCode.Type)
+                    {
+                        ThrowModifierNotSupported(modifier, searchParameter.Code);
+                    }
+
+                    EnsureOnlyEqualComparatorIsSupported(comparator);
+                    break;
+
+                case StringSearchValue:
+                    EnsureOnlyEqualComparatorIsSupported(comparator);
+                    if (modifier != null &&
+                        modifier.SearchModifierCode != SearchModifierCode.Exact &&
+                        modifier.SearchModifierCode != SearchModifierCode.Contains)
+                    {
+                        ThrowModifierNotSupported(modifier, searchParameter.Code);
+                    }
+
+                    break;
+
+                case TokenSearchValue:
+                    EnsureOnlyEqualComparatorIsSupported(comparator);
+                    if (modifier != null && modifier.SearchModifierCode != SearchModifierCode.Not)
+                    {
+                        ThrowModifierNotSupported(modifier, searchParameter.Code);
+                    }
+
+                    break;
+
+                case UriSearchValue:
+                    if (modifier != null &&
+                        modifier.SearchModifierCode != SearchModifierCode.Above &&
+                        modifier.SearchModifierCode != SearchModifierCode.Below)
+                    {
+                        ThrowModifierNotSupported(modifier, searchParameter.Code);
+                    }
+
+                    break;
+            }
+        }
+
+        private static void EnsureOnlyEqualComparatorIsSupported(SearchComparator comparator)
+        {
+            if (comparator != SearchComparator.Eq)
+            {
+                throw new InvalidSearchOperationException(Core.Resources.OnlyEqualComparatorIsSupported);
+            }
+        }
+
+        private static void ThrowModifierNotSupported(SearchModifier modifier, string searchParameterName)
+        {
+            throw new InvalidSearchOperationException(
+                string.Format(CultureInfo.InvariantCulture, Core.Resources.ModifierNotSupported, modifier, searchParameterName));
         }
 
         private static Func<string, ISearchValue> CreateParserWithErrorHandling(Func<string, ISearchValue> parser) =>

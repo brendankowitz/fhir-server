@@ -1109,6 +1109,24 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Expressions.Parse
                 });
         }
 
+        [Fact]
+        public void GivenMultipleValuesWithUnsupportedModifierAndAMalformedLaterValue_WhenParsed_ThenModifierValidationShouldTakePrecedence()
+        {
+            // Legacy precedence: for an OR-list, each value is parsed then immediately validated in
+            // input order. So the first (valid) value's unsupported-modifier InvalidSearchOperationException
+            // must be observed before a later malformed value can raise a BadRequestException. This must
+            // hold for the semantic layer itself (ParseSemantic), independent of legacy lowering.
+            Assert.Throws<InvalidSearchOperationException>(() => _parser.ParseSemantic(
+                CreateSearchParameter(SearchParamType.Number),
+                new SearchModifier(SearchModifierCode.Contains),
+                "1,bad"));
+
+            Assert.Throws<InvalidSearchOperationException>(() => _parser.Parse(
+                CreateSearchParameter(SearchParamType.Number),
+                new SearchModifier(SearchModifierCode.Contains),
+                "1,bad"));
+        }
+
         public static IEnumerable<object[]> GetLegacyEquivalenceData()
         {
             yield return new object[] { SearchParamType.Date, null, "eq2026-07" };
