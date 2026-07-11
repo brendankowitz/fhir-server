@@ -989,6 +989,150 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Expressions.Parse
             Assert.Contains("lowered", ex.Message, StringComparison.OrdinalIgnoreCase);
         }
 
+        [Fact]
+        public void GivenAStringWithContainsModifier_WhenParsedSemantically_ThenSemanticPredicateShouldBeCreated()
+        {
+            SearchParameterInfo searchParameter = CreateSearchParameter(SearchParamType.String);
+            var modifier = new SearchModifier(SearchModifierCode.Contains);
+
+            Expression expression = _parser.ParseSemantic(searchParameter, modifier, "Seattle");
+
+            var outer = Assert.IsType<SearchParameterExpression>(expression);
+            Assert.Same(searchParameter, outer.Parameter);
+
+            var predicate = Assert.IsType<SearchParameterPredicateExpression>(outer.Expression);
+            Assert.Same(searchParameter, predicate.Parameter);
+            Assert.Same(modifier, predicate.Modifier);
+            Assert.Equal(SearchComparator.Eq, predicate.Comparator);
+            Assert.Null(predicate.ComponentIndex);
+
+            var stringValue = Assert.IsType<StringSearchValue>(predicate.Value);
+            Assert.Equal("Seattle", stringValue.String);
+        }
+
+        [Fact]
+        public void GivenMultipleStringValues_WhenParsedSemantically_ThenOrOfSemanticPredicatesShouldBeCreated()
+        {
+            SearchParameterInfo searchParameter = CreateSearchParameter(SearchParamType.String);
+
+            Expression expression = _parser.ParseSemantic(searchParameter, null, "one,two");
+
+            var outer = Assert.IsType<SearchParameterExpression>(expression);
+            var or = Assert.IsType<MultiaryExpression>(outer.Expression);
+            Assert.Equal(MultiaryOperator.Or, or.MultiaryOperation);
+
+            Assert.Collection(
+                or.Expressions,
+                e =>
+                {
+                    var predicate = Assert.IsType<SearchParameterPredicateExpression>(e);
+                    Assert.Equal("one", Assert.IsType<StringSearchValue>(predicate.Value).String);
+                },
+                e =>
+                {
+                    var predicate = Assert.IsType<SearchParameterPredicateExpression>(e);
+                    Assert.Equal("two", Assert.IsType<StringSearchValue>(predicate.Value).String);
+                });
+        }
+
+        [Fact]
+        public void GivenMultipleTokenValuesWithNotModifier_WhenParsedSemantically_ThenNotWrappingOrOfNullModifierPredicatesShouldBeCreated()
+        {
+            SearchParameterInfo searchParameter = CreateSearchParameter(SearchParamType.Token);
+            var modifier = new SearchModifier(SearchModifierCode.Not);
+
+            Expression expression = _parser.ParseSemantic(searchParameter, modifier, "one,two");
+
+            var outer = Assert.IsType<SearchParameterExpression>(expression);
+            var not = Assert.IsType<NotExpression>(outer.Expression);
+            var or = Assert.IsType<MultiaryExpression>(not.Expression);
+            Assert.Equal(MultiaryOperator.Or, or.MultiaryOperation);
+
+            Assert.Collection(
+                or.Expressions,
+                e =>
+                {
+                    var predicate = Assert.IsType<SearchParameterPredicateExpression>(e);
+                    Assert.Null(predicate.Modifier);
+                    Assert.Equal("one", Assert.IsType<TokenSearchValue>(predicate.Value).Code);
+                },
+                e =>
+                {
+                    var predicate = Assert.IsType<SearchParameterPredicateExpression>(e);
+                    Assert.Null(predicate.Modifier);
+                    Assert.Equal("two", Assert.IsType<TokenSearchValue>(predicate.Value).Code);
+                });
+        }
+
+        [Fact]
+        public void GivenACompositeTokenAndQuantity_WhenParsedSemantically_ThenComponentSemanticPredicatesShouldBeCreated()
+        {
+            var tokenParam = new SearchParameterInfo("code", "code", ValueSets.SearchParamType.Token);
+            var quantityParam = new SearchParameterInfo("quantity", "quantity", ValueSets.SearchParamType.Quantity);
+
+            var codeUri = new Uri("http://code");
+            var quantityUri = new Uri("http://quantity");
+
+            SearchParameterComponentInfo[] components =
+            {
+                new SearchParameterComponentInfo(codeUri) { ResolvedSearchParameter = tokenParam },
+                new SearchParameterComponentInfo(quantityUri) { ResolvedSearchParameter = quantityParam },
+            };
+
+            var searchParameter = new SearchParameterInfo(
+                DefaultParamName,
+                DefaultParamName,
+                ValueSets.SearchParamType.Composite,
+                components: components);
+
+            Expression expression = _parser.ParseSemantic(searchParameter, null, "system|code$10|system|mg");
+
+            var outer = Assert.IsType<SearchParameterExpression>(expression);
+            var and = Assert.IsType<MultiaryExpression>(outer.Expression);
+            Assert.Equal(MultiaryOperator.And, and.MultiaryOperation);
+
+            Assert.Collection(
+                and.Expressions,
+                e =>
+                {
+                    var predicate = Assert.IsType<SearchParameterPredicateExpression>(e);
+                    Assert.Same(tokenParam, predicate.Parameter);
+                    Assert.Equal(0, predicate.ComponentIndex);
+                    Assert.IsType<TokenSearchValue>(predicate.Value);
+                },
+                e =>
+                {
+                    var predicate = Assert.IsType<SearchParameterPredicateExpression>(e);
+                    Assert.Same(quantityParam, predicate.Parameter);
+                    Assert.Equal(1, predicate.ComponentIndex);
+                    Assert.IsType<QuantitySearchValue>(predicate.Value);
+                });
+        }
+
+        public static IEnumerable<object[]> GetLegacyEquivalenceData()
+        {
+            yield return new object[] { SearchParamType.Date, null, "eq2026-07" };
+            yield return new object[] { SearchParamType.Date, null, "ge2026" };
+            yield return new object[] { SearchParamType.Number, null, "lt10" };
+            yield return new object[] { SearchParamType.Quantity, null, "10|http://unitsofmeasure.org|mg" };
+            yield return new object[] { SearchParamType.String, new SearchModifier(SearchModifierCode.Contains), "sea" };
+            yield return new object[] { SearchParamType.Token, null, "system|code" };
+            yield return new object[] { SearchParamType.Token, new SearchModifier(SearchModifierCode.Text), @"heart\,lung" };
+            yield return new object[] { SearchParamType.Uri, new SearchModifier(SearchModifierCode.Above), "http://example.org/a" };
+        }
+
+        [Theory]
+        [MemberData(nameof(GetLegacyEquivalenceData))]
+        public void GivenRepresentativeValues_WhenParsedSemanticallyAndLowered_ThenLegacyStructureShouldMatchParse(SearchParamType searchParameterType, SearchModifier modifier, string value)
+        {
+            SearchParameterInfo searchParameter = CreateSearchParameter(searchParameterType);
+
+            Expression legacy = _parser.Parse(searchParameter, modifier, value);
+            Expression lowered = LegacyExpressionLowerer.Instance.Lower(_parser.ParseSemantic(searchParameter, modifier, value));
+
+            Assert.Equal(legacy.ToString(), lowered.ToString());
+        }
+
         private void Validate(
             SearchParameterInfo searchParameter,
             SearchModifier modifier,

@@ -49,6 +49,17 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
             SearchModifier modifier,
             string value)
         {
+            // Parse is now purely a compatibility shim: build the semantic expression and lower it
+            // into the legacy field-level tree understood by the SQL and Cosmos backends.
+            return LegacyExpressionLowerer.Instance.Lower(ParseSemantic(searchParameter, modifier, value));
+        }
+
+        /// <inheritdoc />
+        public Expression ParseSemantic(
+            SearchParameterInfo searchParameter,
+            SearchModifier modifier,
+            string value)
+        {
             EnsureArg.IsNotNull(searchParameter, nameof(searchParameter));
             EnsureArg.IsNotNullOrWhiteSpace(value, nameof(value));
 
@@ -79,7 +90,14 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
                         string.Format(CultureInfo.InvariantCulture, Core.Resources.ModifierNotSupported, modifier, searchParameter.Code));
                 }
 
-                outputExpression = Expression.StartsWith(FieldName.TokenText, null, value, true);
+                // Keep the raw value (including escape sequences) in the token text; the lowering pass
+                // translates this into a StartsWith on the TokenText field.
+                outputExpression = new SearchParameterPredicateExpression(
+                    searchParameter,
+                    modifier,
+                    SearchComparator.Eq,
+                    componentIndex: null,
+                    new TokenSearchValue(system: null, code: null, text: value));
             }
             else
             {
@@ -113,7 +131,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
 
                             string componentValue = compositeValueParts[componentIndex];
 
-                            compositeExpressions[componentIndex] = Build(
+                            compositeExpressions[componentIndex] = BuildSemantic(
                                 componentSearchParameter,
                                 modifier: null,
                                 componentIndex: componentIndex,
@@ -127,7 +145,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
                 }
                 else
                 {
-                    outputExpression = Build(
+                    outputExpression = BuildSemantic(
                         searchParameter,
                         modifier,
                         componentIndex: null,
@@ -138,7 +156,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
             return Expression.SearchParameter(searchParameter, outputExpression);
         }
 
-        private Expression Build(
+        private Expression BuildSemantic(
             SearchParameterInfo searchParameter,
             SearchModifier modifier,
             int? componentIndex,
@@ -167,9 +185,6 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
             // Parse the value.
             Func<string, ISearchValue> parser = _parserDictionary[Enum.Parse<SearchParamType>(searchParameter.Type.ToString())];
 
-            // Build the expression.
-            var helper = new SearchValueExpressionBuilderHelper();
-
             // If the value contains comma, then we need to convert it into in expression.
             // But in this case, the user cannot specify prefix.
             IReadOnlyList<string> parts = value.SplitByOrSeparator();
@@ -180,8 +195,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
                 ISearchValue searchValue = parser(valueSpan.ToString());
                 searchValue = ApplyTargetTypeModifier(modifier, searchValue);
 
-                return helper.Build(
-                    searchParameter.Code,
+                return new SearchParameterPredicateExpression(
+                    searchParameter,
                     modifier,
                     comparator,
                     componentIndex,
@@ -197,13 +212,15 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
                 // This is a multiple value expression.
                 if (modifier?.SearchModifierCode == SearchModifierCode.Not)
                 {
+                    // Each semantic predicate carries a null modifier so that lowering produces a single
+                    // outer Not (below) rather than double negation.
                     Expression[] expressions = parts.Select(part =>
                     {
                         ISearchValue searchValue = parser(part);
 
-                        return helper.Build(
-                            searchParameter.Code,
-                            null,
+                        return (Expression)new SearchParameterPredicateExpression(
+                            searchParameter,
+                            modifier: null,
                             comparator,
                             componentIndex,
                             searchValue);
@@ -218,8 +235,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
                         ISearchValue searchValue = parser(part);
                         searchValue = ApplyTargetTypeModifier(modifier, searchValue);
 
-                        return helper.Build(
-                            searchParameter.Code,
+                        return (Expression)new SearchParameterPredicateExpression(
+                            searchParameter,
                             modifier,
                             comparator,
                             componentIndex,
