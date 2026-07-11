@@ -969,6 +969,26 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Expressions.Parse
             Assert.Equal(31, date.End.Day);
         }
 
+        [Fact]
+        public void GivenSemanticPredicate_WhenDispatchedToDefaultExpressionVisitorSubclass_ThenInvalidOperationExceptionIsThrown()
+        {
+            SearchParameterInfo searchParameter = CreateSearchParameter(SearchParamType.Date);
+            var value = DateTimeSearchValue.Parse("2026-07");
+            var predicate = new SearchParameterPredicateExpression(
+                searchParameter,
+                modifier: null,
+                SearchComparator.Eq,
+                componentIndex: null,
+                value);
+
+            // A minimal subclass that overrides nothing; any legacy SQL/Cosmos visitor is an instance of this.
+            var visitor = new MinimalDefaultExpressionVisitor();
+
+            var ex = Assert.Throws<InvalidOperationException>(
+                () => predicate.AcceptVisitor(visitor, context: (object)null));
+            Assert.Contains("lowered", ex.Message, StringComparison.OrdinalIgnoreCase);
+        }
+
         private void Validate(
             SearchParameterInfo searchParameter,
             SearchModifier modifier,
@@ -978,6 +998,14 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Expressions.Parse
             Expression expression = _parser.Parse(searchParameter, modifier, value);
             Assert.NotNull(expression);
             ValidateSearchParameterExpression(expression, DefaultParamName, valueValidator);
+        }
+
+        /// <summary>
+        /// Minimal concrete subclass of <see cref="DefaultExpressionVisitor{TContext,TOutput}"/> that overrides nothing,
+        /// mirroring the surface of a legacy SQL/Cosmos generator that inherits the default visitor.
+        /// </summary>
+        private sealed class MinimalDefaultExpressionVisitor : DefaultExpressionVisitor<object, object>
+        {
         }
     }
 }
