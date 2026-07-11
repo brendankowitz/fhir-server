@@ -3,6 +3,8 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
+using System;
+
 namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
 {
     /// <summary>
@@ -18,6 +20,17 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
         /// <param name="expression">The expression to visit.</param>
         /// <param name="context">The input</param>
         TOutput VisitSearchParameter(SearchParameterExpression expression, TContext context);
+
+        /// <summary>
+        /// Visits the <see cref="SearchParameterPredicateExpression"/>.
+        /// Implementations that operate on a fully-lowered legacy tree should not encounter this node;
+        /// the default implementation throws <see cref="InvalidOperationException"/> to surface
+        /// any misrouting at runtime while keeping existing SQL/Cosmos visitors compile-compatible.
+        /// </summary>
+        /// <param name="expression">The semantic predicate expression to visit.</param>
+        /// <param name="context">The input.</param>
+        TOutput VisitSearchParameterPredicate(SearchParameterPredicateExpression expression, TContext context) =>
+            throw new InvalidOperationException("Semantic search predicates must be lowered before visiting a legacy expression tree.");
 
         /// <summary>
         /// Visits the <see cref="BinaryExpression"/>.

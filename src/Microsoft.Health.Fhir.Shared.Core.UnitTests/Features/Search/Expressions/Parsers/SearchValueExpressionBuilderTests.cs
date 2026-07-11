@@ -943,6 +943,32 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Expressions.Parse
             }.ToInfo();
         }
 
+        [Fact]
+        public void GivenDateEquality_WhenSemanticPredicateIsConstructed_ThenComparatorAndNormalizedValueArePreserved()
+        {
+            SearchParameterInfo searchParameter = CreateSearchParameter(SearchParamType.Date);
+            var value = DateTimeSearchValue.Parse("2026-07");
+
+            var predicate = new SearchParameterPredicateExpression(
+                searchParameter,
+                modifier: null,
+                SearchComparator.Eq,
+                componentIndex: null,
+                value);
+
+            Assert.Same(searchParameter, predicate.Parameter);
+            Assert.Null(predicate.Modifier);
+            Assert.Equal(SearchComparator.Eq, predicate.Comparator);
+            Assert.Null(predicate.ComponentIndex);
+            var date = Assert.IsType<DateTimeSearchValue>(predicate.Value);
+            Assert.Equal(2026, date.Start.Year);
+            Assert.Equal(7, date.Start.Month);
+            Assert.Equal(1, date.Start.Day);
+            Assert.Equal(2026, date.End.Year);
+            Assert.Equal(7, date.End.Month);
+            Assert.Equal(31, date.End.Day);
+        }
+
         private void Validate(
             SearchParameterInfo searchParameter,
             SearchModifier modifier,
