@@ -8,13 +8,12 @@
 
 Replace the current search-to-SQL rewrite pipeline with a staged FHIR search compiler:
 
-1. Parse request syntax without making backend decisions.
-2. Bind and validate FHIR semantics once into a typed, backend-neutral semantic query.
-3. Lower the semantic query into a backend-neutral logical relational plan.
-4. Normalize the logical plan with small, semantics-preserving rules.
-5. Use a bounded, memoized, cost-based SQL Server planner to choose physical operators against the existing schema.
-6. Generate SQL through an immutable, typed SQL abstract syntax tree.
-7. Execute a prepared query and feed observed outcomes back into statistics and plan policy through an explicit, asynchronous channel.
+1. Parse, resolve, and validate FHIR search directly into a semantic `Expression` tree.
+2. Lower the semantic expression into a backend-neutral logical relational plan.
+3. Normalize the logical plan with small, semantics-preserving rules.
+4. Use a bounded, memoized, cost-based SQL Server planner to choose physical operators against the existing schema.
+5. Generate SQL through an immutable, typed SQL abstract syntax tree.
+6. Execute a prepared query and feed observed outcomes back into statistics and plan policy through an explicit, asynchronous channel.
 
 The shared compiler owns FHIR meaning. Each backend owns relational lowering, physical planning, and code generation. SQL Server and Cosmos therefore cannot silently disagree about comparator, modifier, chain, include, compartment, or authorization semantics, while remaining free to use different storage strategies.
 
@@ -136,49 +135,32 @@ Replace the monolithic generator with composable builders and a typed SQL AST, b
 
 Adopt option 1: a FHIR search compiler with bounded cost-based SQL Server planning.
 
-The design uses cost-based exploration only where meaningful physical alternatives exist. Parsing, binding, semantic normalization, and simple logical normalization remain deterministic. The optimizer is bounded by elapsed time, memo groups, alternatives, and chain depth. A complete safe canonical plan is always available for supported search shapes.
+The design uses cost-based exploration only where meaningful physical alternatives exist. Semantic expression construction, semantic normalization, and simple logical normalization remain deterministic. The optimizer is bounded by elapsed time, memo groups, alternatives, and chain depth. A complete safe canonical plan is always available for supported search shapes.
 
 ## Architecture
 
-### Stage 1: syntax parsing
+### Stage 1: semantic expression construction
 
-The parser produces a syntax tree that preserves:
+The existing Core `Expression` hierarchy evolves into the canonical semantic representation instead of adding a parallel raw-syntax model. Existing structural nodes for boolean composition, chains, reverse chains, includes, compartments, and authorization are retained where they already describe FHIR meaning. New or evolved search-predicate leaves preserve:
 
-- resource types;
-- raw parameter names and values;
-- modifiers and comparators;
-- chains and reverse chains;
-- composite values;
-- `_include`, `_revinclude`, and iteration;
-- sort, count, total, summary, and paging inputs;
-- source locations for diagnostics.
-
-The syntax tree contains no resolved `SearchParameterInfo`, table name, column, index, surrogate ID, or backend capability.
-
-### Stage 2: semantic binding and validation
-
-The binder resolves the syntax tree against shared FHIR metadata and produces an immutable `BoundSearchQuery`.
-
-The bound query owns:
-
-- resolved SearchParameter identities and types;
-- normalized search values and precision;
-- comparator and modifier meaning;
-- typed chain and reverse-chain navigation;
-- include expansion meaning;
+- resolved `SearchParameterInfo` identities and types;
+- normalized `ISearchValue` values and precision;
+- the original FHIR comparator and modifier;
+- composite component position;
 - missing/not semantics;
-- compartment and authorization constraints;
-- sort and result-shape requirements;
-- logical paging requirements;
-- explicit capability errors.
+- source parameter identity for diagnostics.
 
-Unknown parameters, invalid modifiers, invalid comparator/type combinations, unsupported capabilities, and malformed values fail here. SQL and Cosmos consume the same bound query and shared semantic conformance fixtures.
+Semantic expressions never contain `FieldName`, SQL columns, indexes, schema versions, surrogate IDs, statistics, or backend capabilities. In particular, a date `eq` remains a date-equality predicate; it is not converted during parsing into predicates over `DateTimeStart` and `DateTimeEnd`.
 
-No backend may reinterpret the bound query. A backend may reject an explicitly unsupported capability, but it may not silently substitute different semantics.
+`SearchOptions` remains the transitional query envelope for sort, include, total, result-shape, compartment, authorization, and paging requirements. During migration it carries both the semantic expression and the existing lowered expression. A single `LegacyExpressionLowerer` converts semantic leaves into today's `FieldName` and `BinaryExpression` shapes so SQL and Cosmos remain behaviorally unchanged until they consume logical plans.
 
-### Stage 3: logical relational planning
+Unknown parameters, invalid modifiers, invalid comparator/type combinations, unsupported capabilities, and malformed values fail while constructing the semantic expression. SQL and Cosmos consume the same semantic tree and shared conformance fixtures. A backend may reject an explicitly unsupported capability, but it may not reinterpret the semantic tree.
 
-Each backend lowers `BoundSearchQuery` into a typed logical algebra. The algebra describes what relations must be computed without naming SQL tables or choosing join algorithms.
+This design intentionally permits two expression instances during the strangler period, but not two competing hierarchies: both use the existing `Expression` family and have explicit stage invariants. The semantic tree is authoritative FHIR meaning; the lowered tree is a temporary compatibility artifact with legacy backends.
+
+### Stage 2: logical relational planning
+
+Each backend lowers the semantic expression and typed `SearchOptions` directives into a typed logical algebra. The algebra describes what relations must be computed without naming SQL tables or choosing join algorithms.
 
 Core logical operators include:
 
@@ -201,7 +183,7 @@ Every operator carries an explicit typed row schema. Column references are typed
 
 Authorization and compartment restrictions are logical predicates or joins with required security properties. Optimizer rules may move them only when the rule proves those properties are preserved.
 
-### Stage 4: logical normalization
+### Stage 3: logical normalization
 
 Logical normalization uses small, semantics-preserving rules over declared patterns. Examples include:
 
@@ -225,7 +207,7 @@ Each rule declares:
 
 Rule application produces a trace. Semantic rules do not inspect schema versions, SQL statistics, SQL fields, or SQL exceptions.
 
-### Stage 5: SQL Server physical planning
+### Stage 4: SQL Server physical planning
 
 The SQL Server planner lowers normalized logical operators to alternatives over the existing schema. Physical alternatives include:
 
@@ -283,7 +265,7 @@ The catalog provides:
 - correlation estimates where available;
 - statistics freshness and confidence.
 
-Current schema-version branches become catalog capabilities or alternative implementation rules. They do not appear in semantic binding or logical normalization.
+Current schema-version branches become catalog capabilities or alternative implementation rules. They do not appear in semantic expression construction or logical normalization.
 
 Statistics are updated asynchronously from database metadata, Query Store, and sampled execution telemetry. A request does not create statistics as a side effect of compiling or executing a read.
 
@@ -311,7 +293,7 @@ FHIR-specific factors include:
 
 Cost coefficients are calibrated offline from representative workloads and production telemetry. The selected coefficient version is part of explain output and cache identity.
 
-### Stage 6: typed SQL AST and rendering
+### Stage 5: typed SQL AST and rendering
 
 The physical plan lowers into an immutable, typed SQL AST containing:
 
@@ -327,7 +309,7 @@ SQL rendering is a deterministic terminal operation. The renderer cannot add FHI
 
 The same physical plan always yields the same SQL text and parameter ordering for the same dialect and capability version.
 
-### Stage 7: execution
+### Stage 6: execution
 
 Execution receives a prepared command and a typed result-shape contract. It is responsible for:
 
@@ -356,13 +338,12 @@ There is no hash-based, post-generation replacement of SQL. Specialized or admin
 
 The shared compiler owns:
 
-- syntax parsing;
-- SearchParameter resolution;
+- semantic expression parsing and SearchParameter resolution;
 - type and capability validation;
 - FHIR comparator and modifier semantics;
 - chain, reverse-chain, include, missing, not, sort, and paging meaning;
 - authorization and compartment meaning;
-- canonical bound query representation;
+- canonical semantic expression representation;
 - semantic hashing;
 - cross-backend conformance tests.
 
@@ -381,7 +362,7 @@ The SQL Server backend owns:
 
 ### Cosmos backend
 
-The Cosmos backend consumes the same bound query but owns its own logical lowering, physical choices, query generation, and execution. It does not consume SQL physical operators or SQL schema metadata.
+The Cosmos backend consumes the same semantic expression but owns its own logical lowering, physical choices, query generation, and execution. It does not consume SQL physical operators or SQL schema metadata.
 
 ## Parameterization and plan caching
 
@@ -419,7 +400,7 @@ The policy is observable and versioned. Cache invalidation occurs when relevant 
 
 Every compiled query can produce an explain bundle containing:
 
-- normalized bound semantic query and semantic hash;
+- normalized semantic expression and semantic hash;
 - logical plan and hash;
 - normalization rules fired;
 - memo groups and relevant alternatives;
@@ -441,9 +422,9 @@ Failures are typed by stage:
 
 | Stage | Behavior |
 |---|---|
-| Parse | Return a FHIR OperationOutcome with parameter/value source location. |
-| Bind | Return an OperationOutcome for unknown parameters, invalid types/modifiers, unsupported capabilities, or invalid values. |
-| Logical planning | Report a compiler capability or invariant failure with the bound query. |
+| Semantic construction | Return a FHIR OperationOutcome for malformed syntax, unknown parameters, invalid types/modifiers, unsupported capabilities, or invalid values. |
+| Legacy lowering | Report a compiler invariant failure with the semantic expression; never reinterpret it or silently omit a predicate. |
+| Logical planning | Report a compiler capability or invariant failure with the semantic expression. |
 | Physical planning | Report rejected alternatives and missing implementation, or use a declared safe plan when only the optimization budget expired. |
 | SQL AST validation | Fail before execution on invalid row schemas, columns, parameters, or union compatibility. |
 | SQL rendering | Treat nondeterminism or unsupported AST nodes as compiler defects. |
@@ -471,7 +452,7 @@ The physical plan must prove a stable, unique ordering suitable for keyset pagin
 
 ### Shared semantic conformance
 
-A generated and curated FHIR corpus verifies that syntax binds to one canonical semantic query across backends. It covers:
+A generated and curated FHIR corpus verifies that each request produces one canonical semantic expression across backends. It covers:
 
 - all search parameter types;
 - comparators and modifiers;
@@ -538,7 +519,7 @@ A representative corpus covers common and pathological query shapes, data distri
 
 ### Phase 1: semantic front end
 
-Introduce the syntax tree, binder, and `BoundSearchQuery`. Adapt the bound query into the current Core expression model so existing SQL and Cosmos remain primary.
+Evolve the Core `Expression` hierarchy with semantic search-predicate leaves, and introduce one `LegacyExpressionLowerer` that reproduces the current field-level expression tree. Existing SQL and Cosmos remain primary.
 
 This phase centralizes FHIR semantics before replacing backend planning.
 
@@ -547,7 +528,7 @@ This phase centralizes FHIR semantics before replacing backend planning.
 For production requests, compile logical plans, physical plans, and SQL without execution. Measure:
 
 - shape coverage;
-- parse and bind parity;
+- semantic-expression parity;
 - compilation failures;
 - optimizer cost and budget use;
 - plan and SQL stability;
@@ -585,7 +566,7 @@ Current fast paths, stored procedures, and custom query forms are retired or rei
 
 The pivot is successful when:
 
-- SQL and Cosmos bind identical FHIR requests to identical semantic queries.
+- SQL and Cosmos receive identical semantic expressions for identical FHIR requests.
 - No SQL-specific field, schema version, statistic, or query hint exists in shared semantic representations.
 - Physical rules and their dependencies are discoverable through registries rather than a call-site sequence.
 - `SqlQueryGenerator`-style global mutable state is absent; SQL generation is a pure physical-plan-to-AST-to-text operation.
@@ -603,7 +584,7 @@ The pivot is successful when:
 | Cost model chooses poor plans | Keep a safe canonical plan, explain estimates, compare shadow performance, version coefficients, and promote by shape. |
 | Optimizer compilation cost is excessive | Bound memo search, cache by canonical shape, account for compile cost, and use deterministic normalization before exploration. |
 | New representations become another translation burden | Keep each representation immutable, typed, stage-specific, and smaller than its predecessor; prohibit backend fields in semantic types. |
-| Semantic behavior changes during migration | Centralize binding first, run shared conformance fixtures, and compare old/new results before promotion. |
+| Semantic behavior changes during migration | Centralize semantic expression construction first, prove the legacy lowerer against existing expression fixtures, and compare old/new results before promotion. |
 | Continuation sequences cross engines | Version tokens and route every token to its issuing engine. |
 | Existing special SQL is lost | Model valuable fast paths and stored procedures as costed physical implementations with explicit contracts. |
 | Statistics are absent or stale | Include confidence, use conservative estimates, retain safe plans, and update statistics asynchronously. |
@@ -617,7 +598,7 @@ The architecture will initially coexist with duplicate execution engines. That t
 
 The highest-value simplification is not fewer total concepts. It is that each concept has one owner:
 
-- FHIR meaning belongs to semantic binding.
+- FHIR meaning belongs to semantic expression construction.
 - Relational equivalence belongs to logical rules.
 - SQL performance belongs to physical planning.
 - SQL syntax belongs to code generation.
