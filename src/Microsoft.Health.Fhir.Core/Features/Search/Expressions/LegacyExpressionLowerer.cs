@@ -45,6 +45,13 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
         /// structural wrapper nodes are preserved unchanged.
         /// </returns>
         /// <exception cref="ArgumentNullException">Thrown when <paramref name="expression"/> is <c>null</c>.</exception>
+        /// <exception cref="InvalidOperationException">
+        /// Thrown when a <see cref="SearchParameterPredicateExpression"/> with the <c>:text</c> modifier
+        /// violates an internal semantic invariant, specifically: the parameter type is not
+        /// <see cref="SearchParamType.Token"/>, the comparator is not <see cref="SearchComparator.Eq"/>,
+        /// or the value is not a <see cref="TokenSearchValue"/> with a non-null
+        /// <see cref="TokenSearchValue.Text"/> property.
+        /// </exception>
         public Expression Lower(Expression expression)
         {
             EnsureArg.IsNotNull(expression, nameof(expression));
@@ -59,8 +66,24 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
             // Special case: :text modifier on token parameters.
             // SearchValueExpressionBuilderHelper does not handle token-text semantics,
             // so we translate directly to a StartsWith on the TokenText field.
+            // All three invariants must hold; any violation is an internal semantic error.
             if (expression.Modifier?.SearchModifierCode == SearchModifierCode.Text)
             {
+                if (expression.Parameter.Type != SearchParamType.Token)
+                {
+                    throw new InvalidOperationException(
+                        $"Invariant violation: the '{SearchModifierCode.Text}' modifier is only valid on Token " +
+                        $"parameters, but parameter '{expression.Parameter.Code}' has type '{expression.Parameter.Type}'.");
+                }
+
+                if (expression.Comparator != SearchComparator.Eq)
+                {
+                    throw new InvalidOperationException(
+                        $"Invariant violation: the '{SearchModifierCode.Text}' modifier only supports the " +
+                        $"'{SearchComparator.Eq}' comparator, but parameter '{expression.Parameter.Code}' " +
+                        $"uses '{expression.Comparator}'.");
+                }
+
                 if (expression.Value is not TokenSearchValue token || token.Text == null)
                 {
                     throw new InvalidOperationException(

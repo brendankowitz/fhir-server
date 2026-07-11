@@ -3,6 +3,7 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
+using System;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
@@ -68,6 +69,68 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Expressions
             Assert.Equal(BinaryOperator.LessThanOrEqual, upper.BinaryOperator);
             Assert.Equal(FieldName.DateTimeEnd, upper.FieldName);
             Assert.Null(upper.ComponentIndex);
+        }
+
+        // -----------------------------------------------------------------------
+        // Test 2a (negative): :text with non-Eq comparator must throw
+        // -----------------------------------------------------------------------
+
+        /// <summary>
+        /// A Text-modifier predicate on a Token parameter whose comparator is anything
+        /// other than <see cref="SearchComparator.Eq"/> is a semantic invariant violation.
+        /// The lowerer must reject it with <see cref="InvalidOperationException"/> rather
+        /// than silently producing a StartsWith expression.
+        /// The value is kept as a valid <see cref="TokenSearchValue"/> with non-null
+        /// <see cref="TokenSearchValue.Text"/> so that only the comparator invariant is tested.
+        /// </summary>
+        [Fact]
+        public void GivenTextModifierWithNonEqComparator_WhenLowered_ThrowsInvalidOperationException()
+        {
+            // Arrange
+            var param = new SearchParameterInfo("code", "code", SearchParamType.Token);
+            var tokenValue = new TokenSearchValue(system: null, code: null, text: "fever");
+            var modifier = new SearchModifier(SearchModifierCode.Text);
+            var predicate = new SearchParameterPredicateExpression(
+                parameter: param,
+                modifier: modifier,
+                comparator: SearchComparator.Gt,   // violating invariant: only Eq is valid
+                componentIndex: null,
+                value: tokenValue);
+            var wrapper = new SearchParameterExpression(param, predicate);
+
+            // Act & Assert
+            Assert.Throws<InvalidOperationException>(() => LegacyExpressionLowerer.Instance.Lower(wrapper));
+        }
+
+        // -----------------------------------------------------------------------
+        // Test 2b (negative): :text on a non-Token parameter type must throw
+        // -----------------------------------------------------------------------
+
+        /// <summary>
+        /// A Text-modifier predicate whose parameter type is not Token is a semantic
+        /// invariant violation. The lowerer must reject it with
+        /// <see cref="InvalidOperationException"/> rather than silently producing a
+        /// StartsWith expression.
+        /// The value is kept as a valid <see cref="TokenSearchValue"/> with non-null
+        /// <see cref="TokenSearchValue.Text"/> so that only the parameter-type invariant is tested.
+        /// </summary>
+        [Fact]
+        public void GivenTextModifierOnNonTokenParameter_WhenLowered_ThrowsInvalidOperationException()
+        {
+            // Arrange — parameter type is String, not Token
+            var param = new SearchParameterInfo("display", "display", SearchParamType.String);
+            var tokenValue = new TokenSearchValue(system: null, code: null, text: "fever");
+            var modifier = new SearchModifier(SearchModifierCode.Text);
+            var predicate = new SearchParameterPredicateExpression(
+                parameter: param,
+                modifier: modifier,
+                comparator: SearchComparator.Eq,
+                componentIndex: null,
+                value: tokenValue);
+            var wrapper = new SearchParameterExpression(param, predicate);
+
+            // Act & Assert
+            Assert.Throws<InvalidOperationException>(() => LegacyExpressionLowerer.Instance.Lower(wrapper));
         }
 
         // -----------------------------------------------------------------------
