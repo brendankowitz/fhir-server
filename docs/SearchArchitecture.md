@@ -11,9 +11,13 @@ Search functionality consists of four areas:
 
 ## Request compilation
 
-When the FHIR service handles a search request, `ExpressionParser` first parses each query parameter
-into a **semantic predicate** — a `SearchParameterPredicateExpression` — before any backend-specific
-translation occurs.
+When the FHIR service handles a search request, `ExpressionParser` parses each query parameter.
+Ordinary typed search-parameter values become **semantic predicate** leaves
+(`SearchParameterPredicateExpression`) before any backend-specific translation occurs.
+Existing structural and specialized nodes remain in the expression tree alongside this new leaf
+type: the `:missing` modifier is resolved immediately to `MissingSearchParameterExpression` and
+does **not** become a `SearchParameterPredicateExpression`; it does not pass through
+`LegacyExpressionLowerer`'s predicate-override path.
 
 A semantic predicate retains everything the parser resolved:
 
@@ -21,7 +25,7 @@ A semantic predicate retains everything the parser resolved:
 |---|---|
 | `Parameter` | The resolved `SearchParameterInfo` identity (name, type, URL). |
 | `Comparator` | The FHIR comparator (`eq`, `gt`, `le`, …) applied to the query value. |
-| `Modifier` | The optional search modifier (e.g. `:exact`, `:text`, `:missing`). |
+| `Modifier` | The optional search modifier where applicable (e.g. `:exact`, `:contains`, `:not`, `:text`, `:type`, `:above`, `:below`). |
 | `ComponentIndex` | The zero-based composite-component position, or `null` for non-composite parameters. |
 | `Value` | The normalized `ISearchValue` (e.g. `DateTimeSearchValue`, `TokenSearchValue`). |
 
