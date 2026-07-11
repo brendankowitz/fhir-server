@@ -60,7 +60,6 @@ Expected: all commands pass. Stop and investigate any baseline failure before ch
 ### Modified files
 
 - `src/Microsoft.Health.Fhir.Core/Features/Search/Expressions/IExpressionVisitor.cs` — semantic visit contract.
-- `src/Microsoft.Health.Fhir.Core/Features/Search/Expressions/DefaultExpressionVisitor.cs` — default semantic-leaf behavior.
 - `src/Microsoft.Health.Fhir.Core/Features/Search/Expressions/ExpressionRewriter.cs` — preserves semantic leaves unless overridden.
 - `src/Microsoft.Health.Fhir.Core/Features/Search/Expressions/Parsers/ISearchParameterExpressionParser.cs` — exposes `ParseSemantic`.
 - `src/Microsoft.Health.Fhir.Core/Features/Search/Expressions/Parsers/SearchParameterExpressionParser.cs` — constructs semantic leaves, then lowers for the existing API.
@@ -72,7 +71,6 @@ Expected: all commands pass. Stop and investigate any baseline failure before ch
 **Files:**
 - Create: `src/Microsoft.Health.Fhir.Core/Features/Search/Expressions/SearchParameterPredicateExpression.cs`
 - Modify: `src/Microsoft.Health.Fhir.Core/Features/Search/Expressions/IExpressionVisitor.cs`
-- Modify: `src/Microsoft.Health.Fhir.Core/Features/Search/Expressions/DefaultExpressionVisitor.cs`
 - Modify: `src/Microsoft.Health.Fhir.Core/Features/Search/Expressions/ExpressionRewriter.cs`
 - Modify: `src/Microsoft.Health.Fhir.Shared.Core.UnitTests/Features/Search/Expressions/Parsers/SearchValueExpressionBuilderTests.cs`
 
@@ -135,18 +133,13 @@ using Microsoft.Health.Fhir.ValueSets;
 namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
 {
     /// <summary>
-    /// Represents a semantic FHIR search predicate before it is lowered to storage fields.
+    /// Represents a semantic FHIR search predicate that captures a search parameter, an optional
+    /// modifier, a comparator, an optional component index, and a normalized search value.
+    /// This node operates at the semantic level and must be lowered to legacy SQL/Cosmos tree nodes
+    /// before reaching a backend expression visitor.
     /// </summary>
     public sealed class SearchParameterPredicateExpression : Expression
     {
-        /// <summary>
-        /// Initializes a new instance of the <see cref="SearchParameterPredicateExpression"/> class.
-        /// </summary>
-        /// <param name="parameter">The resolved search parameter.</param>
-        /// <param name="modifier">The FHIR search modifier.</param>
-        /// <param name="comparator">The FHIR search comparator.</param>
-        /// <param name="componentIndex">The zero-based composite component position, when applicable.</param>
-        /// <param name="value">The normalized search value.</param>
         public SearchParameterPredicateExpression(
             SearchParameterInfo parameter,
             SearchModifier modifier,
@@ -157,14 +150,14 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
             EnsureArg.IsNotNull(parameter, nameof(parameter));
             EnsureArg.IsNotNull(value, nameof(value));
 
-            if (!Enum.IsDefined(comparator))
+            if (!Enum.IsDefined<SearchComparator>(comparator))
             {
-                throw new ArgumentOutOfRangeException(nameof(comparator));
+                throw new ArgumentOutOfRangeException(nameof(comparator), comparator, "SearchComparator value is not defined.");
             }
 
-            if (componentIndex < 0)
+            if (componentIndex.HasValue && componentIndex.Value < 0)
             {
-                throw new ArgumentOutOfRangeException(nameof(componentIndex));
+                throw new ArgumentOutOfRangeException(nameof(componentIndex), componentIndex, "Component index must not be negative.");
             }
 
             Parameter = parameter;
@@ -174,48 +167,31 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
             Value = value;
         }
 
-        /// <summary>
-        /// Gets the resolved search parameter whose value is tested.
-        /// </summary>
         public SearchParameterInfo Parameter { get; }
-
-        /// <summary>
-        /// Gets the FHIR search modifier.
-        /// </summary>
         public SearchModifier Modifier { get; }
-
-        /// <summary>
-        /// Gets the FHIR search comparator.
-        /// </summary>
         public SearchComparator Comparator { get; }
-
-        /// <summary>
-        /// Gets the composite component position, when applicable.
-        /// </summary>
         public int? ComponentIndex { get; }
-
-        /// <summary>
-        /// Gets the normalized search value.
-        /// </summary>
         public ISearchValue Value { get; }
 
-        /// <inheritdoc />
         public override TOutput AcceptVisitor<TContext, TOutput>(IExpressionVisitor<TContext, TOutput> visitor, TContext context)
         {
             EnsureArg.IsNotNull(visitor, nameof(visitor));
             return visitor.VisitSearchParameterPredicate(this, context);
         }
 
-        /// <inheritdoc />
         public override string ToString()
         {
-            string modifier = Modifier == null ? null : $":{Modifier}";
-            string component = ComponentIndex.HasValue ? $"[{ComponentIndex}]." : null;
-            string value = Value is TokenSearchValue { Text: not null } token ? token.Text : Value.ToString();
-            return $"(SearchPredicate {component}{Parameter.Code}{modifier} {Comparator} '{value}')";
+            string componentPart = ComponentIndex.HasValue ? $"[{ComponentIndex}]." : string.Empty;
+            string modifierPart = Modifier != null ? $":{Modifier}" : string.Empty;
+
+            // TokenSearchValue.ToString() does not render the Text property; use it directly when present.
+            string valuePart = Value is TokenSearchValue tsv && tsv.Text != null
+                ? tsv.Text
+                : Value.ToString();
+
+            return $"(SemanticPredicate {componentPart}{Parameter.Code}{modifierPart} {Comparator} {valuePart})";
         }
 
-        /// <inheritdoc />
         public override void AddValueInsensitiveHashCode(ref HashCode hashCode)
         {
             hashCode.Add(typeof(SearchParameterPredicateExpression));
@@ -226,15 +202,14 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
             hashCode.Add(Value);
         }
 
-        /// <inheritdoc />
         public override bool ValueInsensitiveEquals(Expression other)
         {
-            return other is SearchParameterPredicateExpression predicate &&
-                predicate.Parameter.Equals(Parameter) &&
-                predicate.Modifier == Modifier &&
-                predicate.Comparator == Comparator &&
-                predicate.ComponentIndex == ComponentIndex &&
-                predicate.Value.Equals(Value);
+            return other is SearchParameterPredicateExpression sppe &&
+                   sppe.Parameter.Equals(Parameter) &&
+                   sppe.Modifier == Modifier &&
+                   sppe.Comparator == Comparator &&
+                   sppe.ComponentIndex == ComponentIndex &&
+                   (sppe.Value?.Equals(Value) ?? Value == null);
         }
     }
 }
@@ -242,34 +217,73 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
 
 - [ ] **Step 4: Extend the visitor contract with a compatibility guard**
 
-Add `using System;` to `IExpressionVisitor.cs`.
-
 Add this method immediately after `VisitSearchParameter` in `IExpressionVisitor.cs`:
 
 ```csharp
 /// <summary>
 /// Visits a semantic <see cref="SearchParameterPredicateExpression"/>.
+/// Implementations that operate on a fully-lowered legacy tree should not encounter this node;
+/// the default implementation throws <see cref="InvalidOperationException"/> to surface
+/// any misrouting at runtime while keeping existing SQL/Cosmos visitors compile-compatible.
 /// </summary>
-/// <param name="expression">The expression to visit.</param>
+/// <param name="expression">The semantic predicate expression to visit.</param>
 /// <param name="context">The input.</param>
 TOutput VisitSearchParameterPredicate(SearchParameterPredicateExpression expression, TContext context) =>
     throw new InvalidOperationException("Semantic search predicates must be lowered before visiting a legacy expression tree.");
 ```
 
-The default interface body lets the two direct SQL/Cosmos visitor implementations compile unchanged, but fails explicitly if a semantic leaf accidentally reaches either backend.
+The default interface body lets the two direct SQL/Cosmos visitor implementations compile unchanged, but fails explicitly if a semantic leaf accidentally reaches either backend. **Do not override this method in `DefaultExpressionVisitor`.** Semantic leaves must not be silently omitted from legacy visitors.
 
-Override the guard in `DefaultExpressionVisitor` so analytical visitors retain their existing leaf behavior:
-
-```csharp
-public virtual TOutput VisitSearchParameterPredicate(SearchParameterPredicateExpression expression, TContext context) => default;
-```
-
-Add this method to `ExpressionRewriter`:
+Add this override to `ExpressionRewriter` to preserve semantic leaves when rewriting (identity transformation for intentional semantic rewriters):
 
 ```csharp
 public virtual Expression VisitSearchParameterPredicate(SearchParameterPredicateExpression expression, TContext context)
 {
     return expression;
+}
+```
+
+- [ ] **Step 4b: Add a regression test for the visitor guard**
+
+Add this test to `SearchValueExpressionBuilderTests` to verify that a minimal `DefaultExpressionVisitor` subclass cannot silently omit semantic predicates:
+
+```csharp
+[Fact]
+public void GivenSemanticPredicateVisitor_WhenNoOverride_ThenThrowsInvalidOperationException()
+{
+    // Arrange
+    var predicate = new SearchParameterPredicateExpression(
+        CreateSearchParameter(SearchParamType.Token),
+        modifier: null,
+        SearchComparator.Eq,
+        componentIndex: null,
+        TokenSearchValue.Parse("system|code"));
+
+    var minimalVisitor = new MinimalTestVisitor();
+
+    // Act & Assert
+    Assert.Throws<InvalidOperationException>(() =>
+        predicate.AcceptVisitor(minimalVisitor, context: null));
+}
+
+// Helper visitor for regression testing
+private class MinimalTestVisitor : IExpressionVisitor<object, string>
+{
+    public string VisitSearchParameter(SearchParameterExpression expression, object context) => "ignored";
+    public string VisitBinary(BinaryExpression expression, object context) => "ignored";
+    public string VisitChained(ChainedExpression expression, object context) => "ignored";
+    public string VisitMissingField(MissingFieldExpression expression, object context) => "ignored";
+    public string VisitMissingSearchParameter(MissingSearchParameterExpression expression, object context) => "ignored";
+    public string VisitNotExpression(NotExpression expression, object context) => "ignored";
+    public string VisitMultiary(MultiaryExpression expression, object context) => "ignored";
+    public string VisitUnion(UnionExpression expression, object context) => "ignored";
+    public string VisitString(StringExpression expression, object context) => "ignored";
+    public string VisitCompartment(CompartmentSearchExpression expression, object context) => "ignored";
+    public string VisitSmartCompartment(SmartCompartmentSearchExpression expression, object context) => "ignored";
+    public string VisitInclude(IncludeExpression expression, object context) => "ignored";
+    public string VisitSortParameter(SortExpression expression, object context) => "ignored";
+    public string VisitIn<T>(InExpression<T> expression, object context) => "ignored";
+    public string VisitNotReferenced(NotReferencedExpression expression, object context) => "ignored";
 }
 ```
 
@@ -292,7 +306,7 @@ Expected: PASS. Visitors derived from `DefaultExpressionVisitor` or `ExpressionR
 - [ ] **Step 7: Commit the semantic leaf**
 
 ```powershell
-git add "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\SearchParameterPredicateExpression.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\IExpressionVisitor.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\DefaultExpressionVisitor.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\ExpressionRewriter.cs" "src\Microsoft.Health.Fhir.Shared.Core.UnitTests\Features\Search\Expressions\Parsers\SearchValueExpressionBuilderTests.cs"
+git add "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\SearchParameterPredicateExpression.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\IExpressionVisitor.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\ExpressionRewriter.cs" "src\Microsoft.Health.Fhir.Shared.Core.UnitTests\Features\Search\Expressions\Parsers\SearchValueExpressionBuilderTests.cs"
 git commit -m "Add semantic FHIR search predicate expression" -m "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
 ```
 
@@ -312,6 +326,7 @@ Create `LegacyExpressionLowererTests.cs`:
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
+using System;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
@@ -329,61 +344,180 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Expressions
     [Trait(Traits.Category, Categories.Search)]
     public class LegacyExpressionLowererTests
     {
+        /// <summary>
+        /// A SearchParameterExpression wrapping a SearchParameterPredicateExpression with
+        /// Eq and a partial-month DateTimeSearchValue should lower to a SearchParameterExpression
+        /// whose inner expression is an And MultiaryExpression with two BinaryExpression leaves:
+        /// - GreaterThanOrEqual on FieldName.DateTimeStart
+        /// - LessThanOrEqual on FieldName.DateTimeEnd
+        /// </summary>
         [Fact]
-        public void GivenSemanticDateEquality_WhenLowered_ThenLegacyRangeFieldsAreProduced()
+        public void GivenSemanticDateEqualityPredicate_WhenLowered_ProducesDateRangeBinaryExpressions()
         {
-            var parameter = new SearchParameterInfo("birthdate", "birthdate", SearchParamType.Date);
-            var semantic = new SearchParameterExpression(
-                parameter,
-                new SearchParameterPredicateExpression(
-                    parameter,
-                    modifier: null,
-                    SearchComparator.Eq,
-                    componentIndex: null,
-                    DateTimeSearchValue.Parse("2026-07")));
+            // Arrange
+            var param = new SearchParameterInfo("birthdate", "birthdate", SearchParamType.Date);
+            var dateValue = DateTimeSearchValue.Parse("2026-07");
+            var predicate = new SearchParameterPredicateExpression(
+                parameter: param,
+                modifier: null,
+                comparator: SearchComparator.Eq,
+                componentIndex: null,
+                value: dateValue);
+            var wrapper = new SearchParameterExpression(param, predicate);
 
-            Expression lowered = LegacyExpressionLowerer.Instance.Lower(semantic);
+            // Act
+            var result = LegacyExpressionLowerer.Instance.Lower(wrapper);
 
-            var wrapper = Assert.IsType<SearchParameterExpression>(lowered);
-            var and = Assert.IsType<MultiaryExpression>(wrapper.Expression);
+            // Assert – outer wrapper preserved
+            var spe = Assert.IsType<SearchParameterExpression>(result);
+            Assert.Same(param, spe.Parameter);
+
+            // Inner expression must be an And multiary
+            var and = Assert.IsType<MultiaryExpression>(spe.Expression);
             Assert.Equal(MultiaryOperator.And, and.MultiaryOperation);
-            Assert.Collection(
-                and.Expressions,
-                expression =>
-                {
-                    var lowerBound = Assert.IsType<BinaryExpression>(expression);
-                    Assert.Equal(BinaryOperator.GreaterThanOrEqual, lowerBound.BinaryOperator);
-                    Assert.Equal(FieldName.DateTimeStart, lowerBound.FieldName);
-                },
-                expression =>
-                {
-                    var upperBound = Assert.IsType<BinaryExpression>(expression);
-                    Assert.Equal(BinaryOperator.LessThanOrEqual, upperBound.BinaryOperator);
-                    Assert.Equal(FieldName.DateTimeEnd, upperBound.FieldName);
-                });
+            Assert.Equal(2, and.Expressions.Count);
+
+            // First leaf: GreaterThanOrEqual on DateTimeStart
+            var lower = Assert.IsType<BinaryExpression>(and.Expressions[0]);
+            Assert.Equal(BinaryOperator.GreaterThanOrEqual, lower.BinaryOperator);
+            Assert.Equal(FieldName.DateTimeStart, lower.FieldName);
+            Assert.Null(lower.ComponentIndex);
+
+            // Second leaf: LessThanOrEqual on DateTimeEnd
+            var upper = Assert.IsType<BinaryExpression>(and.Expressions[1]);
+            Assert.Equal(BinaryOperator.LessThanOrEqual, upper.BinaryOperator);
+            Assert.Equal(FieldName.DateTimeEnd, upper.FieldName);
+            Assert.Null(upper.ComponentIndex);
         }
 
+        /// <summary>
+        /// A Text-modifier predicate on a Token parameter with a raw text value (including escapes)
+        /// should lower to a StartsWith on FieldName.TokenText with IgnoreCase=true.
+        /// </summary>
         [Fact]
-        public void GivenSemanticTokenTextModifier_WhenLowered_ThenLegacyTokenTextPredicateIsProduced()
+        public void GivenSemanticTokenTextPredicate_WhenLowered_ProducesTokenTextStringExpression()
         {
-            var parameter = new SearchParameterInfo("code", "code", SearchParamType.Token);
-            var semantic = new SearchParameterExpression(
-                parameter,
-                new SearchParameterPredicateExpression(
-                    parameter,
-                    new SearchModifier(SearchModifierCode.Text),
-                    SearchComparator.Eq,
-                    componentIndex: null,
-                    new TokenSearchValue(system: null, code: null, text: @"heart\,lung")));
+            // Arrange
+            var param = new SearchParameterInfo("code", "code", SearchParamType.Token);
+            var tokenValue = new TokenSearchValue(system: null, code: null, text: @"heart\,lung");
+            var predicate = new SearchParameterPredicateExpression(
+                parameter: param,
+                modifier: new SearchModifier(SearchModifierCode.Text),
+                comparator: SearchComparator.Eq,
+                componentIndex: null,
+                value: tokenValue);
+            var wrapper = new SearchParameterExpression(param, predicate);
 
-            Expression lowered = LegacyExpressionLowerer.Instance.Lower(semantic);
+            // Act
+            var result = LegacyExpressionLowerer.Instance.Lower(wrapper);
 
-            var wrapper = Assert.IsType<SearchParameterExpression>(lowered);
-            var text = Assert.IsType<StringExpression>(wrapper.Expression);
-            Assert.Equal(StringOperator.StartsWith, text.StringOperator);
-            Assert.Equal(FieldName.TokenText, text.FieldName);
-            Assert.Equal(@"heart\,lung", text.Value);
-            Assert.True(text.IgnoreCase);
+            // Assert
+            var spe = Assert.IsType<SearchParameterExpression>(result);
+            var str = Assert.IsType<StringExpression>(spe.Expression);
+            Assert.Equal(StringOperator.StartsWith, str.StringOperator);
+            Assert.Equal(FieldName.TokenText, str.FieldName);
+            Assert.Equal(@"heart\,lung", str.Value);
+            Assert.True(str.IgnoreCase);
+        }
+
+        /// <summary>
+        /// A Text-modifier predicate on a non-Token parameter is a semantic invariant violation
+        /// and must throw InvalidOperationException.
+        /// </summary>
+        [Fact]
+        public void GivenSemanticTextPredicateOnNonTokenParameter_WhenLowered_ThrowsInvalidOperationException()
+        {
+            // Arrange
+            var param = new SearchParameterInfo("status", "status", SearchParamType.String);
+            var stringValue = StringSearchValue.Parse("active");
+            var predicate = new SearchParameterPredicateExpression(
+                parameter: param,
+                modifier: new SearchModifier(SearchModifierCode.Text),
+                comparator: SearchComparator.Eq,
+                componentIndex: null,
+                value: stringValue);
+
+            // Act & Assert
+            var ex = Assert.Throws<InvalidOperationException>(() =>
+                LegacyExpressionLowerer.Instance.Lower(predicate));
+            Assert.Contains("Text", ex.Message);
+            Assert.Contains("Token", ex.Message);
+        }
+
+        /// <summary>
+        /// A Text-modifier predicate on a Token parameter with a non-Eq comparator is a
+        /// semantic invariant violation and must throw InvalidOperationException.
+        /// </summary>
+        [Fact]
+        public void GivenSemanticTextPredicateWithNonEqComparator_WhenLowered_ThrowsInvalidOperationException()
+        {
+            // Arrange
+            var param = new SearchParameterInfo("code", "code", SearchParamType.Token);
+            var tokenValue = new TokenSearchValue(system: null, code: null, text: "heart");
+            var predicate = new SearchParameterPredicateExpression(
+                parameter: param,
+                modifier: new SearchModifier(SearchModifierCode.Text),
+                comparator: SearchComparator.Gt,  // Invalid for :text
+                componentIndex: null,
+                value: tokenValue);
+
+            // Act & Assert
+            var ex = Assert.Throws<InvalidOperationException>(() =>
+                LegacyExpressionLowerer.Instance.Lower(predicate));
+            Assert.Contains("Text", ex.Message);
+            Assert.Contains("Eq", ex.Message);
+        }
+
+        /// <summary>
+        /// A Text-modifier predicate on a Token parameter with a TokenSearchValue that has no
+        /// Text property (null) is a semantic invariant violation and must throw InvalidOperationException.
+        /// </summary>
+        [Fact]
+        public void GivenSemanticTextPredicateWithNullText_WhenLowered_ThrowsInvalidOperationException()
+        {
+            // Arrange
+            var param = new SearchParameterInfo("code", "code", SearchParamType.Token);
+            var tokenValue = new TokenSearchValue(system: "http://example.org", code: "123", text: null);
+            var predicate = new SearchParameterPredicateExpression(
+                parameter: param,
+                modifier: new SearchModifier(SearchModifierCode.Text),
+                comparator: SearchComparator.Eq,
+                componentIndex: null,
+                value: tokenValue);
+
+            // Act & Assert
+            var ex = Assert.Throws<InvalidOperationException>(() =>
+                LegacyExpressionLowerer.Instance.Lower(predicate));
+            Assert.Contains("Text", ex.Message);
+            Assert.Contains("TokenSearchValue", ex.Message);
+        }
+
+        /// <summary>
+        /// A Text-modifier predicate with a raw text value containing escape sequences should be
+        /// preserved exactly through the lowering pass, including escape sequences.
+        /// </summary>
+        [Fact]
+        public void GivenSemanticTokenTextWithEscapes_WhenLowered_EscapesArePreserved()
+        {
+            // Arrange
+            const string rawTextWithEscapes = @"test\,value\$other";
+            var param = new SearchParameterInfo("code", "code", SearchParamType.Token);
+            var tokenValue = new TokenSearchValue(system: null, code: null, text: rawTextWithEscapes);
+            var predicate = new SearchParameterPredicateExpression(
+                parameter: param,
+                modifier: new SearchModifier(SearchModifierCode.Text),
+                comparator: SearchComparator.Eq,
+                componentIndex: null,
+                value: tokenValue);
+            var wrapper = new SearchParameterExpression(param, predicate);
+
+            // Act
+            var result = LegacyExpressionLowerer.Instance.Lower(wrapper);
+
+            // Assert
+            var spe = Assert.IsType<SearchParameterExpression>(result);
+            var str = Assert.IsType<StringExpression>(spe.Expression);
+            Assert.Equal(rawTextWithEscapes, str.Value);
         }
     }
 }
@@ -415,42 +549,78 @@ using Microsoft.Health.Fhir.ValueSets;
 namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
 {
     /// <summary>
-    /// Lowers semantic search predicates into the field-level expression model used by legacy backends.
+    /// A one-way compatibility boundary that lowers semantic SearchParameterPredicateExpression
+    /// leaves into the legacy field-level expression tree understood by the SQL and Cosmos backends.
+    /// All structural nodes (multiary, chained, not, sort, etc.) are preserved transparently.
+    /// The only special case is the :text modifier on token parameters, because
+    /// SearchValueExpressionBuilderHelper does not accept token-text semantics.
     /// </summary>
     public sealed class LegacyExpressionLowerer : ExpressionRewriter<object>
     {
+        /// <summary>
+        /// Gets the singleton instance of LegacyExpressionLowerer.
+        /// </summary>
+        public static readonly LegacyExpressionLowerer Instance = new LegacyExpressionLowerer();
+
         private LegacyExpressionLowerer()
         {
         }
 
         /// <summary>
-        /// Gets the stateless lowerer instance.
+        /// Lowers all SearchParameterPredicateExpression nodes within the expression tree
+        /// into legacy field-level expression nodes.
         /// </summary>
-        public static LegacyExpressionLowerer Instance { get; } = new LegacyExpressionLowerer();
-
-        /// <summary>
-        /// Lowers a semantic expression tree.
-        /// </summary>
+        /// <param name="expression">The expression tree to lower. Must not be null.</param>
+        /// <returns>An equivalent expression tree containing only legacy field-level nodes.</returns>
+        /// <exception cref="ArgumentNullException">Thrown when expression is null.</exception>
+        /// <exception cref="InvalidOperationException">
+        /// Thrown when a SearchParameterPredicateExpression with the :text modifier violates
+        /// an internal semantic invariant: the parameter type is not Token, the comparator is not Eq,
+        /// or the value is not a TokenSearchValue with a non-null Text property.
+        /// </exception>
         public Expression Lower(Expression expression)
         {
             EnsureArg.IsNotNull(expression, nameof(expression));
-
             return expression.AcceptVisitor(this, context: null);
         }
 
         /// <inheritdoc />
         public override Expression VisitSearchParameterPredicate(SearchParameterPredicateExpression expression, object context)
         {
+            EnsureArg.IsNotNull(expression, nameof(expression));
+
+            // Special case: :text modifier on token parameters.
+            // SearchValueExpressionBuilderHelper does not handle token-text semantics,
+            // so we translate directly to a StartsWith on the TokenText field.
+            // All three invariants must hold; any violation is an internal semantic error.
             if (expression.Modifier?.SearchModifierCode == SearchModifierCode.Text)
             {
+                if (expression.Parameter.Type != SearchParamType.Token)
+                {
+                    throw new InvalidOperationException(
+                        $"Invariant violation: the '{SearchModifierCode.Text}' modifier is only valid on Token " +
+                        $"parameters, but parameter '{expression.Parameter.Code}' has type '{expression.Parameter.Type}'.");
+                }
+
+                if (expression.Comparator != SearchComparator.Eq)
+                {
+                    throw new InvalidOperationException(
+                        $"Invariant violation: the '{SearchModifierCode.Text}' modifier only supports the " +
+                        $"'{SearchComparator.Eq}' comparator, but parameter '{expression.Parameter.Code}' " +
+                        $"uses '{expression.Comparator}'.");
+                }
+
                 if (expression.Value is not TokenSearchValue token || token.Text == null)
                 {
-                    throw new InvalidOperationException("The token :text modifier requires a token text search value.");
+                    throw new InvalidOperationException(
+                        $"Invariant violation: a '{SearchModifierCode.Text}' predicate on parameter " +
+                        $"'{expression.Parameter.Code}' must carry a TokenSearchValue with a non-null Text property.");
                 }
 
                 return Expression.StartsWith(FieldName.TokenText, expression.ComponentIndex, token.Text, true);
             }
 
+            // All other cases are delegated to the authoritative mapping helper.
             return new SearchValueExpressionBuilderHelper().Build(
                 expression.Parameter.Code,
                 expression.Modifier,
@@ -468,7 +638,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
 dotnet test "src\Microsoft.Health.Fhir.Core.UnitTests\Microsoft.Health.Fhir.Core.UnitTests.csproj" --framework net9.0 --filter "FullyQualifiedName~LegacyExpressionLowererTests" --no-restore --verbosity quiet
 ```
 
-Expected: PASS with two tests.
+Expected: PASS with multiple lowerer tests.
 
 - [ ] **Step 5: Commit the lowerer**
 
@@ -622,11 +792,12 @@ public Expression Parse(
 }
 ```
 
-- [ ] **Step 5: Implement semantic parsing**
+- [ ] **Step 5: Implement semantic parsing with input-order validation**
 
 Move the current validation and parsing logic into `ParseSemantic`. Preserve the existing control flow, with these exact substitutions:
 
 1. Keep `:missing` returning `Expression.MissingSearchParameter(searchParameter, isMissing)`.
+
 2. Replace the `:text` field expression with the following semantic predicate. Use the `Text` slot of `TokenSearchValue` so the semantic value remains token-typed and the compatibility lowerer can reproduce the raw legacy field value exactly, including escape sequences.
 
 ```csharp
@@ -638,13 +809,16 @@ outputExpression = new SearchParameterPredicateExpression(
     new TokenSearchValue(system: null, code: null, text: value));
 ```
 
-3. Rename `Build` to `BuildSemantic`, update both call sites, and remove the `SearchValueExpressionBuilderHelper` allocation.
-4. Keep comparator detection before comma splitting exactly where it is today. Only the unsplit single value uses the comparator-stripped `valueSpan`; comma-separated parts are parsed literally, and a comparator on the full value still raises `SearchComparatorNotSupported`.
-5. For a single value, return:
+3. Rename the `Build` method to `BuildSemantic`, and update all call sites. Do not allocate `SearchValueExpressionBuilderHelper`.
+
+4. Keep comparator detection before comma splitting exactly where it is today. Only the unsplit single value uses the comparator-stripped `valueSpan`; comma-separated parts are parsed literally.
+
+5. For a single value, after parsing and target-type-modifier adjustment, **validate before returning**:
 
 ```csharp
 ISearchValue searchValue = parser(valueSpan.ToString());
 searchValue = ApplyTargetTypeModifier(modifier, searchValue);
+ValidateSemanticPredicate(searchParameter, modifier, comparator, searchValue);
 
 return new SearchParameterPredicateExpression(
     searchParameter,
@@ -654,33 +828,44 @@ return new SearchParameterPredicateExpression(
     searchValue);
 ```
 
-6. Replace the current multiple-value branch with:
+6. For multiple values, parse, target-adjust, and **validate each part in input order before constructing the predicate**. This preserves the legacy exception precedence: an earlier value's modifier/comparator validation fails before a later value's parse error.
 
+**:not modifier case:**
 ```csharp
-if (comparator != SearchComparator.Eq)
-{
-    throw new InvalidSearchOperationException(Core.Resources.SearchComparatorNotSupported);
-}
-
 if (modifier?.SearchModifierCode == SearchModifierCode.Not)
 {
+    // Each semantic predicate carries a null modifier so that lowering produces a single
+    // outer Not rather than double negation. Parse then validate each part in input order
+    // (matching legacy behavior) before parsing the next.
     Expression[] expressions = parts.Select(part =>
-        new SearchParameterPredicateExpression(
+    {
+        ISearchValue searchValue = parser(part);
+        ValidateSemanticPredicate(searchParameter, modifier: null, comparator, searchValue);
+
+        return (Expression)new SearchParameterPredicateExpression(
             searchParameter,
             modifier: null,
             comparator,
             componentIndex,
-            parser(part))).ToArray();
+            searchValue);
+    }).ToArray();
 
     return Expression.Not(Expression.Or(expressions));
 }
+```
 
-Expression[] orExpressions = parts.Select(part =>
+**Non-:not multiple-value case:**
+```csharp
+// Parse, target-adjust, then validate each part in input order (matching legacy
+// behavior) before parsing the next. This ensures an earlier value's
+// modifier/comparator validation takes precedence over a later value's parse failure.
+Expression[] expressions = parts.Select(part =>
 {
     ISearchValue searchValue = parser(part);
     searchValue = ApplyTargetTypeModifier(modifier, searchValue);
+    ValidateSemanticPredicate(searchParameter, modifier, comparator, searchValue);
 
-    return new SearchParameterPredicateExpression(
+    return (Expression)new SearchParameterPredicateExpression(
         searchParameter,
         modifier,
         comparator,
@@ -688,19 +873,131 @@ Expression[] orExpressions = parts.Select(part =>
         searchValue);
 }).ToArray();
 
-return Expression.Or(orExpressions);
+return Expression.Or(expressions);
 ```
 
 7. Keep the existing local `ApplyTargetTypeModifier` function unchanged.
-8. Keep the final outer wrapper:
+
+8. Keep the final outer wrapper: `return Expression.SearchParameter(searchParameter, outputExpression);`
+
+9. **Add the semantic validation method** (small, explicit boundary):
 
 ```csharp
-return Expression.SearchParameter(searchParameter, outputExpression);
+/// <summary>
+/// Validates that the modifier/comparator/value-type combination is supported, throwing the same
+/// InvalidSearchOperationException messages the legacy mapping would produce. This is a small,
+/// explicit semantic validation boundary so the parser does not depend on legacy lowering for
+/// input-order exception precedence. LegacyExpressionLowerer remains defensively validating.
+/// </summary>
+private static void ValidateSemanticPredicate(
+    SearchParameterInfo searchParameter,
+    SearchModifier modifier,
+    SearchComparator comparator,
+    ISearchValue searchValue)
+{
+    switch (searchValue)
+    {
+        case DateTimeSearchValue:
+        case NumberSearchValue:
+        case QuantitySearchValue:
+            if (modifier != null)
+            {
+                ThrowModifierNotSupported(modifier, searchParameter.Code);
+            }
+            break;
+
+        case ReferenceSearchValue:
+            if (modifier != null && modifier.SearchModifierCode != SearchModifierCode.Type)
+            {
+                ThrowModifierNotSupported(modifier, searchParameter.Code);
+            }
+            EnsureOnlyEqualComparatorIsSupported(comparator);
+            break;
+
+        case StringSearchValue:
+            EnsureOnlyEqualComparatorIsSupported(comparator);
+            if (modifier != null &&
+                modifier.SearchModifierCode != SearchModifierCode.Exact &&
+                modifier.SearchModifierCode != SearchModifierCode.Contains)
+            {
+                ThrowModifierNotSupported(modifier, searchParameter.Code);
+            }
+            break;
+
+        case TokenSearchValue:
+            EnsureOnlyEqualComparatorIsSupported(comparator);
+            if (modifier != null && modifier.SearchModifierCode != SearchModifierCode.Not)
+            {
+                ThrowModifierNotSupported(modifier, searchParameter.Code);
+            }
+            break;
+
+        case UriSearchValue:
+            if (modifier != null &&
+                modifier.SearchModifierCode != SearchModifierCode.Above &&
+                modifier.SearchModifierCode != SearchModifierCode.Below)
+            {
+                ThrowModifierNotSupported(modifier, searchParameter.Code);
+            }
+            break;
+    }
+}
+
+private static void EnsureOnlyEqualComparatorIsSupported(SearchComparator comparator)
+{
+    if (comparator != SearchComparator.Eq)
+    {
+        throw new InvalidSearchOperationException(Core.Resources.OnlyEqualComparatorIsSupported);
+    }
+}
+
+private static void ThrowModifierNotSupported(SearchModifier modifier, string searchParameterName)
+{
+    throw new InvalidSearchOperationException(
+        string.Format(CultureInfo.InvariantCulture, Core.Resources.ModifierNotSupported, modifier, searchParameterName));
+}
 ```
 
 Do not alter `:missing` validation, token `:text` validation, composite arity validation, reference target-type validation, or exception messages. For composites, the existing `Build`-to-`BuildSemantic` call-site change ensures each inner predicate receives the resolved component `SearchParameterInfo` and zero-based component index while the outer `SearchParameterExpression` remains unchanged.
 
-- [ ] **Step 6: Prove semantic-to-legacy equivalence for representative values**
+- [ ] **Step 6: Add a regression test for input-order semantic validation**
+
+Add this test to `SearchValueExpressionBuilderTests` to verify that modifier/comparator validation takes precedence over later parse failures:
+
+```csharp
+[Fact]
+public void GivenNumberWithUnsupportedContainsModifier_WhenMultipleValuesIncludingMalformed_ThenValidationExceptionPrecedesParseException()
+{
+    // Arrange: Number parameter with unsupported :Contains modifier and multiple values
+    // where the first is valid but the second is malformed. The modifier should fail
+    // before the parser error on the second value.
+    SearchParameterInfo parameter = CreateSearchParameter(SearchParamType.Number);
+    var modifier = new SearchModifier(SearchModifierCode.Contains);
+
+    // Act & Assert: the :Contains modifier on Number should fail during validation,
+    // not during parsing of the second (malformed) value "bad".
+    var ex = Assert.Throws<InvalidSearchOperationException>(() =>
+        _parser.ParseSemantic(parameter, modifier, "1,bad"));
+
+    Assert.Contains("Contains", ex.Message);  // Modifier validation error, not parse error
+}
+
+[Fact]
+public void GivenNumberWithUnsupportedContainsModifier_WhenMultipleValuesIncludingMalformed_LegacyParsePropagatesValidationError()
+{
+    // Arrange: verify that the legacy Parse API also validates in input order
+    SearchParameterInfo parameter = CreateSearchParameter(SearchParamType.Number);
+    var modifier = new SearchModifier(SearchModifierCode.Contains);
+
+    // Act & Assert: the modifier should fail, not the parse error on "bad"
+    var ex = Assert.Throws<InvalidSearchOperationException>(() =>
+        _parser.Parse(parameter, modifier, "1,bad"));
+
+    Assert.Contains("Contains", ex.Message);
+}
+```
+
+- [ ] **Step 7: Prove semantic-to-legacy equivalence for representative values**
 
 Add this theory to `SearchValueExpressionBuilderTests`:
 
@@ -730,7 +1027,7 @@ public void GivenSupportedValue_WhenSemanticExpressionIsLowered_ThenItEqualsTheL
 }
 ```
 
-- [ ] **Step 7: Run all existing search-value expression tests**
+- [ ] **Step 8: Run all existing search-value expression tests**
 
 ```powershell
 dotnet test "src\Microsoft.Health.Fhir.R4.Core.UnitTests\Microsoft.Health.Fhir.R4.Core.UnitTests.csproj" --framework net9.0 --filter "FullyQualifiedName~SearchValueExpressionBuilderTests" --no-restore --verbosity quiet
@@ -738,7 +1035,7 @@ dotnet test "src\Microsoft.Health.Fhir.R4.Core.UnitTests\Microsoft.Health.Fhir.R
 
 Expected: all pre-existing tests and new semantic tests pass. Existing tests prove the legacy `Parse` output is unchanged.
 
-- [ ] **Step 8: Run the same tests for every FHIR version**
+- [ ] **Step 9: Run the same tests for every FHIR version**
 
 ```powershell
 dotnet test "src\Microsoft.Health.Fhir.Stu3.Core.UnitTests\Microsoft.Health.Fhir.Stu3.Core.UnitTests.csproj" --framework net9.0 --filter "FullyQualifiedName~SearchValueExpressionBuilderTests" --no-restore --verbosity quiet
@@ -749,7 +1046,7 @@ dotnet test "src\Microsoft.Health.Fhir.R5.Core.UnitTests\Microsoft.Health.Fhir.R
 
 Expected: PASS for STU3, R4, R4B, and R5.
 
-- [ ] **Step 9: Commit semantic-first parsing**
+- [ ] **Step 10: Commit semantic-first parsing**
 
 ```powershell
 git add "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\Parsers\ISearchParameterExpressionParser.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\Parsers\SearchParameterExpressionParser.cs" "src\Microsoft.Health.Fhir.Shared.Core.UnitTests\Features\Search\Expressions\Parsers\SearchValueExpressionBuilderTests.cs"
@@ -776,7 +1073,7 @@ During the strangler migration, `LegacyExpressionLowerer` immediately converts s
 - [ ] **Step 2: Format changed C# files and check the diff**
 
 ```powershell
-dotnet format "Microsoft.Health.Fhir.sln" --no-restore --include "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\SearchParameterPredicateExpression.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\LegacyExpressionLowerer.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\IExpressionVisitor.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\DefaultExpressionVisitor.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\ExpressionRewriter.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\Parsers\ISearchParameterExpressionParser.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\Parsers\SearchParameterExpressionParser.cs" "src\Microsoft.Health.Fhir.Core.UnitTests\Features\Search\Expressions\LegacyExpressionLowererTests.cs" "src\Microsoft.Health.Fhir.Shared.Core.UnitTests\Features\Search\Expressions\Parsers\SearchValueExpressionBuilderTests.cs"
+dotnet format "Microsoft.Health.Fhir.sln" --no-restore --include "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\SearchParameterPredicateExpression.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\LegacyExpressionLowerer.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\IExpressionVisitor.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\ExpressionRewriter.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\Parsers\ISearchParameterExpressionParser.cs" "src\Microsoft.Health.Fhir.Core\Features\Search\Expressions\Parsers\SearchParameterExpressionParser.cs" "src\Microsoft.Health.Fhir.Core.UnitTests\Features\Search\Expressions\LegacyExpressionLowererTests.cs" "src\Microsoft.Health.Fhir.Shared.Core.UnitTests\Features\Search\Expressions\Parsers\SearchValueExpressionBuilderTests.cs"
 git --no-pager diff --check
 ```
 
@@ -821,9 +1118,16 @@ git commit -m "Document semantic search expression lowering" -m "Co-authored-by:
 
 Plan 1 is complete only when:
 
-- `ParseSemantic` preserves FHIR comparator, modifier, normalized value, SearchParameter identity, and composite position;
-- `Parse` remains the same compatibility API and returns the same legacy expression shapes;
+- `SearchParameterPredicateExpression` captures FHIR comparator, modifier, normalized value, SearchParameter identity, and optional composite position;
+- `ParseSemantic` constructs semantic expressions with `SearchParameterPredicateExpression` leaves;
+- `Parse` remains the same compatibility API and returns the same legacy expression shapes via `LegacyExpressionLowerer.Instance.Lower(ParseSemantic(...))`;
 - `SearchValueExpressionBuilderHelper` is invoked only by `LegacyExpressionLowerer`;
+- semantic validation (`ValidateSemanticPredicate`) is performed in input order during `ParseSemantic`, ensuring modifier/comparator validation precedes later value parse errors;
+- :missing remains a `MissingSearchParameterExpression`, not a `SearchParameterPredicateExpression`;
+- `ExpressionRewriter` preserves semantic leaves via identity override of `VisitSearchParameterPredicate`;
+- `DefaultExpressionVisitor` does not override `VisitSearchParameterPredicate`; direct legacy visitors rely on the interface guard that throws `InvalidOperationException`;
+- a regression test verifies that a minimal visitor without explicit semantic-leaf handling fails at runtime when a semantic predicate is dispatched;
+- `LegacyExpressionLowerer` defensively validates the three token-text invariants (Token type, Eq comparator, TokenSearchValue with non-null Text);
 - no raw query syntax model is added;
 - SQL Server and Cosmos code remain unchanged;
 - existing parser tests pass for STU3, R4, R4B, and R5;
