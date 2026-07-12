@@ -27,7 +27,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
     /// history-verb construction logic onto Ignixa's <see cref="BundleJsonNode"/> node family instead of
     /// Firely POCOs, producing an <see cref="Resources.Bundle.IgnixaRawBundle"/> wrapped in a
     /// <see cref="ResourceElement"/>. Every decision this class makes must match <see cref="BundleFactory"/>
-    /// exactly -- this is a port, not a redesign. Not wired into DI; unreachable in production.
+    /// exactly -- this is a port, not a redesign. Selected in place of <see cref="BundleFactory"/> for
+    /// <see cref="FhirSdkMode.Ignixa"/>/<see cref="FhirSdkMode.Hybrid"/> by <c>SearchModule</c>.
     /// </summary>
     public class IgnixaBundleFactory : IBundleFactory
     {
