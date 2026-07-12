@@ -92,6 +92,13 @@ public class IgnixaReferenceScannerTests
         // subjectReference, its nested identifier.assigner, and the display-only extension value --
         // three Reference-typed elements total. Neither Expression.reference (top-level extension or
         // action.condition.expression) is a Reference element and neither is yielded.
+        //
+        // This count assertion is also the guard-dependent tripwire for the IgnixaReferenceScanner
+        // phantom-element workaround (mutation-verified: fails if `!element.HasPrimitiveValue` is
+        // removed from the scanner, because the phantom "reference" leaf under subjectReference would
+        // then be yielded as a fourth, null-valued handle). See
+        // GivenReferenceWithPrimitiveExtensionOnItsOwnReferenceString_WhenScanned_ThenNotMistakenForNestedReference
+        // and gap #2 in docs/features/sdk-migration/ignixa-upstream-gaps.md for the full mechanism.
         Assert.Equal(3, handles.Count);
         Assert.Contains("Practitioner/prac1", values);
         Assert.Contains("Organization/org2", values);
@@ -104,21 +111,40 @@ public class IgnixaReferenceScannerTests
     [Fact]
     public void GivenReferenceWithPrimitiveExtensionOnItsOwnReferenceString_WhenScanned_ThenNotMistakenForNestedReference()
     {
-        // Regression test for a confirmed Ignixa schema-derivation quirk: Reference's own "reference"
-        // field (a plain string) is itself schema-typed InstanceType=="Reference" -- apparently a
-        // case-insensitive collision in the schema's type registry between the field name "reference"
-        // and the datatype name "Reference" (schema.GetTypeDefinition("reference") returns the
-        // Reference type). Because the scanner recurses into Reference nodes (for
-        // Reference.identifier.assigner), it would otherwise also visit and misidentify this leaf.
-        // The scanner's `!HasPrimitiveValue` guard must filter it out: a real Reference is always
-        // object-valued, never primitive-valued.
+        // Regression test for a confirmed Ignixa schema-derivation quirk in SchemaAwareElement.Children()
+        // (Ignixa.Serialization, SDK 0.6.7): a case-insensitive "recursive BackboneElement" heuristic --
+        // meant for genuine self-nesting types like QuestionnaireResponse.item.item -- compares a
+        // child's field name against the parent type's name using StringComparison.OrdinalIgnoreCase.
+        // For a Reference-typed parent, the child field literally named "reference" case-insensitively
+        // matches the type name "Reference", so the child is wrongly stamped with InstanceType ==
+        // "Reference" (the parent's own type) instead of "string". This is NOT caused by
+        // ISchema.GetTypeDefinition's case-insensitive type registry -- that is a separate, real, but
+        // non-causal latent defect on this path (Children() never performs a bare-name
+        // GetTypeDefinition("reference") lookup here); see gap #2 in
+        // docs/features/sdk-migration/ignixa-upstream-gaps.md for both.
+        //
+        // Because the scanner recurses into Reference nodes (for Reference.identifier.assigner), it
+        // would otherwise also visit and misidentify this leaf. The scanner's `!HasPrimitiveValue`
+        // guard must filter it out: a real Reference is always object-valued, never primitive-valued.
         var root = ParseToElement(PlanDefinitionAdversarialJson, _r4Schema);
 
-        var handles = IgnixaReferenceScanner.EnumerateReferences(root).ToList();
+        // Direct probe: pins the underlying SDK behavior itself, so this test actually fails when the
+        // upstream SchemaAwareElement.Children() recursion heuristic is fixed (at which point remove
+        // this pin, the guard becomes defensive-only, and the gap row/this comment should be updated).
+        // This assertion is independent of any handle/Reference-value assertion style -- unlike
+        // `h.Reference == "..."`, it can't silently stop detecting the phantom just because the
+        // phantom's Reference property happens to read as null.
+        IElement subject = root.Children("subject").Single();
+        IElement phantomReferenceStringElement = subject.Children("reference").Single();
+        Assert.Equal("Reference", phantomReferenceStringElement.InstanceType);
 
-        // Exactly one handle should carry "Practitioner/prac1" -- the genuine subjectReference --
-        // not two (which would happen if the mistyped "reference" leaf were also yielded).
-        Assert.Single(handles, h => h.Reference == "Practitioner/prac1");
+        // Behavioral assertion: proves the guard itself matters to the scanner's output (mutation-
+        // verified -- fails with the guard removed, passes with it restored). A
+        // `Assert.Single(handles, h => h.Reference == "Practitioner/prac1")`-style assertion does NOT
+        // work here: the phantom's `.Reference` reads null whether or not it is yielded, so only a
+        // count-based assertion actually depends on the guard's presence.
+        var handles = IgnixaReferenceScanner.EnumerateReferences(root).ToList();
+        Assert.Equal(3, handles.Count);
     }
 
     [Fact]

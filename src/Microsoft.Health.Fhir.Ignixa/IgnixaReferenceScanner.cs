@@ -24,19 +24,36 @@ namespace Microsoft.Health.Fhir.Ignixa;
 /// <para>
 /// Also guards against a confirmed Ignixa schema-derivation quirk: the <c>Reference</c> complex
 /// type's own <c>reference</c> field (a plain <c>string</c>) is itself schema-typed as
-/// <c>InstanceType == "Reference"</c> -- apparently a case-insensitive collision inside the schema's
-/// type registry between the field name "reference" and the datatype name "Reference"
-/// (<c>ISchema.GetTypeDefinition("reference")</c> returns the <c>Reference</c> type definition).
-/// Since this scanner deliberately recurses into Reference nodes (to find e.g.
-/// <c>Reference.identifier.assigner</c>), every Reference's own "reference" leaf would otherwise be
-/// visited and misidentified as a nested Reference too.
+/// <c>InstanceType == "Reference"</c>. The cause is <c>SchemaAwareElement.Children()</c>'s
+/// case-insensitive "recursive BackboneElement" heuristic (in Ignixa.Serialization) -- meant for
+/// genuine self-nesting types like <c>QuestionnaireResponse.item.item</c> -- which compares a
+/// child's field name against the parent type's name using
+/// <c>StringComparison.OrdinalIgnoreCase</c>. For a <c>Reference</c>-typed parent, the child field
+/// literally named "reference" matches the type name "Reference" case-insensitively, so the child
+/// is wrongly stamped with the parent's own type. This is a distinct latent SDK defect from
+/// <c>ISchema.GetTypeDefinition</c>'s case-insensitive type registry (also real, but not the cause
+/// here -- <c>Children()</c> never performs a bare-name lookup for this child; see gap #2 in
+/// docs/features/sdk-migration/ignixa-upstream-gaps.md for both). Since this scanner deliberately
+/// recurses into Reference nodes (to find e.g. <c>Reference.identifier.assigner</c>), every
+/// Reference's own "reference" leaf would otherwise be visited and misidentified as a nested
+/// Reference too.
 /// </para>
 /// <para>
 /// A genuine Reference is always a JSON object (<see cref="IElement.HasPrimitiveValue"/> is
-/// <c>false</c>); the mistyped "reference" leaf is always a JSON string primitive
-/// (<see cref="IElement.HasPrimitiveValue"/> is <c>true</c>). Requiring
-/// <c>!HasPrimitiveValue</c> excludes the false match using another schema-derived structural fact
-/// -- not the property name -- keeping the type-not-name disambiguation principle intact.
+/// <c>false</c>); the common phantom shape (mistyped "reference" leaf holding a plain string value)
+/// is JSON-string-valued (<see cref="IElement.HasPrimitiveValue"/> is <c>true</c>). Requiring
+/// <c>!HasPrimitiveValue</c> excludes that shape using another schema-derived structural fact -- not
+/// the property name -- keeping the type-not-name disambiguation principle intact.
+/// </para>
+/// <para>
+/// Residual case: for extension-only Reference input (a <c>reference</c> string absent but a
+/// primitive extension present via the <c>_reference</c> shadow property, e.g.
+/// <c>"subjectReference": {"_reference": {"extension": [...]}}</c> -- valid FHIR), the phantom
+/// child has no primitive value and passes this guard too, so it is still yielded, with
+/// <see cref="IgnixaReferenceHandle.Reference"/> reading as <c>null</c>. This is currently harmless
+/// because no consumer calls <see cref="IgnixaReferenceHandle.SetReference"/> without first checking
+/// <c>Reference != null</c>; a future unconditional caller of <c>SetReference</c> would corrupt the
+/// <c>_reference</c> shadow object, so this should be revisited if that pattern appears.
 /// </para>
 /// </remarks>
 public static class IgnixaReferenceScanner
