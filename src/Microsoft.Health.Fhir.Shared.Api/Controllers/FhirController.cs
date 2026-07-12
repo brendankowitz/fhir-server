@@ -722,9 +722,9 @@ namespace Microsoft.Health.Fhir.Api.Controllers
         [Route("", Name = RouteNames.PostBundle)]
         [AuditEventType(AuditEventSubType.BundlePost)]
         [TypeFilter(typeof(BundleEndpointMetricEmitterAttribute))]
-        public async Task<IActionResult> BatchAndTransactions([FromBody] Resource bundle)
+        public async Task<IActionResult> BatchAndTransactions([FromBody] ResourceElement bundle)
         {
-            ResourceElement bundleResponse = await _mediator.PostBundle(bundle.ToResourceElement(), HttpContext.RequestAborted);
+            ResourceElement bundleResponse = await _mediator.PostBundle(bundle, HttpContext.RequestAborted);
 
             return FhirResult.Create(bundleResponse);
         }

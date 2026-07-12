@@ -43,6 +43,7 @@ using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.Core.Messages.Bundle;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Core.UnitTests.Features.Context;
+using Microsoft.Health.Fhir.Ignixa;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Fhir.ValueSets;
 using Microsoft.Health.Test.Utilities;
@@ -161,6 +162,61 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Resources.Bundle
             };
 
             var bundleRequest = new BundleRequest(bundle.ToResourceElement());
+
+            BundleResponse bundleResponse = await _bundleHandler.Handle(bundleRequest, CancellationToken.None);
+
+            var bundleResource = bundleResponse.Bundle.ToPoco<Hl7.Fhir.Model.Bundle>();
+            Assert.Equal(BundleType.BatchResponse, bundleResource.Type);
+            Assert.Empty(bundleResource.Entry);
+
+            Assert.True(bundleResponse.Info.BundleType == BundleType.Batch, "BundleType is different than the expected.");
+            Assert.True(bundleResponse.Info.ProcessingLogic == BundleProcessingLogic.Sequential, "BundleProcessingLogic is different than the expected.");
+            Assert.True(bundleResponse.Info.ExecutionTime.TotalMilliseconds > 0, "ExecutionTime is not higher than zero.");
+        }
+
+        [Fact]
+        public async Task GivenAFirelyBackedEmptyBatchBundle_WhenProcessed_ThenNativeBranchIsNotTaken()
+        {
+            // Firely-mode requests are built from a POCO via ToResourceElement(), so GetIgnixaNode()
+            // must be null and Handle() must take the "return await HandlePocoAsync(...)" fallthrough
+            // branch, not the GetIgnixaNode()-gated one.
+            var bundle = new Hl7.Fhir.Model.Bundle
+            {
+                Type = BundleType.Batch,
+            };
+
+            ResourceElement bundleElement = bundle.ToResourceElement();
+            Assert.Null(bundleElement.GetIgnixaNode());
+
+            var bundleRequest = new BundleRequest(bundleElement);
+
+            BundleResponse bundleResponse = await _bundleHandler.Handle(bundleRequest, CancellationToken.None);
+
+            var bundleResource = bundleResponse.Bundle.ToPoco<Hl7.Fhir.Model.Bundle>();
+            Assert.Equal(BundleType.BatchResponse, bundleResource.Type);
+            Assert.Empty(bundleResource.Entry);
+        }
+
+        [Fact]
+        public async Task GivenAnIgnixaBackedEmptyBatchBundle_WhenProcessed_ThenNativeBranchIsTakenAndBehavesIdenticallyToThePocoPath()
+        {
+            // Ignixa/Hybrid-mode requests carry a ResourceJsonNode, so GetIgnixaNode() must be non-null
+            // and Handle() must take the native branch. That branch is currently a no-op scaffold -- it
+            // delegates to the same HandlePocoAsync path as the Firely branch -- so the response must be
+            // identical to GivenAFirelyBackedEmptyBatchBundle_WhenProcessed_ThenNativeBranchIsNotTaken.
+            var bundle = new Hl7.Fhir.Model.Bundle
+            {
+                Type = BundleType.Batch,
+            };
+
+            var serializer = new IgnixaJsonSerializer();
+            var schemaContext = new IgnixaSchemaContext(ModelInfoProvider.Instance);
+            var ignixaElement = new IgnixaResourceElement(serializer.Parse(bundle.ToJson()), schemaContext.Schema);
+            ResourceElement ignixaBackedBundle = ignixaElement.ToResourceElement();
+
+            Assert.NotNull(ignixaBackedBundle.GetIgnixaNode());
+
+            var bundleRequest = new BundleRequest(ignixaBackedBundle);
 
             BundleResponse bundleResponse = await _bundleHandler.Handle(bundleRequest, CancellationToken.None);
 

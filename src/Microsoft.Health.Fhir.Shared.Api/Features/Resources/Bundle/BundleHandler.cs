@@ -204,12 +204,23 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
                 throw new UnauthorizedFhirActionException();
             }
 
+            if (request.Bundle.GetIgnixaNode() != null)
+            {
+                // Native path -- Tasks 3-6 build this out. For now, no-op: convert to POCO exactly
+                // like the existing path, so behavior is unchanged while the scaffold is proven out.
+                return await HandlePocoAsync(request.Bundle.ToPoco<Hl7.Fhir.Model.Bundle>(), cancellationToken);
+            }
+
+            return await HandlePocoAsync(request.Bundle.ToPoco<Hl7.Fhir.Model.Bundle>(), cancellationToken);
+        }
+
+        private async Task<BundleResponse> HandlePocoAsync(Hl7.Fhir.Model.Bundle bundleResource, CancellationToken cancellationToken)
+        {
             _originalFhirRequestContext = _fhirRequestContextAccessor.RequestContext;
             try
             {
                 Stopwatch stopwatch = Stopwatch.StartNew();
 
-                var bundleResource = request.Bundle.ToPoco<Hl7.Fhir.Model.Bundle>();
                 _bundleType = bundleResource.Type;
 
                 // Retrieve bundle processing logic.
