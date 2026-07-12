@@ -213,16 +213,17 @@ public class IgnixaResourceValidatorTests
     }
 
     // -------------------------------------------------------------------------------------------------
-    // Half B evidence: conformance checks for CodeSystem/ValueSet are registered in Ignixa's profile
-    // (Full) tier and do NOT execute at the Compatibility depth IgnixaResourceValidator runs at. These
-    // tests validate an intentionally-invalid instance through the exact schema-build/validate path the
-    // validator uses, at both Compatibility and Full depth, and assert the conformance issue only
-    // surfaces at Full. That is the evidence for keeping CodeSystem and ValueSet on the exclusion list:
-    // removing them would let these invalid instances pass, since the validator never runs Full depth.
+    // Half B evidence: as of Ignixa 0.6.19 (closing ignixa-fhir#320), the conformance checks for
+    // CodeSystem/ValueSet now execute at the Compatibility depth IgnixaResourceValidator runs at, not
+    // just at Full. These tests validate an intentionally-invalid instance through the exact
+    // schema-build/validate path the validator uses, at both Compatibility and Full depth, and assert
+    // the conformance issue surfaces at both. That is the evidence for removing CodeSystem and ValueSet
+    // from the exclusion list: Ignixa's own Compatibility-depth validation now catches these invalid
+    // instances without falling back to Firely.
     // -------------------------------------------------------------------------------------------------
 
     [Fact]
-    public async Task GivenInvalidCodeSystem_WhenValidatingViaIgnixaSchema_ThenConformanceIssueOnlySurfacesAtFullDepth()
+    public async Task GivenInvalidCodeSystem_WhenValidatingViaIgnixaSchema_ThenConformanceIssueSurfacesAtCompatibilityDepth()
     {
         // Arrange - concept.property "effectiveDate" is declared dateTime but carries a valueBoolean,
         // which CodeSystemPropertyTypeCheck (csp-1) is designed to reject.
@@ -234,13 +235,13 @@ public class IgnixaResourceValidatorTests
         var compatibility = schema.Validate(element, CompatibilitySettings(), new ValidationState().WithInstance("CodeSystem", node.Id));
         var full = schema.Validate(element, FullSettings(), new ValidationState().WithInstance("CodeSystem", node.Id));
 
-        // Assert - Ignixa catches it, but only at Full depth (which the validator does not use).
+        // Assert - Ignixa now catches it at both Compatibility depth (which the validator uses) and Full depth.
         Assert.Contains(full.Issues, i => i.Message.Contains("invalid type"));
-        Assert.DoesNotContain(compatibility.Issues, i => i.Message.Contains("invalid type"));
+        Assert.Contains(compatibility.Issues, i => i.Message.Contains("invalid type"));
     }
 
     [Fact]
-    public async Task GivenInvalidValueSet_WhenValidatingViaIgnixaSchema_ThenConformanceIssueOnlySurfacesAtFullDepth()
+    public async Task GivenInvalidValueSet_WhenValidatingViaIgnixaSchema_ThenConformanceIssueSurfacesAtCompatibilityDepth()
     {
         // Arrange - compose.include.system is a fragment (#local), not an absolute URI, which
         // ValueSetIncludeSystemCheck (vs-1) is designed to reject.
@@ -252,9 +253,9 @@ public class IgnixaResourceValidatorTests
         var compatibility = schema.Validate(element, CompatibilitySettings(), new ValidationState().WithInstance("ValueSet", node.Id));
         var full = schema.Validate(element, FullSettings(), new ValidationState().WithInstance("ValueSet", node.Id));
 
-        // Assert - Ignixa catches it, but only at Full depth (which the validator does not use).
+        // Assert - Ignixa now catches it at both Compatibility depth (which the validator uses) and Full depth.
         Assert.Contains(full.Issues, i => i.Message.Contains("must be absolute"));
-        Assert.DoesNotContain(compatibility.Issues, i => i.Message.Contains("must be absolute"));
+        Assert.Contains(compatibility.Issues, i => i.Message.Contains("must be absolute"));
     }
 
     private CreateResourceValidator CreateCreateResourceValidator()

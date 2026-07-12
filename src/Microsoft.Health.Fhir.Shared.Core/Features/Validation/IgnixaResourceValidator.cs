@@ -60,14 +60,17 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
         /// <remarks>
         /// Evidence bar for removing a type from this list: Ignixa must reject an intentionally-invalid
         /// instance of the type through the exact validation path this class uses (schema.Validate at
-        /// <see cref="ValidationDepth.Compatibility"/>). Ignixa 0.6.7 (PR #310) ships conformance checks
+        /// <see cref="ValidationDepth.Compatibility"/>). Ignixa 0.6.7 (PR #310) shipped conformance checks
         /// for CodeSystem (CodeSystemPropertyTypeCheck) and ValueSet (ValueSetIncludeSystemCheck,
-        /// ValueSetFilterCheck), but those checks are registered in the profile (Full) tier and are NOT
-        /// executed at Compatibility depth (see ValidationSchema.Validate / StructureDefinitionSchemaBuilder).
-        /// Verified by IgnixaResourceValidatorTests' negative conformance tests: invalid CodeSystem/ValueSet
-        /// instances are caught at Full depth but pass at Compatibility depth. CodeSystem and ValueSet
-        /// therefore stay on this list; StructureDefinition and the remaining types predate 0.6.7 and have
-        /// no conformance evidence backing removal. See docs/features/sdk-migration/investigations/validation-sdk-dependency.md.
+        /// ValueSetFilterCheck), but those checks were registered in the profile (Full) tier and did NOT
+        /// execute at Compatibility depth -- tracked as ignixa-fhir#320 in
+        /// docs/features/sdk-migration/ignixa-upstream-gaps.md. Ignixa 0.6.19 fixed ValidationSchema.Validate
+        /// so these checks (and CodeSystemSupplementContentCheck) now run at Compatibility depth too, closing
+        /// the gap. Verified by IgnixaResourceValidatorTests: invalid CodeSystem/ValueSet instances are now
+        /// caught at Compatibility depth through the exact schema-build/validate path this validator uses.
+        /// CodeSystem and ValueSet therefore no longer need the fallback and were removed from this list.
+        /// StructureDefinition and the remaining types predate 0.6.7 and have no equivalent conformance
+        /// evidence backing their removal. See docs/features/sdk-migration/investigations/validation-sdk-dependency.md.
         /// </remarks>
         private static readonly HashSet<string> ConformanceResourceTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -77,8 +80,6 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
             "SearchParameter",
             "CompartmentDefinition",
             "CapabilityStatement",
-            "CodeSystem",
-            "ValueSet",
             "ConceptMap",
             "NamingSystem",
             "TerminologyCapabilities",
