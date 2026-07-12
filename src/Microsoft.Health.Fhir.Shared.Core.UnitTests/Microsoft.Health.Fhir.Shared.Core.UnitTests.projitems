@@ -139,6 +139,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\SearchValues\ReferenceSearchValueTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Validation\FhirPrimitiveTypes\AttributeValidatorTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Validation\FhirPrimitiveTypes\IdValidatorTests.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Features\Validation\IgnixaResourceValidatorTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Validation\Narratives\NarrativeDataTestBase.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Validation\Narratives\NarrativeHtmlSanitizerTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Validation\Narratives\NarrativeValidatorTests.cs" />

@@ -105,6 +105,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\SearchResourceHistoryHandler.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Validation\ModelAttributeValidator.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Validation\IgnixaResourceValidator.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Features\Validation\DateTimeOffsetLeniency.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)FhirExtensions.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)VersionSpecificModelInfoProvider.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Behaviors\ListSearchPipeBehavior.cs" />

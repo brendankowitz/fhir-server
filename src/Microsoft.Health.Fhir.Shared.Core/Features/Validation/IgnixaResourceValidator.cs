@@ -7,6 +7,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using EnsureThat;
 using Ignixa.Abstractions;
 using Ignixa.Serialization.SourceNodes;
@@ -43,6 +44,14 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
     /// </remarks>
     public sealed class IgnixaResourceValidator : IModelAttributeValidator
     {
+        /// <summary>
+        /// Matches Ignixa's dateTime rejection message, e.g. "Invalid value for 'effectiveDateTime':
+        /// value '1980-05-11T16:32:15' is not a valid FHIR dateTime", to recover the rejected literal.
+        /// </summary>
+        private static readonly Regex DateTimeIssueLiteralRegex = new Regex(
+            @"value '(?<literal>[^']+)' is not a valid FHIR dateTime",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
         /// <summary>
         /// Conformance resource types that should use fallback validation.
         /// These resources have complex nested types (ElementDefinition, etc.) that
@@ -181,11 +190,29 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
 
             // Execute validation
             var result = schema.Validate(element, _validationSettings, state);
+            var errorIssues = result.Issues.Where(i => i.Severity == IssueSeverity.Error || i.Severity == IssueSeverity.Fatal).ToList();
+
+            if (!result.IsValid && errorIssues.Count > 0 && errorIssues.All(i => IsToleratedMissingDateTimeOffset(i.Message)))
+            {
+                // Every reported failure is the one dateTime shape the FHIR server tolerates for legacy
+                // data: a time-of-day present with the mandatory timezone offset missing (e.g.
+                // "1980-05-11T16:32:15"). Ignixa's own schema validation is spec-correct to reject this,
+                // but ModelAttributeValidator already grants this exact carve-out for non-Ignixa
+                // resources - honor the same leniency here instead of failing resources that would
+                // otherwise pass through the Firely fallback path. Any other failure still fails below,
+                // including a mix of this issue plus something else.
+                if (_skipFallbackOnSuccess)
+                {
+                    return true;
+                }
+
+                return _fallbackValidator.TryValidate(value, validationResults, recurse);
+            }
 
             // Convert issues to ValidationResult if collection is provided
             if (validationResults != null)
             {
-                foreach (var issue in result.Issues.Where(i => i.Severity == IssueSeverity.Error || i.Severity == IssueSeverity.Fatal))
+                foreach (var issue in errorIssues)
                 {
                     var memberNames = string.IsNullOrEmpty(issue.Path)
                         ? null
@@ -206,6 +233,21 @@ namespace Microsoft.Health.Fhir.Core.Features.Validation
             }
 
             return _fallbackValidator.TryValidate(value, validationResults, recurse);
+        }
+
+        /// <summary>
+        /// Determines whether an Ignixa validation issue message is exactly the tolerated
+        /// missing-timezone-offset-with-time-present dateTime shape (see <see cref="DateTimeOffsetLeniency"/>).
+        /// </summary>
+        private static bool IsToleratedMissingDateTimeOffset(string message)
+        {
+            if (string.IsNullOrEmpty(message))
+            {
+                return false;
+            }
+
+            var match = DateTimeIssueLiteralRegex.Match(message);
+            return match.Success && DateTimeOffsetLeniency.IsMissingOffsetWithTimePresent(match.Groups["literal"].Value);
         }
 
         /// <summary>
