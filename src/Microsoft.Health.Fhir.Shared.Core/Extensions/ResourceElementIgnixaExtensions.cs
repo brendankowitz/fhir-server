@@ -4,6 +4,7 @@
 // -------------------------------------------------------------------------------------------------
 
 using Ignixa.Serialization.SourceNodes;
+using Microsoft.Health.Fhir.Core.Features.Resources.Bundle;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Ignixa;
 
@@ -42,5 +43,15 @@ namespace Microsoft.Health.Fhir.Core.Extensions
 
             return null;
         }
+
+        /// <summary>
+        /// Gets the underlying <see cref="IgnixaRawBundle"/> if this element was produced by
+        /// <see cref="Features.Search.IgnixaBundleFactory"/>. Mirrors <see cref="GetIgnixaNode"/>; every consumer of an
+        /// Ignixa-native bundle must read it through this method, never via <see cref="ResourceElement.ToPoco{T}"/>
+        /// (see the hollow-ToPoco() hazard documented on <see cref="IgnixaRawBundle"/>).
+        /// </summary>
+        /// <param name="resourceElement">The resource element.</param>
+        /// <returns>The <see cref="IgnixaRawBundle"/> if present; otherwise null.</returns>
+        public static IgnixaRawBundle GetIgnixaRawBundle(this ResourceElement resourceElement) => resourceElement.ResourceInstance as IgnixaRawBundle;
     }
 }

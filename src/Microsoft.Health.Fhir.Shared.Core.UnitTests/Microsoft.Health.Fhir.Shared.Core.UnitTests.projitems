@@ -126,6 +126,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\ResourceHandlerTests_ConditionalUpsert.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Upsert\UpsertResourceValidatorTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\BundleFactoryTests.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Features\Search\IgnixaBundleFactoryTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Expressions\ExpressionRewriterTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Expressions\ExpressionToStringTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Expressions\Parsers\ExpressionParserTests.cs" />

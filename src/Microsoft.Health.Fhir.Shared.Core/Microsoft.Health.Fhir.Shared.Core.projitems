@@ -90,6 +90,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Upsert\ConditionalUpsertResourceValidator.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Upsert\UpsertResourceValidator.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\BundleFactory.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Features\Search\IgnixaBundleFactory.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Parameters\ISearchParameterValidator.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Parameters\PropertyMappingExtensions.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Parameters\SearchParameterSupportResolver.cs" />
