@@ -15,6 +15,7 @@ using Microsoft.Health.Extensions.DependencyInjection;
 using Microsoft.Health.Fhir.Api.Configs;
 using Microsoft.Health.Fhir.Api.Features.Filters;
 using Microsoft.Health.Fhir.Api.Features.Routing;
+using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Compartment;
 using Microsoft.Health.Fhir.Core.Features.Definition;
@@ -58,7 +59,15 @@ namespace Microsoft.Health.Fhir.Api.Modules
             EnsureArg.IsNotNull(services, nameof(services));
 
             services.AddSingleton<IUrlResolver, UrlResolver>();
-            services.AddSingleton<IBundleFactory, BundleFactory>();
+
+            if (_configuration.CoreFeatures.SdkMode == FhirSdkMode.Firely)
+            {
+                services.AddSingleton<IBundleFactory, BundleFactory>();
+            }
+            else
+            {
+                services.AddSingleton<IBundleFactory, IgnixaBundleFactory>();
+            }
 
             services.AddSingleton<IReferenceSearchValueParser, ReferenceSearchValueParser>();
 

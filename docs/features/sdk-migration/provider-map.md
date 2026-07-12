@@ -15,6 +15,7 @@ See [node-mutation.md](node-mutation.md) for the rule on rebuilding vs. reusing 
 | Structural validation | `Shared.Core/Features/Validation/ModelAttributeValidator.cs` | `Shared.Core/Features/Validation/IgnixaResourceValidator.cs` (wraps the Firely fallback) | `Shared.Api/Modules/ValidationModule.cs` |
 | `$import` parsing | `Shared.Core/Features/Operations/Import/ImportResourceParser.cs` | `Shared.Core/Features/Operations/Import/IgnixaImportResourceParser.cs` | `Shared.Api/Modules/OperationsModule.cs` |
 | DB-read JSON deserialization | inline Firely branch | inline Ignixa branch | inline `_sdkMode` check, `Shared.Api/Modules/FhirModule.cs` (JSON deserializer dictionary factory) |
+| Search/history bundle assembly | `Shared.Core/Features/Search/BundleFactory.cs` | `Shared.Core/Features/Search/IgnixaBundleFactory.cs` | `Shared.Api/Modules/SearchModule.cs` |
 
 ## SDK-neutral by design (no pairing, and none expected)
 
@@ -42,6 +43,5 @@ node-aware.
 
 | Story | Seam | Firely side today | Planned Ignixa side |
 |---|---|---|---|
-| US-15 | Search/history bundle assembly | `Shared.Core/Features/Search/BundleFactory.cs` | `IgnixaBundleFactory` (planned name — confirm at implementation time) |
 | US-16 | Batch/transaction | `Shared.Api/Features/Resources/Bundle/BundleHandler.cs` (+ 4 versioned partials) | new Ignixa bundle processing |
 | US-20 | Profile validation | `Shared.Core/Features/Validation/ProfileValidator.cs` | `IgnixaProfileValidator` (planned name) |
