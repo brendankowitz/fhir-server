@@ -83,6 +83,7 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Modules.FeatureFlags.SdkMode
             services.AddSingleton(ArrayPool<char>.Shared);
             services.AddSingleton(Deserializers.ResourceDeserializer);
             services.AddSingleton(new BundleSerializer());
+            services.AddSingleton(new IgnixaBundleSerializer());
             services.AddSingleton<IModelInfoProvider>(ModelInfoProvider.Instance);
 
             // Registers the concrete Ignixa formatter singletons + IIgnixaJsonSerializer so the

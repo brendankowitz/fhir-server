@@ -163,6 +163,12 @@ namespace Microsoft.Health.Fhir.Api.Features.ActionResults
         {
             if (Result is ResourceElement resourceElement)
             {
+                var ignixaRawBundle = resourceElement.GetIgnixaRawBundle();
+                if (ignixaRawBundle != null)
+                {
+                    return ignixaRawBundle;
+                }
+
                 var ignixaNode = resourceElement.GetIgnixaNode();
                 if (ignixaNode != null)
                 {

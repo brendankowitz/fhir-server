@@ -12,6 +12,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
+using Ignixa.Serialization.Models;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Formatters;
 using Microsoft.Extensions.Primitives;
@@ -45,17 +46,20 @@ public class IgnixaFhirJsonOutputFormatterTests
     private static readonly FhirJsonParser Parser = new FhirJsonParser(DefaultParserSettings.Settings);
     private readonly IgnixaFhirJsonOutputFormatter _formatter;
     private readonly IIgnixaJsonSerializer _ignixaSerializer;
+    private readonly IgnixaBundleSerializer _ignixaBundleSerializer;
     private readonly ResourceWrapperFactory _wrapperFactory;
 
     public IgnixaFhirJsonOutputFormatterTests()
     {
         _ignixaSerializer = new IgnixaJsonSerializer();
         var firelySerializer = new FhirJsonSerializer();
+        _ignixaBundleSerializer = new IgnixaBundleSerializer();
         _formatter = new IgnixaFhirJsonOutputFormatter(
             _ignixaSerializer,
             firelySerializer,
             ModelInfoProvider.Instance,
             new BundleSerializer(),
+            _ignixaBundleSerializer,
             Deserializers.ResourceDeserializer);
 
         var requestContextAccessor = Substitute.For<RequestContextAccessor<IFhirRequestContext>>();
@@ -115,6 +119,12 @@ public class IgnixaFhirJsonOutputFormatterTests
     public void GivenIgnixaResourceElementType_WhenCheckingCanWrite_ThenTrueIsReturned()
     {
         Assert.True(CanWrite(typeof(IgnixaResourceElement)));
+    }
+
+    [Fact]
+    public void GivenIgnixaRawBundleType_WhenCheckingCanWrite_ThenTrueIsReturned()
+    {
+        Assert.True(CanWrite(typeof(IgnixaRawBundle)));
     }
 
     // ------------------------------------------------------------------
@@ -337,6 +347,64 @@ public class IgnixaFhirJsonOutputFormatterTests
     }
 
     // ------------------------------------------------------------------
+    // WriteResponseBody — IgnixaRawBundle
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public async Task GivenAnIgnixaRawBundleWithNoProjection_WhenWritten_ThenOutputMatchesIgnixaBundleSerializerDirectly()
+    {
+        var observation = Samples.GetDefaultObservation().ToPoco();
+        observation.Id = Guid.NewGuid().ToString();
+
+        var rawBundle = CreateIgnixaRawBundleWithRawEntries(Samples.GetDefaultPatient(), observation.ToResourceElement());
+
+        var formatterOutput = await WriteObject(rawBundle, typeof(IgnixaRawBundle));
+
+        using var directStream = new MemoryStream();
+        await _ignixaBundleSerializer.Serialize(rawBundle, directStream, pretty: false);
+        var directOutput = Encoding.UTF8.GetString(directStream.ToArray());
+
+        Assert.Equal(directOutput, formatterOutput);
+
+        // Sanity check that the zero-copy path actually produced a real bundle, not an empty stub.
+        var parsed = Parser.Parse<Hl7.Fhir.Model.Bundle>(formatterOutput);
+        Assert.Equal(2, parsed.Entry.Count);
+    }
+
+    [Fact]
+    public async Task GivenAnIgnixaRawBundle_WhenWrittenWithElements_ThenOnlyRequestedElementsAreWrittenPerEntry()
+    {
+        var patient = new Patient
+        {
+            Id = "elements-ignixa-bundle-test",
+            Active = true,
+            Name = { new HumanName { Family = "Smith", Given = new[] { "John" } } },
+        };
+
+        var rawBundle = CreateIgnixaRawBundleWithRawEntries(patient.ToResourceElement());
+
+        var json = await WriteObject(rawBundle, typeof(IgnixaRawBundle), "?_elements=active");
+
+        var parsed = Parser.Parse<Hl7.Fhir.Model.Bundle>(json);
+        var entry = Assert.Single(parsed.Entry);
+        var parsedPatient = Assert.IsType<Patient>(entry.Resource);
+        Assert.True(parsedPatient.Active);
+        Assert.Empty(parsedPatient.Name);
+    }
+
+    [Fact]
+    public async Task GivenAnIgnixaRawBundle_WhenWrittenWithSummaryCount_ThenEntriesAreOmitted()
+    {
+        var rawBundle = CreateIgnixaRawBundleWithRawEntries(Samples.GetDefaultPatient());
+
+        var json = await WriteObject(rawBundle, typeof(IgnixaRawBundle), "?_summary=count");
+
+        var parsed = Parser.Parse<Hl7.Fhir.Model.Bundle>(json);
+        Assert.Empty(parsed.Entry);
+        Assert.Equal(1, parsed.Total);
+    }
+
+    // ------------------------------------------------------------------
     // Pretty printing
     // ------------------------------------------------------------------
 
@@ -398,6 +466,41 @@ public class IgnixaFhirJsonOutputFormatterTests
         }
 
         return (rawBundle, bundle);
+    }
+
+    private IgnixaRawBundle CreateIgnixaRawBundleWithRawEntries(params ResourceElement[] resources)
+    {
+        string id = Guid.NewGuid().ToString();
+        var skeleton = new BundleJsonNode
+        {
+            Id = id,
+            Type = BundleJsonNode.BundleType.Searchset,
+            Total = resources.Length,
+        };
+
+        var entries = new List<IgnixaRawBundleEntry>();
+
+        foreach (var resource in resources)
+        {
+            var poco = resource.ToPoco();
+            poco.VersionId = "1";
+            poco.Meta.LastUpdated = DateTimeOffset.UtcNow;
+            poco.Meta.Tag = new List<Coding>
+            {
+                new Coding { System = "testTag", Code = Guid.NewGuid().ToString() },
+            };
+            var wrapper = _wrapperFactory.Create(poco.ToResourceElement(), deleted: false, keepMeta: true);
+            wrapper.Version = "1";
+
+            var metadata = new BundleComponentJsonNode
+            {
+                Search = new BundleComponentSearchJsonNode { Mode = "match" },
+            };
+
+            entries.Add(IgnixaRawBundleEntry.ForRawResource(metadata, new RawResourceElement(wrapper)));
+        }
+
+        return new IgnixaRawBundle(skeleton, entries);
     }
 
     private bool CanWrite(Type modelType)

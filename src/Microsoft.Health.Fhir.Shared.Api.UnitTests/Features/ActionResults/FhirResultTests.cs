@@ -7,6 +7,7 @@ using System.Net;
 using System.Reflection;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
+using Ignixa.Serialization.Models;
 using Ignixa.Serialization.SourceNodes;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -18,6 +19,7 @@ using Microsoft.Health.Fhir.Api.Features.ActionResults;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
+using Microsoft.Health.Fhir.Core.Features.Resources.Bundle;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Ignixa;
 using Microsoft.Health.Fhir.Tests.Common;
@@ -134,6 +136,32 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.ActionResults
 
             var node = Assert.IsType<ResourceJsonNode>(resultToSerialize);
             Assert.Same(ignixaBackedResource.GetIgnixaNode(), node);
+        }
+
+        [Fact]
+        public void GivenAnIgnixaRawBundleBackedResourceElement_WhenGettingResultToSerialize_ThenTheRawBundleIsReturned()
+        {
+            var schemaContext = new IgnixaSchemaContext(ModelInfoProvider.Instance);
+            var skeleton = new BundleJsonNode
+            {
+                Id = "bundle-example",
+                Type = BundleJsonNode.BundleType.Searchset,
+                Total = 0,
+            };
+
+            var rawBundle = new IgnixaRawBundle(skeleton, new IgnixaRawBundleEntry[0]);
+            var ignixaElement = new IgnixaResourceElement(skeleton, schemaContext.Schema);
+            var bundleBackedResource = new ResourceElement(ignixaElement.ToTypedElement(), rawBundle);
+
+            Assert.NotNull(bundleBackedResource.GetIgnixaRawBundle());
+            Assert.Null(bundleBackedResource.GetIgnixaNode());
+
+            var fhirResult = new FhirResult(bundleBackedResource);
+
+            var resultToSerialize = GetResultToSerialize(fhirResult);
+
+            var returnedBundle = Assert.IsType<IgnixaRawBundle>(resultToSerialize);
+            Assert.Same(rawBundle, returnedBundle);
         }
 
         [Fact]

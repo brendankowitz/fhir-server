@@ -74,6 +74,7 @@ namespace Microsoft.Health.Fhir.Api.Modules
             services.AddSingleton(xmlParser);
             services.AddSingleton(xmlSerializer);
             services.AddSingleton<BundleSerializer>();
+            services.AddSingleton<IgnixaBundleSerializer>();
 
             FhirPathCompiler.DefaultSymbolTable.AddFhirExtensions();
 

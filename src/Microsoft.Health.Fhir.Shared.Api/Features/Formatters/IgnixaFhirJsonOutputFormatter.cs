@@ -63,6 +63,7 @@ internal sealed class IgnixaFhirJsonOutputFormatter : TextOutputFormatter
     private readonly FhirJsonSerializer _firelySerializer;
     private readonly IModelInfoProvider _modelInfoProvider;
     private readonly BundleSerializer _bundleSerializer;
+    private readonly IgnixaBundleSerializer _ignixaBundleSerializer;
     private readonly ResourceDeserializer _deserializer;
     private static readonly FhirJsonParser Parser = new();
 
@@ -72,25 +73,29 @@ internal sealed class IgnixaFhirJsonOutputFormatter : TextOutputFormatter
     /// <param name="serializer">The Ignixa JSON serializer.</param>
     /// <param name="firelySerializer">The Firely JSON serializer for compatibility mode.</param>
     /// <param name="modelInfoProvider">FHIR model information provider used for projection.</param>
-    /// <param name="bundleSerializer">Zero-copy serializer for bundles whose entries carry raw resource JSON.</param>
+    /// <param name="bundleSerializer">Zero-copy serializer for Firely bundles whose entries carry raw resource JSON.</param>
+    /// <param name="ignixaBundleSerializer">Zero-copy serializer for Ignixa-native bundles carried by <see cref="IgnixaRawBundle"/>.</param>
     /// <param name="deserializer">Deserializer used to materialize raw bundle entries when projection is requested.</param>
     public IgnixaFhirJsonOutputFormatter(
         IIgnixaJsonSerializer serializer,
         FhirJsonSerializer firelySerializer,
         IModelInfoProvider modelInfoProvider,
         BundleSerializer bundleSerializer,
+        IgnixaBundleSerializer ignixaBundleSerializer,
         ResourceDeserializer deserializer)
     {
         EnsureArg.IsNotNull(serializer, nameof(serializer));
         EnsureArg.IsNotNull(firelySerializer, nameof(firelySerializer));
         EnsureArg.IsNotNull(modelInfoProvider, nameof(modelInfoProvider));
         EnsureArg.IsNotNull(bundleSerializer, nameof(bundleSerializer));
+        EnsureArg.IsNotNull(ignixaBundleSerializer, nameof(ignixaBundleSerializer));
         EnsureArg.IsNotNull(deserializer, nameof(deserializer));
 
         _serializer = serializer;
         _firelySerializer = firelySerializer;
         _modelInfoProvider = modelInfoProvider;
         _bundleSerializer = bundleSerializer;
+        _ignixaBundleSerializer = ignixaBundleSerializer;
         _deserializer = deserializer;
 
         SupportedEncodings.Add(Encoding.UTF8);
@@ -117,7 +122,8 @@ internal sealed class IgnixaFhirJsonOutputFormatter : TextOutputFormatter
         return typeof(ResourceJsonNode).IsAssignableFrom(type) ||
                typeof(IgnixaResourceElement).IsAssignableFrom(type) ||
                typeof(Resource).IsAssignableFrom(type) ||
-               typeof(RawResourceElement).IsAssignableFrom(type);
+               typeof(RawResourceElement).IsAssignableFrom(type) ||
+               typeof(IgnixaRawBundle).IsAssignableFrom(type);
     }
 
     /// <inheritdoc />
@@ -179,32 +185,35 @@ internal sealed class IgnixaFhirJsonOutputFormatter : TextOutputFormatter
 
             // Projection requested or mixed entry types: materialize raw entries into POCOs so the
             // Firely serializer can see them and apply _summary/_elements consistently.
-            var additionalElements = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
             foreach (var entry in bundle.Entry)
             {
                 if (entry is RawBundleEntryComponent rawEntry)
                 {
                     entry.Resource = rawEntry.ResourceElement.ToPoco<Resource>(_deserializer);
-
-                    if (hasElements)
-                    {
-                        // The _elements union must come from each entry's resource type, not the bundle's own type.
-                        var typeInfo = _modelInfoProvider.StructureDefinitionSummaryProvider.Provide(entry.Resource.TypeName);
-                        additionalElements.UnionWith(typeInfo.GetElements().Where(e => e.IsRequired).Select(e => e.ElementName));
-                    }
                 }
             }
 
-            string[]? projectedElements = null;
-            if (hasElements)
+            await WriteProjectedBundleAsync(bundle, response, pretty, selectedEncoding, summarySearchParameter, hasElements, elementsSearchParameter).ConfigureAwait(false);
+            return;
+        }
+
+        // Handle IgnixaRawBundle before the generic Resource branch. Mirrors the RawBundleEntryComponent
+        // handling above: no-projection requests get a zero-copy splice via IgnixaBundleSerializer;
+        // projection requests are converted to a Firely Bundle POCO (by round-tripping through the same
+        // zero-copy serializer and the Firely JSON parser) and handed to the same projection-conversion
+        // path so _summary/_elements are applied identically regardless of which bundle carrier produced
+        // the response.
+        if (context.Object is IgnixaRawBundle ignixaRawBundle)
+        {
+            if (!hasProjection)
             {
-                additionalElements.UnionWith(elementsSearchParameter!);
-                additionalElements.Add("meta");
-                projectedElements = additionalElements.ToArray();
+                await _ignixaBundleSerializer.Serialize(ignixaRawBundle, response.Body, pretty).ConfigureAwait(false);
+                await response.Body.FlushAsync(context.HttpContext.RequestAborted).ConfigureAwait(false);
+                return;
             }
 
-            await WriteFirelyResourceAsync(bundle, response, pretty, selectedEncoding, summarySearchParameter, projectedElements).ConfigureAwait(false);
+            var projectedBundle = await ToFirelyBundleAsync(ignixaRawBundle).ConfigureAwait(false);
+            await WriteProjectedBundleAsync(projectedBundle, response, pretty, selectedEncoding, summarySearchParameter, hasElements, elementsSearchParameter).ConfigureAwait(false);
             return;
         }
 
@@ -316,6 +325,62 @@ internal sealed class IgnixaFhirJsonOutputFormatter : TextOutputFormatter
         using var reader = new StreamReader(stream, Encoding.UTF8);
         using var jsonReader = new JsonTextReader(reader);
         return await Parser.ParseAsync<Resource>(jsonReader).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Converts an <see cref="IgnixaRawBundle"/> into a Firely <see cref="Hl7.Fhir.Model.Bundle"/> POCO
+    /// so that <see cref="WriteProjectedBundleAsync"/> can apply <c>_summary</c>/<c>_elements</c> the same
+    /// way it does for Firely-native bundles.
+    /// </summary>
+    /// <remarks>
+    /// Mirrors <see cref="ToFirelyResourceAsync"/>'s serialize-then-parse round trip, but reuses
+    /// <see cref="IgnixaBundleSerializer"/> (rather than the plain <see cref="IIgnixaJsonSerializer"/>) so
+    /// every entry's resource body -- raw-spliced or constructed -- is materialized in one pass, and the
+    /// carrier's <see cref="IgnixaRawBundle.Entries"/> (not the skeleton's own, ignored, entry array) is
+    /// what ends up in the parsed Bundle.
+    /// </remarks>
+    private async System.Threading.Tasks.Task<Hl7.Fhir.Model.Bundle> ToFirelyBundleAsync(IgnixaRawBundle rawBundle)
+    {
+        using var stream = new MemoryStream();
+        await _ignixaBundleSerializer.Serialize(rawBundle, stream, pretty: false).ConfigureAwait(false);
+        stream.Position = 0;
+
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        using var jsonReader = new JsonTextReader(reader);
+        return await Parser.ParseAsync<Hl7.Fhir.Model.Bundle>(jsonReader).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Applies <c>_summary</c>/<c>_elements</c> projection to a Firely <see cref="Hl7.Fhir.Model.Bundle"/>
+    /// whose entries already carry their materialized <see cref="Bundle.EntryComponent.Resource"/> POCOs,
+    /// then writes it via <see cref="WriteFirelyResourceAsync"/>. Shared by both the
+    /// <see cref="RawBundleEntryComponent"/> bundle path and the <see cref="IgnixaRawBundle"/> path so
+    /// there is a single place that computes the per-entry-type <c>_elements</c> union.
+    /// </summary>
+    private async Task WriteProjectedBundleAsync(Hl7.Fhir.Model.Bundle bundle, HttpResponse response, bool pretty, Encoding encoding, SummaryType summaryType, bool hasElements, IEnumerable<string>? elementsSearchParameter)
+    {
+        string[]? projectedElements = null;
+
+        if (hasElements)
+        {
+            // The _elements union must come from each entry's resource type, not the bundle's own type.
+            var additionalElements = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var entry in bundle.Entry)
+            {
+                if (entry.Resource != null)
+                {
+                    var typeInfo = _modelInfoProvider.StructureDefinitionSummaryProvider.Provide(entry.Resource.TypeName);
+                    additionalElements.UnionWith(typeInfo.GetElements().Where(e => e.IsRequired).Select(e => e.ElementName));
+                }
+            }
+
+            additionalElements.UnionWith(elementsSearchParameter!);
+            additionalElements.Add("meta");
+            projectedElements = additionalElements.ToArray();
+        }
+
+        await WriteFirelyResourceAsync(bundle, response, pretty, encoding, summaryType, projectedElements).ConfigureAwait(false);
     }
 
     private string[]? GetProjectedElements(Resource resource, IEnumerable<string>? elementsSearchParameter)
