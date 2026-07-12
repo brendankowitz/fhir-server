@@ -134,11 +134,12 @@ namespace Microsoft.Health.Fhir.Core.Extensions
 
         private static void AddSoftDeletedExtensionNative(ResourceJsonNode resource)
         {
-            var metaNode = resource.MutableNode["meta"] as JsonObject;
+            JsonObject node = ((IMutableJsonNode)resource).MutableNode;
+            var metaNode = node["meta"] as JsonObject;
             if (metaNode == null)
             {
                 metaNode = new JsonObject();
-                resource.MutableNode["meta"] = metaNode;
+                node["meta"] = metaNode;
             }
 
             if (metaNode.TryGetPropertyValue("extension", out var extensionNode) && extensionNode is JsonArray extensionArray)

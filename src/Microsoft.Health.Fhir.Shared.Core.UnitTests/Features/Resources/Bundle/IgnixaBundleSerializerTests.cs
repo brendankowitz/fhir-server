@@ -36,10 +36,10 @@ public class IgnixaBundleSerializerTests
     public async Task GivenABundleWithMixedEntries_WhenSerialized_ThenOutputIsValidJsonWithCorrectStructure()
     {
         BundleJsonNode skeleton = CreateSkeleton("example", BundleJsonNode.BundleType.Searchset, total: 2);
-        skeleton.MutableNode["link"] = new JsonArray(new JsonObject { ["relation"] = "self", ["url"] = "http://self/" });
+        ((IMutableJsonNode)skeleton).MutableNode["link"] = new JsonArray(new JsonObject { ["relation"] = "self", ["url"] = "http://self/" });
 
         // A decoy entry on the skeleton proves the serializer treats Entries as authoritative.
-        skeleton.MutableNode["entry"] = new JsonArray(new JsonObject { ["fullUrl"] = "http://decoy/" });
+        ((IMutableJsonNode)skeleton).MutableNode["entry"] = new JsonArray(new JsonObject { ["fullUrl"] = "http://decoy/" });
 
         var rawEntryMetadata = new BundleComponentJsonNode { FullUrl = "http://resource/123" };
         rawEntryMetadata.Search = new BundleComponentSearchJsonNode { Mode = "match" };

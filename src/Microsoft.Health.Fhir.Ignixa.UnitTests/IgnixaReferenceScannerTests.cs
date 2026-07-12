@@ -5,6 +5,7 @@
 
 using System.Text.Json.Nodes;
 using Ignixa.Abstractions;
+using Ignixa.Serialization.SourceNodes;
 using Ignixa.Specification.Generated;
 using Xunit;
 
@@ -185,7 +186,7 @@ public class IgnixaReferenceScannerTests
 
         Assert.Equal("Practitioner/prac999", handle.Reference);
 
-        var subjectReferenceObject = (JsonObject)resourceNode.MutableNode["subjectReference"]!;
+        var subjectReferenceObject = (JsonObject)((IMutableJsonNode)resourceNode).MutableNode["subjectReference"]!;
         Assert.True(subjectReferenceObject.TryGetPropertyValue("_reference", out JsonNode? shadowNode));
         Assert.NotNull(shadowNode);
         Assert.Equal(

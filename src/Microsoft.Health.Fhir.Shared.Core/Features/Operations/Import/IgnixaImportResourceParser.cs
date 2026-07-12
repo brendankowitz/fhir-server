@@ -104,7 +104,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Import
 
         private static void RemoveSoftDeletedExtension(ResourceJsonNode resource)
         {
-            var metaNode = resource.MutableNode["meta"];
+            var metaNode = ((IMutableJsonNode)resource).MutableNode["meta"];
             if (metaNode is not JsonObject metaObject)
             {
                 return;

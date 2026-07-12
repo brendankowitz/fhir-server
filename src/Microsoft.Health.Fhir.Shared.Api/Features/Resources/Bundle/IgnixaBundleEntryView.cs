@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
 using Ignixa.Serialization.Models;
+using Ignixa.Serialization.SourceNodes;
 using Microsoft.Health.Fhir.Core.Models;
 using static Hl7.Fhir.Model.Bundle;
 
@@ -21,8 +22,9 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
     /// </summary>
     /// <remarks>
     /// Reads the conditional-header properties (<c>ifMatch</c>/<c>ifNoneMatch</c>/<c>ifModifiedSince</c>/
-    /// <c>ifNoneExist</c>) directly off <see cref="BundleComponentRequestJsonNode"/>'s public
-    /// <c>MutableNode</c>, since the typed surface exposes only <c>Method</c>/<c>Url</c> as of the
+    /// <c>ifNoneExist</c>) directly off <see cref="BundleComponentRequestJsonNode"/>'s <c>MutableNode</c>,
+    /// accessed via the <see cref="IMutableJsonNode"/> explicit-interface cast since the property itself
+    /// is internal, because the typed surface exposes only <c>Method</c>/<c>Url</c> as of the
     /// pinned Ignixa SDK version -- tracked as an upstream gap (see
     /// docs/features/sdk-migration/ignixa-upstream-gaps.md). This mirrors the existing raw-node-property
     /// access pattern already used by <c>IgnixaImportResourceParser</c>.
@@ -65,7 +67,7 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
 
         public string BinaryContentType =>
             string.Equals(ResourceTypeName, KnownResourceTypes.Binary, StringComparison.Ordinal)
-                ? _entry.Resource.MutableNode["contentType"]?.GetValue<string>()
+                ? ((IMutableJsonNode)_entry.Resource).MutableNode["contentType"]?.GetValue<string>()
                 : null;
 
         public async Task WriteResourceBodyAsync(Stream stream, CancellationToken cancellationToken)
@@ -73,14 +75,14 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
             if (_entry.Resource != null)
             {
                 await using var writer = new Utf8JsonWriter(stream);
-                _entry.Resource.MutableNode.WriteTo(writer);
+                ((IMutableJsonNode)_entry.Resource).MutableNode.WriteTo(writer);
                 await writer.FlushAsync(cancellationToken);
             }
         }
 
         public async Task WriteBinaryDataAsync(Stream stream, CancellationToken cancellationToken)
         {
-            string base64Data = _entry.Resource?.MutableNode["data"]?.GetValue<string>();
+            string base64Data = (_entry.Resource as IMutableJsonNode)?.MutableNode["data"]?.GetValue<string>();
             if (!string.IsNullOrEmpty(base64Data))
             {
                 byte[] bytes = Convert.FromBase64String(base64Data);
@@ -90,7 +92,7 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
 
         private string GetRequestHeaderProperty(string name)
         {
-            JsonObject requestNode = _entry.Request?.MutableNode;
+            JsonObject requestNode = (_entry.Request as IMutableJsonNode)?.MutableNode;
             if (requestNode != null
                 && requestNode.TryGetPropertyValue(name, out JsonNode value)
                 && value is JsonValue jsonValue)

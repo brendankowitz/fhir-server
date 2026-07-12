@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using EnsureThat;
+using Ignixa.Serialization.SourceNodes;
 using Microsoft.Health.Fhir.Core.Extensions;
 
 namespace Microsoft.Health.Fhir.Core.Features.Resources.Bundle
@@ -49,7 +50,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Resources.Bundle
 
             // Skeleton's id/meta/type/total/link properties. Its own entry array (if any) is ignored --
             // bundle.Entries is authoritative.
-            WriteProperties(writer, bundle.Skeleton.MutableNode, excludePropertyName: "entry");
+            WriteProperties(writer, ((IMutableJsonNode)bundle.Skeleton).MutableNode, excludePropertyName: "entry");
 
             // Matching BundleSerializer, the entry array is omitted entirely when there are no entries
             // (FHIR JSON forbids empty arrays).
@@ -74,7 +75,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Resources.Bundle
 
                 // Metadata's fullUrl/search/request/response. Any resource property is ignored -- the body
                 // comes from RawResource/ResourceNode and is written last (below).
-                int metadataPropertyCount = WriteProperties(writer, entry.Metadata.MutableNode, excludePropertyName: "resource");
+                int metadataPropertyCount = WriteProperties(writer, ((IMutableJsonNode)entry.Metadata).MutableNode, excludePropertyName: "resource");
 
                 if (entry.RawResource != null)
                 {
@@ -101,7 +102,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Resources.Bundle
                     // Constructed body: already a complete value in the DOM, so write it through the writer,
                     // which handles the separating comma automatically.
                     writer.WritePropertyName("resource");
-                    entry.ResourceNode.MutableNode.WriteTo(writer);
+                    ((IMutableJsonNode)entry.ResourceNode).MutableNode.WriteTo(writer);
                 }
 
                 writer.WriteEndObject();
