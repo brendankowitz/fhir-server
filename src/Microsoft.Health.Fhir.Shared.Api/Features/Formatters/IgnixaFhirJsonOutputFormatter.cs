@@ -18,6 +18,7 @@ using Hl7.Fhir.Serialization;
 using Ignixa.Serialization.SourceNodes;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Formatters;
+using Microsoft.Health.Fhir.Api.Features.Formatters;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
@@ -341,13 +342,7 @@ internal sealed class IgnixaFhirJsonOutputFormatter : TextOutputFormatter
     /// </remarks>
     private async System.Threading.Tasks.Task<Hl7.Fhir.Model.Bundle> ToFirelyBundleAsync(IgnixaRawBundle rawBundle)
     {
-        using var stream = new MemoryStream();
-        await _ignixaBundleSerializer.Serialize(rawBundle, stream, pretty: false).ConfigureAwait(false);
-        stream.Position = 0;
-
-        using var reader = new StreamReader(stream, Encoding.UTF8);
-        using var jsonReader = new JsonTextReader(reader);
-        return await Parser.ParseAsync<Hl7.Fhir.Model.Bundle>(jsonReader).ConfigureAwait(false);
+        return await IgnixaBundleConversion.ToFirelyBundleAsync(_ignixaBundleSerializer, rawBundle).ConfigureAwait(false);
     }
 
     /// <summary>

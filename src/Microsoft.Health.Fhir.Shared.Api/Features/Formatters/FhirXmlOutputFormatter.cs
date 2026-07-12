@@ -182,18 +182,11 @@ namespace Microsoft.Health.Fhir.Api.Features.Formatters
         /// <summary>
         /// Converts an <see cref="IgnixaRawBundle"/> to a Firely <see cref="Hl7.Fhir.Model.Bundle"/> POCO by
         /// round-tripping it through <see cref="IgnixaBundleSerializer"/> (the only supported way to
-        /// materialize this carrier's entries) and re-parsing with <see cref="FhirJsonParser"/>. Mirrors
-        /// <c>IgnixaFhirJsonOutputFormatter.ToFirelyBundleAsync</c>.
+        /// materialize this carrier's entries) and re-parsing with <see cref="FhirJsonParser"/>.
         /// </summary>
         private async System.Threading.Tasks.Task<Hl7.Fhir.Model.Bundle> ConvertToFirelyBundleAsync(IgnixaRawBundle rawBundle)
         {
-            using var stream = new MemoryStream();
-            await _ignixaBundleSerializer.Serialize(rawBundle, stream, pretty: false).ConfigureAwait(false);
-            stream.Position = 0;
-
-            using var reader = new StreamReader(stream, Encoding.UTF8);
-            using var jsonReader = new JsonTextReader(reader);
-            return await JsonParser.ParseAsync<Hl7.Fhir.Model.Bundle>(jsonReader).ConfigureAwait(false);
+            return await IgnixaBundleConversion.ToFirelyBundleAsync(_ignixaBundleSerializer, rawBundle).ConfigureAwait(false);
         }
     }
 }
