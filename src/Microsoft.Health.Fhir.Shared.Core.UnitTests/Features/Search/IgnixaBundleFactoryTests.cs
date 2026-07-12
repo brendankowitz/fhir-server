@@ -250,6 +250,44 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
         }
 
         [Fact]
+        public void GivenAnIssueWithExpression_WhenCreateSearchBundle_ThenIgnixaLocationMatchesFirelyLocation()
+        {
+            _urlResolver.ResolveRouteUrl(_unsupportedSearchParameters).Returns(_selfUrl);
+
+            // Location is auto-derived from Expression (OperationOutcomeIssue's constructor). This locks
+            // in that IgnixaBundleFactory.ToIgnixaIssueComponent reproduces that derivation exactly, since
+            // Ignixa's IssueComponent has no typed Location property to fall back on.
+            var issue = new OperationOutcomeIssue(
+                OperationOutcomeConstants.IssueSeverity.Error,
+                OperationOutcomeConstants.IssueType.Invalid,
+                expression: new[] { "Patient.name[0].family", "Patient.birthDate" });
+
+            var searchResult = new SearchResult(Array.Empty<SearchResultEntry>(), null, null, _unsupportedSearchParameters, new[] { issue });
+
+            ResourceElement firelyActual = _bundleFactory.CreateSearchBundle(searchResult);
+            ResourceElement ignixaActual = _ignixaBundleFactory.CreateSearchBundle(searchResult);
+
+            var firelyOutcome = (OperationOutcome)firelyActual.ToPoco<Bundle>().Entry[0].Resource;
+#pragma warning disable CS0618 // Type or member is obsolete
+            string[] expectedLocation = firelyOutcome.Issue[0].Location.ToArray();
+#pragma warning restore CS0618
+
+            Assert.NotEmpty(expectedLocation);
+
+            IgnixaRawBundle rawBundle = ignixaActual.GetIgnixaRawBundle();
+            using JsonDocument serialized = SerializeToJsonDocument(rawBundle);
+            JsonElement locationElement = serialized.RootElement
+                .GetProperty("entry")[0]
+                .GetProperty("resource")
+                .GetProperty("issue")[0]
+                .GetProperty("location");
+
+            string[] actualLocation = locationElement.EnumerateArray().Select(e => e.GetString()).ToArray();
+
+            Assert.Equal(expectedLocation, actualLocation);
+        }
+
+        [Fact]
         public void GivenAnIgnixaSearchBundleWithEntries_WhenToPocoIsCalled_ThenPocoEntriesAreHollowButRawBundleEntriesAreReal()
         {
             _urlResolver.ResolveResourceWrapperUrl(Arg.Any<ResourceWrapper>()).Returns(x => new Uri(string.Format(_resourceUrlFormat, x.ArgAt<ResourceWrapper>(0).ResourceId)));

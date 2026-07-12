@@ -14,6 +14,16 @@ Ignixa-node-backed, and the difference matters after mutation:
   also require `RebuildResourceElement` after any in-place mutation—see `ConditionalUpsertResourceHandler`
   for the pattern.
 
+A third shape exists but sits outside this rule entirely: **`IgnixaRawBundle`** (produced by
+`IgnixaBundleFactory`, set directly as `ResourceElement.ResourceInstance` -- not accessed via
+`GetIgnixaNode()`) is immutable after construction, so it's exempt from the reuse-vs-rebuild choice
+by construction: the factory fully mutates and assembles the skeleton and every entry before
+wrapping them in `IgnixaRawBundle`, and nothing mutates them afterward. It is read exclusively via
+`GetIgnixaRawBundle()` (`ResourceElementIgnixaExtensions.cs`) -- never `.ToPoco()`/`.Instance`, which
+silently return a hollow bundle: a real id/meta/type/total/link, but an empty entry array, since only
+the skeleton participates in the typed-element view. That hollow-`ToPoco()` hazard is locked in by a
+regression test, `IgnixaBundleFactoryTests.GivenAnIgnixaSearchBundleWithEntries_WhenToPocoIsCalled_ThenPocoEntriesAreHollowButRawBundleEntriesAreReal`.
+
 `GetIgnixaNode()` deliberately accepts both shapes (it only needs the raw node), which is why this
 hazard is invisible at the type level -- nothing stops you from mutating a node and returning the
 original `ResourceElement`, and the compiler will not warn you if that turns out to be wrong for your

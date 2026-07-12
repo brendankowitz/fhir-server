@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Text.Json.Nodes;
 using EnsureThat;
 using Ignixa.Serialization.Models;
 using Microsoft.Extensions.Logging;
@@ -338,6 +339,18 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 {
                     issueComponent.Expression.Add(expression);
                 }
+
+                // Ignixa's IssueComponent has no typed Location property, so this is written directly via
+                // the MutableNode escape hatch (same pattern as ModelExtensions.AddSoftDeletedExtensionNative).
+                // Mirrors OperationOutcomeIssue's constructor-time Location derivation exactly: one
+                // "<expression> // <deprecation notice>" entry per Expression element, same order.
+                var location = new JsonArray();
+                foreach (string expression in issue.Expression)
+                {
+                    location.Add(JsonValue.Create($"{expression} // {Core.Resources.OperationOutcomeLocationDeprication}"));
+                }
+
+                issueComponent.MutableNode["location"] = location;
             }
 
             var coding = issue.DetailsCodes?.Coding ?? Enumerable.Empty<Hl7.Fhir.Model.Coding>();
