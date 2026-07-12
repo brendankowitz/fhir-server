@@ -29,6 +29,7 @@ node-aware.
 - `Shared.Core/Features/Persistence/RawResourceFactory.cs`
 - `Shared.Core/Features/Resources/Bundle/BundleSerializer.cs`
 - `Shared.Core/Features/Resources/Create/CreateResourceHandler.cs`, `Shared.Core/Features/Resources/Upsert/UpsertResourceHandler.cs` (partial — see `user-stories.md` US-12)
+- `Shared.Core/Features/Resources/ResourceReferenceResolver.cs` (Firely `Resource`, unchanged) / `Shared.Core/Features/Resources/IgnixaResourceReferenceResolver.cs` (Ignixa `ResourceJsonNode`, new in US-16 Task 1) — two distinct classes, but the choice between them is per-resource-representation (whichever the caller already holds, a Firely POCO or an Ignixa node), not an `SdkMode` check; both delegate to the same `ResourceReferenceResolver.TryResolveReferenceValueAsync` for the actual resolve/cache/throw decision, so there's exactly one implementation of that logic to keep in sync. Not yet wired into any caller (`BundleHandler` wiring is Task 6 of US-16) — listed here now because the seam itself is data-driven-by-design, matching this section's convention, not because a `SdkMode`-gated selection point exists yet.
 
 ## Deliberately unpaired (deferred, named exceptions per objective 5)
 

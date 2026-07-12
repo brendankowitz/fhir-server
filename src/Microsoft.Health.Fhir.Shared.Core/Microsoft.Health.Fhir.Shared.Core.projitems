@@ -80,6 +80,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Patch\FhirPathPatch\Operations\OperationReplace.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Patch\FhirPathPatch\Operations\PendingOperation.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\ResourceExtensions.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\IgnixaResourceReferenceResolver.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\ResourceReferenceResolver.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Upsert\ConditionalUpsertResourceHandler.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Upsert\UpsertResourceHandler.cs" />

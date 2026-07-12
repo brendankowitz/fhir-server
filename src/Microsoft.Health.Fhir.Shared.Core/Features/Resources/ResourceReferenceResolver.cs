@@ -50,47 +50,74 @@ namespace Microsoft.Health.Fhir.Core.Features.Resources
                     continue;
                 }
 
-                // Checks to see if this reference has already been assigned an Id
-                if (referenceIdDictionary.TryGetValue(reference.Reference, out var referenceInformation))
+                string newReferenceValue = await TryResolveReferenceValueAsync(reference.Reference, referenceIdDictionary, requestUrl, cancellationToken);
+                if (newReferenceValue != null)
                 {
-                    reference.Reference = $"{referenceInformation.resourceType}/{referenceInformation.resourceId}";
+                    reference.Reference = newReferenceValue;
                     totalResolvedReferences++;
-                }
-                else
-                {
-                    if (reference.Reference.Contains('?', StringComparison.Ordinal))
-                    {
-                        string[] queries = reference.Reference.Split("?");
-                        string resourceType = queries[0];
-                        string conditionalQueries = queries[1];
-
-                        if (!ModelInfoProvider.IsKnownResource(resourceType))
-                        {
-                            throw new RequestNotValidException(string.Format(Core.Resources.ReferenceResourceTypeNotSupported, resourceType, reference.Reference));
-                        }
-
-                        var results = await GetExistingResourceId(requestUrl, resourceType, conditionalQueries, cancellationToken);
-
-                        if (results == null || !results.Where(result => result.SearchEntryMode == ValueSets.SearchEntryMode.Match).Any())
-                        {
-                            throw new RequestNotValidException(string.Format(Core.Resources.InvalidConditionalReference, reference.Reference));
-                        }
-                        else if (results.Where(result => result.SearchEntryMode == ValueSets.SearchEntryMode.Match).Count() > 1)
-                        {
-                            throw new RequestNotValidException(string.Format(Core.Resources.InvalidConditionalReferenceToMultipleResources, reference.Reference));
-                        }
-
-                        string resourceId = results.First(result => result.SearchEntryMode == ValueSets.SearchEntryMode.Match).Resource.ResourceId;
-
-                        referenceIdDictionary.Add(reference.Reference, (resourceId, resourceType));
-
-                        reference.Reference = $"{resourceType}/{resourceId}";
-                        totalResolvedReferences++;
-                    }
                 }
             }
 
             return totalResolvedReferences;
+        }
+
+        /// <summary>
+        /// Decides whether and how a single reference value should be rewritten: already-resolved
+        /// (dictionary hit), conditional (resolved via search and cached), or left alone (plain/absolute
+        /// reference, nothing to do). Shared by both the Firely loop above and <c>IgnixaResourceReferenceResolver</c>
+        /// so there is exactly one implementation of this decision logic.
+        /// </summary>
+        /// <param name="reference">A non-null, non-whitespace reference string (e.g. "Patient/123", "Patient?identifier=...", or a "urn:uuid:" placeholder already seen).</param>
+        /// <param name="referenceIdDictionary">Cache of previously-resolved conditional/placeholder references to their assigned type/id, shared and mutated across calls for a bundle.</param>
+        /// <param name="requestUrl">The request URL, used only for error messages when a conditional reference can't be resolved.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns>The resolved "Type/id" value to assign, or <c>null</c> if no resolution was needed (the caller should leave the original value alone).</returns>
+        /// <exception cref="RequestNotValidException">The reference is conditional but the resource type is unsupported, or it resolves to zero or multiple matches.</exception>
+        public async Task<string> TryResolveReferenceValueAsync(
+            string reference,
+            IDictionary<string, (string resourceId, string resourceType)> referenceIdDictionary,
+            string requestUrl,
+            CancellationToken cancellationToken)
+        {
+            EnsureArg.IsNotNullOrWhiteSpace(reference, nameof(reference));
+            EnsureArg.IsNotNull(referenceIdDictionary, nameof(referenceIdDictionary));
+
+            // Checks to see if this reference has already been assigned an Id
+            if (referenceIdDictionary.TryGetValue(reference, out var referenceInformation))
+            {
+                return $"{referenceInformation.resourceType}/{referenceInformation.resourceId}";
+            }
+
+            if (!reference.Contains('?', StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            string[] queries = reference.Split("?");
+            string resourceType = queries[0];
+            string conditionalQueries = queries[1];
+
+            if (!ModelInfoProvider.IsKnownResource(resourceType))
+            {
+                throw new RequestNotValidException(string.Format(Core.Resources.ReferenceResourceTypeNotSupported, resourceType, reference));
+            }
+
+            var results = await GetExistingResourceId(requestUrl, resourceType, conditionalQueries, cancellationToken);
+
+            if (results == null || !results.Where(result => result.SearchEntryMode == ValueSets.SearchEntryMode.Match).Any())
+            {
+                throw new RequestNotValidException(string.Format(Core.Resources.InvalidConditionalReference, reference));
+            }
+            else if (results.Where(result => result.SearchEntryMode == ValueSets.SearchEntryMode.Match).Count() > 1)
+            {
+                throw new RequestNotValidException(string.Format(Core.Resources.InvalidConditionalReferenceToMultipleResources, reference));
+            }
+
+            string resourceId = results.First(result => result.SearchEntryMode == ValueSets.SearchEntryMode.Match).Resource.ResourceId;
+
+            referenceIdDictionary.Add(reference, (resourceId, resourceType));
+
+            return $"{resourceType}/{resourceId}";
         }
 
         public async Task<IReadOnlyCollection<SearchResultEntry>> GetExistingResourceId(string requestUrl, string resourceType, StringValues conditionalQueries, CancellationToken cancellationToken)
