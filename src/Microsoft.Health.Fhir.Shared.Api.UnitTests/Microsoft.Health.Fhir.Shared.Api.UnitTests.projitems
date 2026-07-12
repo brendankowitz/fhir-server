@@ -67,6 +67,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)Features\Formatters\FhirXmlOutputFormatterTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Formatters\FormatterConfigurationTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Formatters\HttpContextExtensionsTests.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Features\Formatters\IgnixaBundleFactoryFormatterCompositionTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Formatters\IgnixaFhirJsonInputFormatterTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Formatters\IgnixaFhirJsonOutputFormatterTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Formatters\JsonArrayPoolTests.cs" />
@@ -102,6 +103,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)Modules\FeatureFlags\SdkMode\SdkModeFeatureModuleTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Modules\FhirModuleTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Modules\OperationsModuleTests.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Modules\SearchModuleTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Modules\ValidationModuleTests.cs" />
   </ItemGroup>
   <ItemGroup>
