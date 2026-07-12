@@ -228,7 +228,7 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
 
                 if (_bundleType == BundleType.Batch)
                 {
-                    await FillRequestLists(bundleResource.Entry, cancellationToken);
+                    await FillRequestListsFromPoco(bundleResource.Entry, cancellationToken);
 
                     var responseBundle = new Hl7.Fhir.Model.Bundle { Type = BundleType.BatchResponse };
 
@@ -252,7 +252,7 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
                     // For resources within a transaction, we need to validate if they are referring to each other and throw an exception in such case.
                     await _transactionBundleValidator.ValidateBundle(bundleResource, _referenceIdDictionary, cancellationToken);
 
-                    await FillRequestLists(bundleResource.Entry, cancellationToken);
+                    await FillRequestListsFromPoco(bundleResource.Entry, cancellationToken);
 
                     if (bundleProcessingLogic == BundleProcessingLogic.Sequential)
                     {
@@ -595,7 +595,35 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
             }
         }
 
-        private async Task FillRequestLists(List<EntryComponent> bundleEntries, CancellationToken cancellationToken)
+        /// <summary>
+        /// Adapts a Firely-POCO entry list to <see cref="IBundleEntryView"/> and delegates to
+        /// <see cref="FillRequestLists(IReadOnlyList{IBundleEntryView}, CancellationToken)"/>. This is
+        /// the only caller of <see cref="PopulateReferenceIdDictionary"/> -- that method stays keyed to
+        /// <see cref="EntryComponent"/> deliberately: it is transaction-only, and transactions are out of
+        /// scope for native (Ignixa) decomposition until a later task wires in reference resolution.
+        /// </summary>
+        private async Task FillRequestListsFromPoco(List<EntryComponent> bundleEntries, CancellationToken cancellationToken)
+        {
+            if (_bundleConfiguration.EntryLimit != default && bundleEntries.Count > _bundleConfiguration.EntryLimit)
+            {
+                throw new BundleEntryLimitExceededException(string.Format(Api.Resources.BundleEntryLimitExceeded, _bundleConfiguration.EntryLimit));
+            }
+
+            // For a transaction, we need to resolve any references between resources.
+            // Loop through the entries and if we're POSTing with an ID in the fullUrl or doing a conditional create then set an ID for it and add it to our dictionary.
+            if (_bundleType == BundleType.Transaction)
+            {
+                PopulateReferenceIdDictionary(bundleEntries, _referenceIdDictionary);
+            }
+
+            IReadOnlyList<IBundleEntryView> views = bundleEntries
+                .Select(entry => (IBundleEntryView)new FirelyBundleEntryView(entry, _fhirJsonSerializer))
+                .ToList();
+
+            await FillRequestLists(views, cancellationToken);
+        }
+
+        internal async Task FillRequestLists(IReadOnlyList<IBundleEntryView> bundleEntries, CancellationToken cancellationToken)
         {
             if (_bundleConfiguration.EntryLimit != default && bundleEntries.Count > _bundleConfiguration.EntryLimit)
             {
@@ -605,16 +633,9 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
             int order = 0;
             _requestCount = bundleEntries.Count;
 
-            // For a transaction, we need to resolve any references between resources.
-            // Loop through the entries and if we're POSTing with an ID in the fullUrl or doing a conditional create then set an ID for it and add it to our dictionary.
-            if (_bundleType == BundleType.Transaction)
+            foreach (IBundleEntryView entry in bundleEntries)
             {
-                PopulateReferenceIdDictionary(bundleEntries, _referenceIdDictionary);
-            }
-
-            foreach (EntryComponent entry in bundleEntries)
-            {
-                if (entry.Request?.Method == null)
+                if (entry.Method == null)
                 {
                     _emptyRequestsOrder.Add(order++);
                     continue;
@@ -624,19 +645,25 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
             }
         }
 
-        private async Task GenerateRequest(EntryComponent entry, int order, CancellationToken cancellationToken)
+        internal async Task GenerateRequest(IBundleEntryView entry, int order, CancellationToken cancellationToken)
         {
             string persistedId = default;
             DefaultHttpContext httpContext = new DefaultHttpContext { RequestServices = _requestServices };
 
-            var requestUrl = entry.Request?.Url;
+            var requestUrl = entry.Url;
 
             // For resources within a transaction, we need to resolve any intra-bundle references and potentially persist any internally assigned ids
-            HTTPVerb requestMethod = entry.Request.Method.Value;
+            HTTPVerb requestMethod = entry.Method.Value;
 
-            if (_bundleType == BundleType.Transaction && entry.Resource != null)
+            // Reference resolution is transaction-only, and (per this scope) transactions are always
+            // decomposed via FirelyBundleEntryView -- native (Ignixa) decomposition is batch-only until a
+            // later task wires IgnixaResourceReferenceResolver in here (see docs/superpowers/plans
+            // /2026-07-11-phase4-plan-b-batch-transaction.md, Task 6). The downcast keeps that transaction
+            // -specific Firely POCO mutation out of IBundleEntryView instead of leaking it into the
+            // abstraction for a case IgnixaBundleEntryView never reaches today.
+            if (_bundleType == BundleType.Transaction && entry is FirelyBundleEntryView firelyEntry && firelyEntry.Entry.Resource != null)
             {
-                int totalResolvedReferences = await _referenceResolver.ResolveReferencesAsync(entry.Resource, _referenceIdDictionary, requestUrl, cancellationToken);
+                int totalResolvedReferences = await _referenceResolver.ResolveReferencesAsync(firelyEntry.Entry.Resource, _referenceIdDictionary, requestUrl, cancellationToken);
                 _totalResolvedReferences += totalResolvedReferences;
 
                 if (requestMethod == HTTPVerb.POST && !string.IsNullOrWhiteSpace(entry.FullUrl))
@@ -660,10 +687,10 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
             httpContext.Request.QueryString = new QueryString(requestUri.Query);
             httpContext.Request.Method = requestMethod.ToString();
 
-            AddHeaderIfNeeded(HeaderNames.IfMatch, entry.Request.IfMatch, httpContext);
-            AddHeaderIfNeeded(HeaderNames.IfModifiedSince, entry.Request.IfModifiedSince?.ToString(), httpContext);
-            AddHeaderIfNeeded(HeaderNames.IfNoneMatch, entry.Request.IfNoneMatch, httpContext);
-            AddHeaderIfNeeded(KnownHeaders.IfNoneExist, entry.Request.IfNoneExist, httpContext);
+            AddHeaderIfNeeded(HeaderNames.IfMatch, entry.IfMatch, httpContext);
+            AddHeaderIfNeeded(HeaderNames.IfModifiedSince, entry.IfModifiedSince, httpContext);
+            AddHeaderIfNeeded(HeaderNames.IfNoneMatch, entry.IfNoneMatch, httpContext);
+            AddHeaderIfNeeded(KnownHeaders.IfNoneExist, entry.IfNoneExist, httpContext);
 
             if (_fhirRequestContextAccessor.RequestContext.RequestHeaders.TryGetValue(KnownHeaders.ProfileValidation, out var profileValidationValue))
             {
@@ -679,9 +706,10 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
             {
                 httpContext.Request.Headers[HeaderNames.ContentType] = new StringValues(KnownContentTypes.JsonContentType);
 
-                if (entry.Resource != null)
+                if (entry.HasResource)
                 {
-                    var memoryStream = new MemoryStream(await _fhirJsonSerializer.SerializeToBytesAsync(entry.Resource));
+                    var memoryStream = new MemoryStream();
+                    await entry.WriteResourceBodyAsync(memoryStream, cancellationToken);
                     memoryStream.Seek(0, SeekOrigin.Begin);
                     httpContext.Request.Body = memoryStream;
                 }
@@ -691,11 +719,12 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
             // FHIRPatch if body is Parameters object
             else if (
                 requestMethod == HTTPVerb.PATCH &&
-                string.Equals(KnownResourceTypes.Parameters, entry.Resource?.TypeName, StringComparison.Ordinal) &&
-                entry.Resource is Parameters parametersResource)
+                string.Equals(KnownResourceTypes.Parameters, entry.ResourceTypeName, StringComparison.Ordinal) &&
+                entry.HasResource)
             {
                 httpContext.Request.Headers[HeaderNames.ContentType] = new StringValues(KnownContentTypes.JsonContentType);
-                var memoryStream = new MemoryStream(await _fhirJsonSerializer.SerializeToBytesAsync(parametersResource));
+                var memoryStream = new MemoryStream();
+                await entry.WriteResourceBodyAsync(memoryStream, cancellationToken);
                 memoryStream.Seek(0, SeekOrigin.Begin);
                 httpContext.Request.Body = memoryStream;
             }
@@ -703,11 +732,12 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
             // Allow JSON Patch to be an encoded Binary in a Bundle (See: https://chat.fhir.org/#narrow/stream/179166-implementers/topic/Transaction.20with.20PATCH.20request)
             else if (
                 requestMethod == HTTPVerb.PATCH &&
-                string.Equals(KnownResourceTypes.Binary, entry.Resource?.TypeName, StringComparison.Ordinal) &&
-                entry.Resource is Binary binaryResource && string.Equals(KnownMediaTypeHeaderValues.ApplicationJsonPatch.ToString(), binaryResource.ContentType, StringComparison.OrdinalIgnoreCase))
+                string.Equals(KnownResourceTypes.Binary, entry.ResourceTypeName, StringComparison.Ordinal) &&
+                entry.HasResource && string.Equals(KnownMediaTypeHeaderValues.ApplicationJsonPatch.ToString(), entry.BinaryContentType, StringComparison.OrdinalIgnoreCase))
             {
-                httpContext.Request.Headers[HeaderNames.ContentType] = new StringValues(binaryResource.ContentType);
-                var memoryStream = new MemoryStream(binaryResource.Data);
+                httpContext.Request.Headers[HeaderNames.ContentType] = new StringValues(entry.BinaryContentType);
+                var memoryStream = new MemoryStream();
+                await entry.WriteBinaryDataAsync(memoryStream, cancellationToken);
                 memoryStream.Seek(0, SeekOrigin.Begin);
                 httpContext.Request.Body = memoryStream;
             }
@@ -722,7 +752,7 @@ namespace Microsoft.Health.Fhir.Api.Features.Resources.Bundle
                 RouteData = routeContext.RouteData,
             };
 
-            _requests[requestMethod].Add(new ResourceExecutionContext(requestMethod, entry.Resource?.TypeName, routeContext, order, persistedId));
+            _requests[requestMethod].Add(new ResourceExecutionContext(requestMethod, entry.ResourceTypeName, routeContext, order, persistedId));
         }
 
         private static void AddHeaderIfNeeded(string headerKey, string headerValue, DefaultHttpContext httpContext)

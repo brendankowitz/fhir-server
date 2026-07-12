@@ -6,11 +6,16 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net;
+using System.Text;
+using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
+using Ignixa.Serialization.Models;
 using MediatR;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
@@ -24,12 +29,15 @@ using Microsoft.Health.Abstractions.Features.Transactions;
 using Microsoft.Health.Api.Features.Audit;
 using Microsoft.Health.Core.Features.Context;
 using Microsoft.Health.Fhir.Api.Features.Bundle;
+using Microsoft.Health.Fhir.Api.Features.ContentTypes;
 using Microsoft.Health.Fhir.Api.Features.Exceptions;
+using Microsoft.Health.Fhir.Api.Features.Formatters;
 using Microsoft.Health.Fhir.Api.Features.Resources.Bundle;
 using Microsoft.Health.Fhir.Api.Features.Routing;
 using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Exceptions;
 using Microsoft.Health.Fhir.Core.Extensions;
+using Microsoft.Health.Fhir.Core.Features;
 using Microsoft.Health.Fhir.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Persistence.Orchestration;
@@ -47,6 +55,7 @@ using Microsoft.Health.Fhir.Ignixa;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Fhir.ValueSets;
 using Microsoft.Health.Test.Utilities;
+using Microsoft.Net.Http.Headers;
 using NSubstitute;
 using NSubstitute.Core;
 using Xunit;
@@ -66,6 +75,7 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Resources.Bundle
         private readonly IBundleMetricHandler _bundleMetricHandler;
         private readonly ITransactionHandler _transactionHandler;
         private DefaultFhirRequestContext _fhirRequestContext;
+        private HttpContext _lastCapturedHttpContext;
         private readonly IProvideProfilesForValidation _profilesResolver;
 
         public BundleHandlerTests()
@@ -1309,6 +1319,317 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Resources.Bundle
             Assert.True(bundleResponse.Info.BundleType == BundleType.Batch, "BundleType is different than the expected.");
             Assert.True(bundleResponse.Info.ProcessingLogic == BundleProcessingLogic.Parallel, "BundleProcessingLogic is different than the expected.");
             Assert.True(bundleResponse.Info.ExecutionTime.TotalMilliseconds > 0, "ExecutionTime is not higher than zero.");
+        }
+
+        // -------------------------------------------------------------------------------------------
+        // US-16 Task 3: IgnixaBundleEntryView-driven decomposition.
+        //
+        // These tests exercise GenerateRequest/FillRequestLists directly against real
+        // BundleComponentJsonNode entries (parsed by Ignixa, not hand-built), asserting on the actual
+        // HttpContext the handler constructs for each inner request -- the same construction the
+        // Firely-backed tests above exercise indirectly through Handle(). Scoped to batch: no
+        // BundleType.Transaction scenario is exercised here (reference resolution isn't wired for the
+        // native path yet -- see US-16 Task 6).
+        // -------------------------------------------------------------------------------------------
+
+        [Fact]
+        public async Task GivenAnIgnixaBackedPlainCreateEntry_WhenGenerateRequestIsCalled_ThenInnerRequestHasCorrectMethodUrlAndBody()
+        {
+            IReadOnlyList<BundleComponentJsonNode> entries = ParseIgnixaBatchEntries(
+                """
+                {
+                  "resourceType": "Bundle",
+                  "type": "batch",
+                  "entry": [
+                    {
+                      "fullUrl": "urn:uuid:11111111-1111-1111-1111-111111111111",
+                      "resource": { "resourceType": "Patient", "active": true },
+                      "request": { "method": "POST", "url": "Patient" }
+                    }
+                  ]
+                }
+                """);
+
+            CaptureNextRouteAsync();
+
+            var view = new IgnixaBundleEntryView(entries[0]);
+            await _bundleHandler.GenerateRequest(view, 0, CancellationToken.None);
+
+            HttpContext capturedHttpContext = _lastCapturedHttpContext;
+            Assert.NotNull(capturedHttpContext);
+            Assert.Equal("POST", capturedHttpContext.Request.Method);
+            Assert.Equal("/Patient", capturedHttpContext.Request.Path.Value);
+            Assert.Equal(KnownContentTypes.JsonContentType, capturedHttpContext.Request.Headers[HeaderNames.ContentType].ToString());
+
+            string body = await ReadRequestBodyAsync(capturedHttpContext);
+            using JsonDocument document = JsonDocument.Parse(body);
+            Assert.Equal("Patient", document.RootElement.GetProperty("resourceType").GetString());
+            Assert.True(document.RootElement.GetProperty("active").GetBoolean());
+        }
+
+        [Fact]
+        public async Task GivenAnIgnixaBackedEntryWithConditionalHeaders_WhenGenerateRequestIsCalled_ThenAllConditionalHeadersArePropagated()
+        {
+            IReadOnlyList<BundleComponentJsonNode> entries = ParseIgnixaBatchEntries(
+                """
+                {
+                  "resourceType": "Bundle",
+                  "type": "batch",
+                  "entry": [
+                    {
+                      "resource": { "resourceType": "Patient", "id": "456", "active": false },
+                      "request": {
+                        "method": "PUT",
+                        "url": "Patient/456",
+                        "ifMatch": "W/\"2\"",
+                        "ifNoneMatch": "*",
+                        "ifModifiedSince": "2024-01-01T00:00:00Z",
+                        "ifNoneExist": "identifier=http://example.org|456"
+                      }
+                    }
+                  ]
+                }
+                """);
+
+            CaptureNextRouteAsync();
+
+            var view = new IgnixaBundleEntryView(entries[0]);
+            await _bundleHandler.GenerateRequest(view, 0, CancellationToken.None);
+
+            HttpContext capturedHttpContext = _lastCapturedHttpContext;
+            Assert.NotNull(capturedHttpContext);
+            Assert.Equal("PUT", capturedHttpContext.Request.Method);
+            Assert.Equal("/Patient/456", capturedHttpContext.Request.Path.Value);
+            Assert.Equal("W/\"2\"", capturedHttpContext.Request.Headers[HeaderNames.IfMatch].ToString());
+            Assert.Equal("*", capturedHttpContext.Request.Headers[HeaderNames.IfNoneMatch].ToString());
+            Assert.Equal("2024-01-01T00:00:00Z", capturedHttpContext.Request.Headers[HeaderNames.IfModifiedSince].ToString());
+            Assert.Equal("identifier=http://example.org|456", capturedHttpContext.Request.Headers[KnownHeaders.IfNoneExist].ToString());
+        }
+
+        [Fact]
+        public async Task GivenAnIgnixaBackedBinaryWrappedJsonPatchEntry_WhenGenerateRequestIsCalled_ThenInnerRequestHasJsonPatchContentTypeAndDecodedBody()
+        {
+            const string jsonPatchDocument = """[{"op":"replace","path":"/active","value":true}]""";
+            string base64Data = Convert.ToBase64String(Encoding.UTF8.GetBytes(jsonPatchDocument));
+
+            string bundleJson = """
+                {
+                  "resourceType": "Bundle",
+                  "type": "batch",
+                  "entry": [
+                    {
+                      "resource": {
+                        "resourceType": "Binary",
+                        "contentType": "application/json-patch+json",
+                        "data": "__BASE64__"
+                      },
+                      "request": { "method": "PATCH", "url": "Patient/123" }
+                    }
+                  ]
+                }
+                """.Replace("__BASE64__", base64Data, StringComparison.Ordinal);
+
+            IReadOnlyList<BundleComponentJsonNode> entries = ParseIgnixaBatchEntries(bundleJson);
+
+            CaptureNextRouteAsync();
+
+            var view = new IgnixaBundleEntryView(entries[0]);
+            await _bundleHandler.GenerateRequest(view, 0, CancellationToken.None);
+
+            HttpContext capturedHttpContext = _lastCapturedHttpContext;
+            Assert.NotNull(capturedHttpContext);
+            Assert.Equal("PATCH", capturedHttpContext.Request.Method);
+            Assert.Equal("/Patient/123", capturedHttpContext.Request.Path.Value);
+            Assert.Equal(KnownMediaTypeHeaderValues.ApplicationJsonPatch.ToString(), capturedHttpContext.Request.Headers[HeaderNames.ContentType].ToString());
+            Assert.Equal(jsonPatchDocument, await ReadRequestBodyAsync(capturedHttpContext));
+        }
+
+        [Fact]
+        public async Task GivenAnIgnixaBackedParametersFhirPatchEntry_WhenGenerateRequestIsCalled_ThenInnerRequestHasFhirJsonContentTypeAndSerializedBody()
+        {
+            IReadOnlyList<BundleComponentJsonNode> entries = ParseIgnixaBatchEntries(
+                """
+                {
+                  "resourceType": "Bundle",
+                  "type": "batch",
+                  "entry": [
+                    {
+                      "resource": {
+                        "resourceType": "Parameters",
+                        "parameter": [
+                          {
+                            "name": "operation",
+                            "part": [
+                              { "name": "type", "valueCode": "replace" },
+                              { "name": "path", "valueString": "Patient.active" },
+                              { "name": "value", "valueBoolean": true }
+                            ]
+                          }
+                        ]
+                      },
+                      "request": { "method": "PATCH", "url": "Patient/123" }
+                    }
+                  ]
+                }
+                """);
+
+            CaptureNextRouteAsync();
+
+            var view = new IgnixaBundleEntryView(entries[0]);
+            await _bundleHandler.GenerateRequest(view, 0, CancellationToken.None);
+
+            HttpContext capturedHttpContext = _lastCapturedHttpContext;
+            Assert.NotNull(capturedHttpContext);
+            Assert.Equal("PATCH", capturedHttpContext.Request.Method);
+            Assert.Equal(KnownContentTypes.JsonContentType, capturedHttpContext.Request.Headers[HeaderNames.ContentType].ToString());
+
+            string body = await ReadRequestBodyAsync(capturedHttpContext);
+            using JsonDocument document = JsonDocument.Parse(body);
+            Assert.Equal("Parameters", document.RootElement.GetProperty("resourceType").GetString());
+            Assert.Equal("operation", document.RootElement.GetProperty("parameter")[0].GetProperty("name").GetString());
+        }
+
+        [Fact]
+        public async Task GivenAnIgnixaBackedBatchBundleWithMixedEntryTypes_WhenFillRequestListsIsCalled_ThenEveryInnerRequestIsConstructedCorrectly()
+        {
+            const string jsonPatchDocument = """[{"op":"replace","path":"/active","value":true}]""";
+            string base64Data = Convert.ToBase64String(Encoding.UTF8.GetBytes(jsonPatchDocument));
+
+            string bundleJson = """
+                {
+                  "resourceType": "Bundle",
+                  "type": "batch",
+                  "entry": [
+                    {
+                      "fullUrl": "urn:uuid:11111111-1111-1111-1111-111111111111",
+                      "resource": { "resourceType": "Patient", "active": true },
+                      "request": { "method": "POST", "url": "Patient" }
+                    },
+                    {
+                      "resource": { "resourceType": "Patient", "id": "456", "active": false },
+                      "request": {
+                        "method": "PUT",
+                        "url": "Patient/456",
+                        "ifMatch": "W/\"2\"",
+                        "ifNoneMatch": "*",
+                        "ifModifiedSince": "2024-01-01T00:00:00Z",
+                        "ifNoneExist": "identifier=http://example.org|456"
+                      }
+                    },
+                    {
+                      "resource": {
+                        "resourceType": "Binary",
+                        "contentType": "application/json-patch+json",
+                        "data": "__BASE64__"
+                      },
+                      "request": { "method": "PATCH", "url": "Patient/123" }
+                    },
+                    {
+                      "resource": {
+                        "resourceType": "Parameters",
+                        "parameter": [
+                          {
+                            "name": "operation",
+                            "part": [
+                              { "name": "type", "valueCode": "replace" },
+                              { "name": "path", "valueString": "Patient.active" },
+                              { "name": "value", "valueBoolean": true }
+                            ]
+                          }
+                        ]
+                      },
+                      "request": { "method": "PATCH", "url": "Patient/789" }
+                    }
+                  ]
+                }
+                """.Replace("__BASE64__", base64Data, StringComparison.Ordinal);
+
+            IReadOnlyList<BundleComponentJsonNode> entries = ParseIgnixaBatchEntries(bundleJson);
+            IReadOnlyList<IBundleEntryView> views = entries
+                .Select(entry => (IBundleEntryView)new IgnixaBundleEntryView(entry))
+                .ToList();
+
+            var capturedHttpContexts = new List<HttpContext>();
+            _router.When(r => r.RouteAsync(Arg.Any<RouteContext>()))
+                .Do(callInfo =>
+                {
+                    var routeContext = callInfo.Arg<RouteContext>();
+                    capturedHttpContexts.Add(routeContext.HttpContext);
+                    routeContext.Handler = context =>
+                    {
+                        context.Response.StatusCode = 200;
+                        return Task.CompletedTask;
+                    };
+                });
+
+            await _bundleHandler.FillRequestLists(views, CancellationToken.None);
+
+            Assert.Equal(4, capturedHttpContexts.Count);
+
+            // Entry 0: plain create.
+            HttpContext createContext = capturedHttpContexts[0];
+            Assert.Equal("POST", createContext.Request.Method);
+            Assert.Equal("/Patient", createContext.Request.Path.Value);
+            Assert.Equal(KnownContentTypes.JsonContentType, createContext.Request.Headers[HeaderNames.ContentType].ToString());
+            using (JsonDocument createBody = JsonDocument.Parse(await ReadRequestBodyAsync(createContext)))
+            {
+                Assert.Equal("Patient", createBody.RootElement.GetProperty("resourceType").GetString());
+            }
+
+            // Entry 1: update with all four conditional headers.
+            HttpContext updateContext = capturedHttpContexts[1];
+            Assert.Equal("PUT", updateContext.Request.Method);
+            Assert.Equal("/Patient/456", updateContext.Request.Path.Value);
+            Assert.Equal("W/\"2\"", updateContext.Request.Headers[HeaderNames.IfMatch].ToString());
+            Assert.Equal("*", updateContext.Request.Headers[HeaderNames.IfNoneMatch].ToString());
+            Assert.Equal("2024-01-01T00:00:00Z", updateContext.Request.Headers[HeaderNames.IfModifiedSince].ToString());
+            Assert.Equal("identifier=http://example.org|456", updateContext.Request.Headers[KnownHeaders.IfNoneExist].ToString());
+
+            // Entry 2: Binary-wrapped JSON Patch.
+            HttpContext binaryPatchContext = capturedHttpContexts[2];
+            Assert.Equal("PATCH", binaryPatchContext.Request.Method);
+            Assert.Equal("/Patient/123", binaryPatchContext.Request.Path.Value);
+            Assert.Equal(KnownMediaTypeHeaderValues.ApplicationJsonPatch.ToString(), binaryPatchContext.Request.Headers[HeaderNames.ContentType].ToString());
+            Assert.Equal(jsonPatchDocument, await ReadRequestBodyAsync(binaryPatchContext));
+
+            // Entry 3: Parameters FHIRPatch.
+            HttpContext parametersPatchContext = capturedHttpContexts[3];
+            Assert.Equal("PATCH", parametersPatchContext.Request.Method);
+            Assert.Equal("/Patient/789", parametersPatchContext.Request.Path.Value);
+            Assert.Equal(KnownContentTypes.JsonContentType, parametersPatchContext.Request.Headers[HeaderNames.ContentType].ToString());
+            using (JsonDocument parametersBody = JsonDocument.Parse(await ReadRequestBodyAsync(parametersPatchContext)))
+            {
+                Assert.Equal("Parameters", parametersBody.RootElement.GetProperty("resourceType").GetString());
+            }
+        }
+
+        private void CaptureNextRouteAsync()
+        {
+            _router.When(r => r.RouteAsync(Arg.Any<RouteContext>()))
+                .Do(callInfo =>
+                {
+                    var routeContext = callInfo.Arg<RouteContext>();
+                    _lastCapturedHttpContext = routeContext.HttpContext;
+                    routeContext.Handler = context =>
+                    {
+                        context.Response.StatusCode = 200;
+                        return Task.CompletedTask;
+                    };
+                });
+        }
+
+        private static IReadOnlyList<BundleComponentJsonNode> ParseIgnixaBatchEntries(string bundleJson)
+        {
+            var serializer = new IgnixaJsonSerializer();
+            BundleJsonNode bundleNode = serializer.Parse(bundleJson).As<BundleJsonNode>();
+            return bundleNode.Entry.ToList();
+        }
+
+        private static async Task<string> ReadRequestBodyAsync(HttpContext httpContext)
+        {
+            httpContext.Request.Body.Seek(0, SeekOrigin.Begin);
+            using var reader = new StreamReader(httpContext.Request.Body, leaveOpen: true);
+            return await reader.ReadToEndAsync();
         }
 
         private void RouteAsyncFunction(CallInfo callInfo)
