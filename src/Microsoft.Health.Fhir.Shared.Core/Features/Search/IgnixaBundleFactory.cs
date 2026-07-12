@@ -339,24 +339,21 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 }
             }
 
-            if (issue.DetailsCodes != null || issue.DetailsText != null)
+            var coding = issue.DetailsCodes?.Coding ?? Enumerable.Empty<Hl7.Fhir.Model.Coding>();
+            List<CodingJsonNode> codingNodes = coding.Select(c => new CodingJsonNode { System = c.System, Code = c.Code, Display = c.Display }).ToList();
+
+            // Mirrors CommonModelExtensions.ToPoco(): an empty-but-non-null DetailsCodes with no DetailsText
+            // must NOT produce an (empty) Details node.
+            if (codingNodes.Count != 0 || issue.DetailsText != null)
             {
                 var details = new CodeableConceptJsonNode
                 {
                     Text = issue.DetailsText,
                 };
 
-                if (issue.DetailsCodes != null)
+                foreach (CodingJsonNode codingNode in codingNodes)
                 {
-                    foreach (Hl7.Fhir.Model.Coding coding in issue.DetailsCodes.Coding)
-                    {
-                        details.Coding.Add(new CodingJsonNode
-                        {
-                            System = coding.System,
-                            Code = coding.Code,
-                            Display = coding.Display,
-                        });
-                    }
+                    details.Coding.Add(codingNode);
                 }
 
                 issueComponent.Details = details;

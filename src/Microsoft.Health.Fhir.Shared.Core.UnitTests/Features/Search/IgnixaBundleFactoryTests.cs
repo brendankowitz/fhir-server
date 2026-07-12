@@ -133,9 +133,13 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
         [InlineData("123", "1", "POST", "201 Created")]
         [InlineData("123", "1", "PUT", "201 Created")]
         [InlineData("123", "2", "PUT", "200 OK")]
-#if !Stu3
+
+        // Bundle.HTTPVerb.PATCH is part of Firely's version-agnostic Bundle model (Hl7.Fhir.Base), so it
+        // round-trips even under STU3: both factories remap it to PUT (Firely via the
+        // "httpVerb == Bundle.HTTPVerb.PATCH" check in BundleFactory, Ignixa via TryResolveVerb's STU3-only
+        // "PATCH" case), landing on the same "200 OK" for a non-initial version. This is the only place that
+        // exercises the STU3 PATCH->PUT branch in IgnixaBundleFactory.TryResolveVerb.
         [InlineData("123", "2", "PATCH", "200 OK")]
-#endif
         [InlineData("123", "2", "DELETE", "204 NoContent")]
         public void GivenAHistoryResultWithDifferentStatuses_WhenCreateHistoryBundle_ThenIgnixaMatchesFirely(string id, string version, string method, string statusString)
         {
@@ -218,6 +222,31 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
             Assert.Single(operationOutcome.Issue);
             Assert.Equal(OperationOutcomeJsonNode.IssueSeverity.Warning, operationOutcome.Issue[0].Severity);
             Assert.Equal(OperationOutcomeJsonNode.IssueType.NotSupported, operationOutcome.Issue[0].Code);
+        }
+
+        [Fact]
+        public void GivenAnIssueWithEmptyDetailsCodesAndNoDetailsText_WhenCreateSearchBundle_ThenIgnixaOmitsDetailsMatchingFirely()
+        {
+            _urlResolver.ResolveRouteUrl(_unsupportedSearchParameters).Returns(_selfUrl);
+
+            // An empty-but-non-null DetailsCodes combined with a null DetailsText must produce NO Details
+            // node at all -- mirrors CommonModelExtensions.ToPoco()'s "coding.Count != 0 || DetailsText != null"
+            // condition, not a blind null-check on DetailsCodes.
+            var issue = new OperationOutcomeIssue(
+                OperationOutcomeConstants.IssueSeverity.Warning,
+                OperationOutcomeConstants.IssueType.Informational,
+                detailsCodes: new CodableConceptInfo());
+
+            var searchResult = new SearchResult(Array.Empty<SearchResultEntry>(), null, null, _unsupportedSearchParameters, new[] { issue });
+
+            ResourceElement firelyActual = _bundleFactory.CreateSearchBundle(searchResult);
+            ResourceElement ignixaActual = _ignixaBundleFactory.CreateSearchBundle(searchResult);
+
+            var firelyOutcome = (OperationOutcome)firelyActual.ToPoco<Bundle>().Entry[0].Resource;
+            Assert.Null(firelyOutcome.Issue[0].Details);
+
+            var ignixaOutcome = (OperationOutcomeJsonNode)ignixaActual.GetIgnixaRawBundle().Entries[0].ResourceNode;
+            Assert.Null(ignixaOutcome.Issue[0].Details);
         }
 
         [Fact]
