@@ -7,7 +7,7 @@
     <Hl7FhirLegacyVersion>5.11.0</Hl7FhirLegacyVersion>
     <DotNetSdkPackageVersion>9.0.15</DotNetSdkPackageVersion>
     <OpenIddictPackageVersion>6.2.0</OpenIddictPackageVersion>
-    <IgnixaPackageVersion>0.6.7</IgnixaPackageVersion>
+    <IgnixaPackageVersion>0.6.19</IgnixaPackageVersion>
   </PropertyGroup>
   <!-- SDK Packages -->
   <Choose>
@@ -85,7 +85,7 @@
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="$(DotNetSdkPackageVersion)" />
     <PackageVersion Include="Microsoft.Extensions.Http.Polly" Version="$(DotNetSdkPackageVersion)" />
     <PackageVersion Include="Microsoft.Extensions.Http" Version="$(DotNetSdkPackageVersion)" />
-    <!-- Ignixa.Abstractions 0.6.7 requires Microsoft.Extensions.Logging.Abstractions >= 10.0.9; overridden
+    <!-- Ignixa.Abstractions 0.6.19 requires Microsoft.Extensions.Logging.Abstractions >= 10.0.9; overridden
          independently of $(DotNetSdkPackageVersion) since this is a leaf abstractions package with strong
          forward-compat guarantees and no other package in this graph requires an exact match. -->
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
