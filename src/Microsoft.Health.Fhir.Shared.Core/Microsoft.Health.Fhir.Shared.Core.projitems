@@ -84,6 +84,9 @@
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Upsert\ConditionalUpsertResourceHandler.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Upsert\UpsertResourceHandler.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Bundle\BundleSerializer.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Bundle\IgnixaBundleSerializer.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Bundle\IgnixaRawBundle.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Bundle\IgnixaRawBundleEntry.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Upsert\ConditionalUpsertResourceValidator.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Upsert\UpsertResourceValidator.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\BundleFactory.cs" />
