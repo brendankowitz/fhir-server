@@ -47,8 +47,22 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Resources
         private readonly FhirJsonParser _firelyParser = new();
 
         // resourceType, json, expected resolved count
+        //
+        // The first corpus entry (PlanDefinition-anchored) is version-gated: it exercises both a real
+        // reference-resolution path (a urn:uuid: placeholder plus a nested Identifier.assigner
+        // reference, proving recursion into Reference.identifier.assigner) AND a "decoy" -- a field
+        // literally named "reference" that is NOT itself a Reference datatype, to prove neither the
+        // Firely nor the Ignixa path spuriously rewrites it (see IgnixaReferenceScanner's remarks).
+        // The R4+ decoy uses the `Expression` datatype's `reference` (uri) property, but `Expression`
+        // was introduced in R4 and doesn't exist in STU3's model at all -- Firely's STU3 POCO parser
+        // throws FormatException ("unknown datatype Expression") on it. STU3's equivalent decoy is
+        // `DetectedIssue.reference` (also a plain uri, JSON key "reference"), embedded as a contained
+        // resource; STU3's `PlanDefinition` also has no `subject` element and its
+        // `action.condition.expression` is a plain string (not the `Expression` complex type), so the
+        // real-reference piece is carried by a `valueReference` extension instead of `subjectReference`.
         private static readonly (string ResourceType, string Json, int ExpectedResolvedCount)[] Corpus =
         {
+#if !Stu3
             (
                 "PlanDefinition",
                 $$"""
@@ -93,6 +107,56 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Resources
                 }
                 """,
                 2),
+#else
+            (
+                "PlanDefinition",
+                $$"""
+                {
+                    "resourceType": "PlanDefinition",
+                    "id": "pd1",
+                    "status": "draft",
+                    "contained": [
+                        {
+                            "resourceType": "DetectedIssue",
+                            "id": "di1",
+                            "status": "preliminary",
+                            "reference": "http://example.org/expr/99"
+                        }
+                    ],
+                    "extension": [
+                        {
+                            "url": "http://example.org/fhir/StructureDefinition/some-reference-ext",
+                            "valueReference": {
+                                "reference": "{{PatientUrnPlaceholder}}",
+                                "identifier": {
+                                    "system": "http://example.org/identifiers",
+                                    "value": "12345",
+                                    "assigner": {
+                                        "reference": "{{OrganizationUrnPlaceholder}}"
+                                    }
+                                }
+                            }
+                        }
+                    ],
+                    "action": [
+                        {
+                            "condition": [
+                                {
+                                    "kind": "applicability",
+                                    "expression": "true"
+                                }
+                            ]
+                        }
+                    ]
+                }
+                """,
+                2),
+#endif
+
+            // Immunization.occurrenceDateTime is also an R4+ addition (the choice-typed occurrence[x]
+            // element replaced STU3's plain `date` dateTime); STU3's Immunization additionally requires
+            // a `notGiven` boolean that R4+ dropped in favor of a `status` code value.
+#if !Stu3
             (
                 "Immunization",
                 $$"""
@@ -106,6 +170,22 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Resources
                 }
                 """,
                 1),
+#else
+            (
+                "Immunization",
+                $$"""
+                {
+                    "resourceType": "Immunization",
+                    "id": "imm1",
+                    "status": "completed",
+                    "notGiven": false,
+                    "vaccineCode": { "text": "Test vaccine" },
+                    "patient": { "reference": "{{PatientUrnPlaceholder}}" },
+                    "date": "2024-01-01"
+                }
+                """,
+                1),
+#endif
             (
                 "Observation",
                 $$"""
