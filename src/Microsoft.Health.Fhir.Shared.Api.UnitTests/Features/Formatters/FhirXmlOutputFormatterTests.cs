@@ -14,13 +14,17 @@ using System.Xml;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Rest;
 using Hl7.Fhir.Serialization;
+using Ignixa.Serialization.Models;
+using Ignixa.Serialization.SourceNodes;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Formatters;
 using Microsoft.Health.Fhir.Api.Features.Formatters;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
+using Microsoft.Health.Fhir.Core.Features.Resources.Bundle;
 using Microsoft.Health.Fhir.Core.Models;
+using Microsoft.Health.Fhir.Ignixa;
 using Microsoft.Health.Fhir.Shared.Core.Features.Search;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Test.Utilities;
@@ -75,10 +79,26 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Formatters
         }
 
         [Fact]
+        public void GivenAResourceJsonNodeAndXmlContentType_WhenCheckingCanWrite_ThenTrueShouldBeReturned()
+        {
+            bool result = CanWrite(typeof(ResourceJsonNode), ContentType.XML_CONTENT_HEADER);
+
+            Assert.True(result);
+        }
+
+        [Fact]
+        public void GivenAnIgnixaRawBundleAndXmlContentType_WhenCheckingCanWrite_ThenTrueShouldBeReturned()
+        {
+            bool result = CanWrite(typeof(IgnixaRawBundle), ContentType.XML_CONTENT_HEADER);
+
+            Assert.True(result);
+        }
+
+        [Fact]
         public async Task GivenAFhirObjectAndXmlContentType_WhenSerializing_ThenTheObjectIsSerializedToTheResponseStream()
         {
             var serializer = new FhirXmlSerializer();
-            var formatter = new FhirXmlOutputFormatter(serializer, Deserializers.ResourceDeserializer, ModelInfoProvider.Instance);
+            var formatter = new FhirXmlOutputFormatter(serializer, Deserializers.ResourceDeserializer, ModelInfoProvider.Instance, new IgnixaJsonSerializer(), new IgnixaBundleSerializer());
 
             var resource = new OperationOutcome();
 
@@ -140,9 +160,103 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Formatters
             await Run(true, raw, query);
         }
 
+        [Fact]
+        public async Task GivenAResourceJsonNode_WhenWritten_ThenXmlMatchesTheEquivalentFirelyPoco()
+        {
+            var ignixaSerializer = new IgnixaJsonSerializer();
+            var observation = new Observation { Id = Guid.NewGuid().ToString() };
+            var node = ignixaSerializer.Parse(observation.ToJson());
+
+            var nodeXml = await WriteObject(node, typeof(ResourceJsonNode), ignixaSerializer, new IgnixaBundleSerializer());
+            var pocoXml = await WriteObject(observation, typeof(Observation), ignixaSerializer, new IgnixaBundleSerializer());
+
+            Assert.False(string.IsNullOrEmpty(nodeXml));
+            Assert.Equal(pocoXml, nodeXml);
+
+            var parsed = Parser.Parse<Observation>(nodeXml);
+            Assert.Equal(observation.Id, parsed.Id);
+        }
+
+        [Fact]
+        public async Task GivenAnIgnixaRawBundle_WhenWritten_ThenXmlContainsAllEntries()
+        {
+            var ignixaSerializer = new IgnixaJsonSerializer();
+            var ignixaBundleSerializer = new IgnixaBundleSerializer();
+
+            var patient = new Patient { Id = Guid.NewGuid().ToString(), Active = true };
+            var observation = new Observation { Id = Guid.NewGuid().ToString() };
+            var rawBundle = CreateIgnixaRawBundle(ignixaSerializer, patient, observation);
+
+            var xml = await WriteObject(rawBundle, typeof(IgnixaRawBundle), ignixaSerializer, ignixaBundleSerializer);
+
+            Assert.False(string.IsNullOrEmpty(xml));
+
+            var parsed = Parser.Parse<Hl7.Fhir.Model.Bundle>(xml);
+            Assert.Equal(2, parsed.Entry.Count);
+
+            var parsedPatient = Assert.IsType<Patient>(parsed.Entry[0].Resource);
+            Assert.Equal(patient.Id, parsedPatient.Id);
+            Assert.True(parsedPatient.Active);
+
+            var parsedObservation = Assert.IsType<Observation>(parsed.Entry[1].Resource);
+            Assert.Equal(observation.Id, parsedObservation.Id);
+        }
+
+        private static IgnixaRawBundle CreateIgnixaRawBundle(IIgnixaJsonSerializer ignixaSerializer, params Resource[] resources)
+        {
+            var skeleton = new BundleJsonNode
+            {
+                Id = Guid.NewGuid().ToString(),
+                Type = BundleJsonNode.BundleType.Searchset,
+                Total = resources.Length,
+            };
+
+            var entries = resources
+                .Select(resource =>
+                {
+                    var node = ignixaSerializer.Parse(resource.ToJson());
+                    var metadata = new BundleComponentJsonNode
+                    {
+                        Search = new BundleComponentSearchJsonNode { Mode = "match" },
+                    };
+
+                    return IgnixaRawBundleEntry.ForConstructedResource(metadata, node);
+                })
+                .ToList();
+
+            return new IgnixaRawBundle(skeleton, entries);
+        }
+
+        private static async System.Threading.Tasks.Task<string> WriteObject(object obj, Type objectType, IIgnixaJsonSerializer ignixaSerializer, IgnixaBundleSerializer ignixaBundleSerializer)
+        {
+            using var writer = new StringWriter(new StringBuilder());
+            using var body = new MemoryStream();
+
+            var httpContext = new DefaultHttpContext();
+            httpContext.Response.StatusCode = (int)HttpStatusCode.OK;
+            httpContext.Response.Body = body;
+
+            var writeContext = new OutputFormatterWriteContext(
+                httpContext,
+                (_, _) => writer,
+                objectType,
+                obj);
+
+            var formatter = new FhirXmlOutputFormatter(
+                new FhirXmlSerializer(),
+                Deserializers.ResourceDeserializer,
+                ModelInfoProvider.Instance,
+                ignixaSerializer,
+                ignixaBundleSerializer);
+
+            await formatter.WriteResponseBodyAsync(writeContext, Encoding.UTF8);
+
+            return writer.ToString();
+        }
+
         private bool CanWrite(Type modelType, string contentType)
         {
-            var formatter = new FhirXmlOutputFormatter(new FhirXmlSerializer(), Deserializers.ResourceDeserializer, ModelInfoProvider.Instance);
+            var formatter = new FhirXmlOutputFormatter(new FhirXmlSerializer(), Deserializers.ResourceDeserializer, ModelInfoProvider.Instance, new IgnixaJsonSerializer(), new IgnixaBundleSerializer());
 
             var defaultHttpContext = new DefaultHttpContext();
             defaultHttpContext.Request.ContentType = contentType;
@@ -187,7 +301,9 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Formatters
             var formatter = new FhirXmlOutputFormatter(
                new FhirXmlSerializer(),
                Deserializers.ResourceDeserializer,
-               ModelInfoProvider.Instance);
+               ModelInfoProvider.Instance,
+               new IgnixaJsonSerializer(),
+               new IgnixaBundleSerializer());
             await formatter.WriteResponseBodyAsync(writeContext, Encoding.UTF8);
 
             var content = writer.ToString();

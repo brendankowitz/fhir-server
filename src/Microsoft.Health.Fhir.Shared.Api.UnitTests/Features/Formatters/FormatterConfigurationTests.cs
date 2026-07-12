@@ -16,6 +16,7 @@ using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Features.Resources.Bundle;
 using Microsoft.Health.Fhir.Core.Features.Validation.Narratives;
 using Microsoft.Health.Fhir.Core.Models;
+using Microsoft.Health.Fhir.Ignixa;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Test.Utilities;
 using Xunit;
@@ -29,7 +30,7 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Formatters
         private readonly FeatureConfiguration _featureConfiguration = new FeatureConfiguration();
         private readonly FhirJsonInputFormatter _fhirJsonInputFormatter = new FhirJsonInputFormatter(new FhirJsonParser(), ArrayPool<char>.Shared);
         private readonly FhirXmlInputFormatter _fhirXmlInputFormatter = new FhirXmlInputFormatter(new FhirXmlParser());
-        private readonly FhirXmlOutputFormatter _fhirXmlOutputFormatter = new FhirXmlOutputFormatter(new FhirXmlSerializer(), Deserializers.ResourceDeserializer, ModelInfoProvider.Instance);
+        private readonly FhirXmlOutputFormatter _fhirXmlOutputFormatter = new FhirXmlOutputFormatter(new FhirXmlSerializer(), Deserializers.ResourceDeserializer, ModelInfoProvider.Instance, new IgnixaJsonSerializer(), new IgnixaBundleSerializer());
         private readonly HtmlOutputFormatter _htmlOutputFormatter;
         private readonly FhirJsonOutputFormatter _fhirJsonOutputFormatter;
         private readonly FormatterConfiguration _configuration;

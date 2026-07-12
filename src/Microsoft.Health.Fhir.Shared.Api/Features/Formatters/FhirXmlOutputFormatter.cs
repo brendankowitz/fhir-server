@@ -12,32 +12,49 @@ using System.Xml;
 using EnsureThat;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
+using Ignixa.Serialization.SourceNodes;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Formatters;
 using Microsoft.Health.Fhir.Api.Features.ContentTypes;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
+using Microsoft.Health.Fhir.Core.Features.Resources.Bundle;
 using Microsoft.Health.Fhir.Core.Models;
+using Microsoft.Health.Fhir.Ignixa;
 using Microsoft.Health.Fhir.Shared.Core.Features.Search;
+using Newtonsoft.Json;
 using Task = System.Threading.Tasks.Task;
 
 namespace Microsoft.Health.Fhir.Api.Features.Formatters
 {
     internal class FhirXmlOutputFormatter : TextOutputFormatter
     {
+        private static readonly FhirJsonParser JsonParser = new FhirJsonParser();
+
         private readonly FhirXmlSerializer _fhirXmlSerializer;
         private readonly ResourceDeserializer _deserializer;
         private readonly IModelInfoProvider _modelInfoProvider;
+        private readonly IIgnixaJsonSerializer _ignixaSerializer;
+        private readonly IgnixaBundleSerializer _ignixaBundleSerializer;
 
-        public FhirXmlOutputFormatter(FhirXmlSerializer fhirXmlSerializer, ResourceDeserializer deserializer, IModelInfoProvider modelInfoProvider)
+        public FhirXmlOutputFormatter(
+            FhirXmlSerializer fhirXmlSerializer,
+            ResourceDeserializer deserializer,
+            IModelInfoProvider modelInfoProvider,
+            IIgnixaJsonSerializer ignixaSerializer,
+            IgnixaBundleSerializer ignixaBundleSerializer)
         {
             EnsureArg.IsNotNull(fhirXmlSerializer, nameof(fhirXmlSerializer));
             EnsureArg.IsNotNull(deserializer, nameof(deserializer));
             EnsureArg.IsNotNull(modelInfoProvider, nameof(modelInfoProvider));
+            EnsureArg.IsNotNull(ignixaSerializer, nameof(ignixaSerializer));
+            EnsureArg.IsNotNull(ignixaBundleSerializer, nameof(ignixaBundleSerializer));
 
             _fhirXmlSerializer = fhirXmlSerializer;
             _deserializer = deserializer;
             _modelInfoProvider = modelInfoProvider;
+            _ignixaSerializer = ignixaSerializer;
+            _ignixaBundleSerializer = ignixaBundleSerializer;
 
             SupportedEncodings.Add(Encoding.UTF8);
             SupportedEncodings.Add(Encoding.Unicode);
@@ -52,10 +69,13 @@ namespace Microsoft.Health.Fhir.Api.Features.Formatters
         {
             EnsureArg.IsNotNull(type, nameof(type));
 
-            return typeof(Resource).IsAssignableFrom(type) || typeof(RawResourceElement).IsAssignableFrom(type);
+            return typeof(Resource).IsAssignableFrom(type) ||
+                   typeof(RawResourceElement).IsAssignableFrom(type) ||
+                   typeof(ResourceJsonNode).IsAssignableFrom(type) ||
+                   typeof(IgnixaRawBundle).IsAssignableFrom(type);
         }
 
-        public override Task WriteResponseBodyAsync(OutputFormatterWriteContext context, Encoding selectedEncoding)
+        public override async Task WriteResponseBodyAsync(OutputFormatterWriteContext context, Encoding selectedEncoding)
         {
             EnsureArg.IsNotNull(context, nameof(context));
             EnsureArg.IsNotNull(selectedEncoding, nameof(selectedEncoding));
@@ -67,16 +87,42 @@ namespace Microsoft.Health.Fhir.Api.Features.Formatters
             var summaryProvider = _modelInfoProvider.StructureDefinitionSummaryProvider;
             var additionalElements = new HashSet<string>();
 
-            Resource resourceObject = null;
+            void AddRequiredElements(Resource resource)
+            {
+                if (!hasElements || resource == null)
+                {
+                    return;
+                }
+
+                var typeinfo = summaryProvider.Provide(resource.TypeName);
+                var required = typeinfo.GetElements().Where(e => e.IsRequired).ToList();
+                additionalElements.UnionWith(required.Select(x => x.ElementName));
+            }
+
+            Resource resourceObject;
             if (typeof(RawResourceElement).IsAssignableFrom(context.ObjectType))
             {
                 resourceObject = _deserializer.Deserialize(context.Object as RawResourceElement).ToPoco<Resource>();
-                if (hasElements)
+                AddRequiredElements(resourceObject);
+            }
+            else if (context.Object is IgnixaRawBundle ignixaRawBundle)
+            {
+                // IgnixaRawBundle can only be converted via IgnixaBundleSerializer -- see the type's own
+                // remarks on why a generic ToPoco()/skeleton-only conversion would silently produce a
+                // hollow entry array. This mirrors IgnixaFhirJsonOutputFormatter's ToFirelyBundleAsync.
+                var bundle = await ConvertToFirelyBundleAsync(ignixaRawBundle).ConfigureAwait(false);
+
+                foreach (var entry in bundle.Entry)
                 {
-                    var typeinfo = summaryProvider.Provide(resourceObject.TypeName);
-                    var required = typeinfo.GetElements().Where(e => e.IsRequired).ToList();
-                    additionalElements.UnionWith(required.Select(x => x.ElementName));
+                    AddRequiredElements(entry.Resource);
                 }
+
+                resourceObject = bundle;
+            }
+            else if (context.Object is ResourceJsonNode resourceNode)
+            {
+                resourceObject = ConvertToFirelyResource(resourceNode);
+                AddRequiredElements(resourceObject);
             }
             else if (typeof(Hl7.Fhir.Model.Bundle).IsAssignableFrom(context.ObjectType))
             {
@@ -87,12 +133,7 @@ namespace Microsoft.Health.Fhir.Api.Features.Formatters
                 {
                     var rawResource = entry as RawBundleEntryComponent;
                     entry.Resource = _deserializer.Deserialize(rawResource.ResourceElement).ToPoco<Resource>();
-                    if (hasElements)
-                    {
-                        var typeinfo = summaryProvider.Provide(entry.Resource.TypeName);
-                        var required = typeinfo.GetElements().Where(e => e.IsRequired).ToList();
-                        additionalElements.UnionWith(required.Select(x => x.ElementName));
-                    }
+                    AddRequiredElements(entry.Resource);
                 }
 
                 resourceObject = bundle;
@@ -100,12 +141,7 @@ namespace Microsoft.Health.Fhir.Api.Features.Formatters
             else
             {
                 resourceObject = (Resource)context.Object;
-                if (hasElements)
-                {
-                    var typeinfo = summaryProvider.Provide(resourceObject.TypeName);
-                    var required = typeinfo.GetElements().Where(e => e.IsRequired).ToList();
-                    additionalElements.UnionWith(required.Select(x => x.ElementName));
-                }
+                AddRequiredElements(resourceObject);
             }
 
             if (hasElements)
@@ -120,7 +156,7 @@ namespace Microsoft.Health.Fhir.Api.Features.Formatters
             {
                 if (context.HttpContext.GetPrettyOrDefault())
                 {
-                    writer.Formatting = Formatting.Indented;
+                    writer.Formatting = System.Xml.Formatting.Indented;
                 }
 
                 // I'll be happy to call async method here, but it crashes internally on call to XmlReader which doesn't implement
@@ -129,8 +165,35 @@ namespace Microsoft.Health.Fhir.Api.Features.Formatters
                 _fhirXmlSerializer.Serialize(resourceObject, writer, context.HttpContext.GetSummaryTypeOrDefault(), elements: hasElements ? additionalElements.ToArray() : null);
 #pragma warning restore CA1849 // Call async methods when in an async method
             }
+        }
 
-            return Task.CompletedTask;
+        /// <summary>
+        /// Converts a bare <see cref="ResourceJsonNode"/> to a Firely <see cref="Resource"/> POCO by
+        /// serializing it to JSON via the injected <see cref="IIgnixaJsonSerializer"/> and re-parsing with
+        /// <see cref="FhirJsonParser"/>. Avoids adding an <c>IIgnixaSchemaContext</c> dependency just for
+        /// this conversion.
+        /// </summary>
+        private Resource ConvertToFirelyResource(ResourceJsonNode resourceNode)
+        {
+            var json = _ignixaSerializer.Serialize(resourceNode, pretty: false);
+            return JsonParser.Parse<Resource>(json);
+        }
+
+        /// <summary>
+        /// Converts an <see cref="IgnixaRawBundle"/> to a Firely <see cref="Hl7.Fhir.Model.Bundle"/> POCO by
+        /// round-tripping it through <see cref="IgnixaBundleSerializer"/> (the only supported way to
+        /// materialize this carrier's entries) and re-parsing with <see cref="FhirJsonParser"/>. Mirrors
+        /// <c>IgnixaFhirJsonOutputFormatter.ToFirelyBundleAsync</c>.
+        /// </summary>
+        private async System.Threading.Tasks.Task<Hl7.Fhir.Model.Bundle> ConvertToFirelyBundleAsync(IgnixaRawBundle rawBundle)
+        {
+            using var stream = new MemoryStream();
+            await _ignixaBundleSerializer.Serialize(rawBundle, stream, pretty: false).ConfigureAwait(false);
+            stream.Position = 0;
+
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            using var jsonReader = new JsonTextReader(reader);
+            return await JsonParser.ParseAsync<Hl7.Fhir.Model.Bundle>(jsonReader).ConfigureAwait(false);
         }
     }
 }
