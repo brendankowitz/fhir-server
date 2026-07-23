@@ -63,6 +63,14 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 return false;
             }
 
+            // The SMART V2 scope-union flag lives on the base Expression and drives SMART-specific scope filtering.
+            // The bridge cannot reproduce it (Ignixa has no equivalent), so a flagged legacy expression must never be
+            // treated as equivalent to an unflagged bridged expression; force the legacy projection on any mismatch.
+            if (left.IsSmartV2UnionExpressionForScopesSearchParameters != right.IsSmartV2UnionExpressionForScopesSearchParameters)
+            {
+                return false;
+            }
+
             switch (left)
             {
                 case SearchParameterExpression l:
@@ -102,9 +110,9 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 case ChainedExpression l:
                 {
                     var r = (ChainedExpression)right;
-                    return SetEqual(l.ResourceTypes, r.ResourceTypes)
+                    return OrderedTypesEqual(l.ResourceTypes, r.ResourceTypes)
                         && ParametersEqual(l.ReferenceSearchParameter, r.ReferenceSearchParameter)
-                        && SetEqual(l.TargetResourceTypes, r.TargetResourceTypes)
+                        && OrderedTypesEqual(l.TargetResourceTypes, r.TargetResourceTypes)
                         && l.Reversed == r.Reversed
                         && AreStructurallyEquivalent(l.Expression, r.Expression);
                 }
@@ -118,9 +126,9 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                         && l.WildCard == r.WildCard
                         && l.Reversed == r.Reversed
                         && l.Iterate == r.Iterate
-                        && SetEqual(l.ResourceTypes, r.ResourceTypes)
-                        && SetEqual(l.ReferencedTypes, r.ReferencedTypes)
-                        && SetEqual(l.AllowedResourceTypesByScope, r.AllowedResourceTypesByScope);
+                        && OrderedTypesEqual(l.ResourceTypes, r.ResourceTypes)
+                        && NullableSetEqual(l.ReferencedTypes, r.ReferencedTypes)
+                        && NullableSetEqual(l.AllowedResourceTypesByScope, r.AllowedResourceTypesByScope);
                 }
 
                 // NOTE: SmartCompartmentSearchExpression derives from CompartmentSearchExpression, but the
@@ -130,7 +138,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                     var r = (CompartmentSearchExpression)right;
                     return string.Equals(l.CompartmentType, r.CompartmentType, StringComparison.Ordinal)
                         && string.Equals(l.CompartmentId, r.CompartmentId, StringComparison.Ordinal)
-                        && SetEqual(l.FilteredResourceTypes, r.FilteredResourceTypes);
+                        && NullableSetEqual(l.FilteredResourceTypes, r.FilteredResourceTypes);
                 }
 
                 case NotReferencedExpression l:
@@ -208,15 +216,49 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 && Equals(left.Url, right.Url);
         }
 
-        private static bool SetEqual(IEnumerable<string> left, IEnumerable<string> right)
+        /// <summary>
+        /// Compares two ordered resource-type arrays positionally. Downstream Cosmos filtering consumes these arrays by
+        /// position (for example <c>.First()</c>), so a reordering is a genuine query-shape difference. The comparison
+        /// preserves the null-versus-empty distinction (a null collection is never equal to an empty one).
+        /// </summary>
+        private static bool OrderedTypesEqual(string[] left, string[] right)
         {
-            var leftSet = left is null
-                ? new HashSet<string>(StringComparer.Ordinal)
-                : new HashSet<string>(left, StringComparer.Ordinal);
+            if (left is null || right is null)
+            {
+                return ReferenceEquals(left, right);
+            }
 
-            var rightSet = right is null
-                ? new HashSet<string>(StringComparer.Ordinal)
-                : new HashSet<string>(right, StringComparer.Ordinal);
+            if (left.Length != right.Length)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < left.Length; i++)
+            {
+                if (!string.Equals(left[i], right[i], StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Compares two resource-type collections as order-insensitive sets while preserving the null-versus-empty
+        /// distinction. This matters for security-scoping collections such as <c>AllowedResourceTypesByScope</c>
+        /// (a null collection means "unrestricted" whereas an empty collection means "no access") and for wildcard
+        /// <c>ReferencedTypes</c> semantics.
+        /// </summary>
+        private static bool NullableSetEqual(IEnumerable<string> left, IEnumerable<string> right)
+        {
+            if (left is null || right is null)
+            {
+                return ReferenceEquals(left, right);
+            }
+
+            var leftSet = new HashSet<string>(left, StringComparer.Ordinal);
+            var rightSet = new HashSet<string>(right, StringComparer.Ordinal);
 
             return leftSet.SetEquals(rightSet);
         }

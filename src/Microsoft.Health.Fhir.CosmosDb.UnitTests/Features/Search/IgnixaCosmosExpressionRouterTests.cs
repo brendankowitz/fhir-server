@@ -107,6 +107,28 @@ namespace Microsoft.Health.Fhir.CosmosDb.UnitTests.Features.Search
             Assert.Same(bridged, options.Expression);
         }
 
+        [Fact]
+        public void GivenSmartV2ScopeUnionDivergence_WhenRouted_ThenLegacyProjectionRetained()
+        {
+            FhirExpression legacy = new UnionExpression(
+                UnionOperator.All,
+                new[] { FhirExpression.StringEquals(FieldName.String, null, "x", true) })
+            {
+                IsSmartV2UnionExpressionForScopesSearchParameters = true,
+            };
+            FhirExpression bridged = new UnionExpression(
+                UnionOperator.All,
+                new[] { FhirExpression.StringEquals(FieldName.String, null, "x", true) });
+            SearchOptions options = CreateSearchOptions(ignixa: CreateCanonicalFixture(), legacy: legacy);
+            _bridge.Convert(Arg.Any<IgnixaExpr>()).Returns(bridged);
+
+            CreateRouter().Route(options);
+
+            // The bridged union lacks the SMART V2 scope flag; the flagged legacy projection must be retained so
+            // SMART-specific scope filtering is not skipped.
+            Assert.Same(legacy, options.Expression);
+        }
+
         private IgnixaCosmosExpressionRouter CreateRouter() => new IgnixaCosmosExpressionRouter(_bridge, NullLogger.Instance);
 
         private static IgnixaExpr CreateCanonicalFixture() =>

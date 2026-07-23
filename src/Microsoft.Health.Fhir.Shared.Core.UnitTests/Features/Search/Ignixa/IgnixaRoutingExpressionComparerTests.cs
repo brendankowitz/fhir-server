@@ -3,6 +3,7 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
+using System;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Models;
@@ -142,14 +143,80 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Ignixa
             Assert.False(IgnixaRoutingExpressionComparer.AreStructurallyEquivalent(null, expression));
         }
 
-        private static IncludeExpression CreateWildcardInclude(string[] allowedResourceTypesByScope = null)
+        [Fact]
+        public void GivenWildcardIncludes_WhenAllowedScopeNullVersusEmpty_ThenNotEquivalent()
+        {
+            // null AllowedResourceTypesByScope means "unrestricted"; an empty collection means "no access".
+            // The bridge omits this restriction, so an empty legacy restriction must never be treated as equivalent
+            // to an unrestricted bridged include.
+            IncludeExpression unrestricted = CreateWildcardInclude(allowedResourceTypesByScope: null);
+            IncludeExpression noAccess = CreateWildcardInclude(allowedResourceTypesByScope: Array.Empty<string>());
+
+            Assert.False(IgnixaRoutingExpressionComparer.AreStructurallyEquivalent(unrestricted, noAccess));
+        }
+
+        [Fact]
+        public void GivenIncludes_WhenReferencedTypesNullVersusEmpty_ThenNotEquivalent()
+        {
+            IncludeExpression nullReferencedTypes = CreateWildcardInclude(referencedTypes: null);
+            IncludeExpression emptyReferencedTypes = CreateWildcardInclude(referencedTypes: Array.Empty<string>());
+
+            Assert.False(IgnixaRoutingExpressionComparer.AreStructurallyEquivalent(nullReferencedTypes, emptyReferencedTypes));
+        }
+
+        [Fact]
+        public void GivenIncludes_WhenResourceTypesReordered_ThenNotEquivalent()
+        {
+            // Cosmos filtering uses ResourceTypes positionally (.First()); reordering changes the generated query.
+            var left = new IncludeExpression(new[] { "Patient", "Group" }, null, "Patient", null, null, wildCard: true, reversed: false, iterate: false);
+            var right = new IncludeExpression(new[] { "Group", "Patient" }, null, "Patient", null, null, wildCard: true, reversed: false, iterate: false);
+
+            Assert.False(IgnixaRoutingExpressionComparer.AreStructurallyEquivalent(left, right));
+        }
+
+        [Fact]
+        public void GivenChains_WhenTargetTypesReordered_ThenNotEquivalent()
+        {
+            var parameter = new SearchParameterInfo("subject", "subject");
+            FhirExpression predicate = FhirExpression.StringEquals(FieldName.String, null, "x", true);
+            FhirExpression left = FhirExpression.Chained(new[] { "Observation" }, parameter, new[] { "Patient", "Group" }, false, predicate);
+            FhirExpression right = FhirExpression.Chained(new[] { "Observation" }, parameter, new[] { "Group", "Patient" }, false, predicate);
+
+            Assert.False(IgnixaRoutingExpressionComparer.AreStructurallyEquivalent(left, right));
+        }
+
+        [Fact]
+        public void GivenUnions_WhenSmartV2ScopeFlagDiffers_ThenNotEquivalent()
+        {
+            // A SMART V2 scope union drives SMART-specific scope filtering. The bridge cannot set this flag, so a
+            // flagged legacy union must never be treated as equivalent to an unflagged bridged union.
+            var flagged = new UnionExpression(UnionOperator.All, new[] { FhirExpression.StringEquals(FieldName.String, null, "x", true) })
+            {
+                IsSmartV2UnionExpressionForScopesSearchParameters = true,
+            };
+            var unflagged = new UnionExpression(UnionOperator.All, new[] { FhirExpression.StringEquals(FieldName.String, null, "x", true) });
+
+            Assert.False(IgnixaRoutingExpressionComparer.AreStructurallyEquivalent(flagged, unflagged));
+        }
+
+        [Fact]
+        public void GivenSameCompartmentWithSameFilteredTypes_WhenCompared_ThenEquivalent()
+        {
+            // Regression guard: two empty (non-null) filtered-type collections must still compare equivalent.
+            FhirExpression left = FhirExpression.CompartmentSearch("Patient", "123");
+            FhirExpression right = FhirExpression.CompartmentSearch("Patient", "123");
+
+            Assert.True(IgnixaRoutingExpressionComparer.AreStructurallyEquivalent(left, right));
+        }
+
+        private static IncludeExpression CreateWildcardInclude(string[] allowedResourceTypesByScope = null, string[] referencedTypes = null)
         {
             return new IncludeExpression(
                 resourceTypes: new[] { "Patient" },
                 referenceSearchParameter: null,
                 sourceResourceType: "Patient",
                 targetResourceType: null,
-                referencedTypes: null,
+                referencedTypes: referencedTypes,
                 wildCard: true,
                 reversed: false,
                 iterate: false,
