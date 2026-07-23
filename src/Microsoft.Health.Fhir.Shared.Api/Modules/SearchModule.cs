@@ -153,6 +153,7 @@ namespace Microsoft.Health.Fhir.Api.Modules
             services.AddSingleton<Ignixa.Search.Expressions.Parsers.IExpressionParser, Ignixa.Search.Expressions.Parsers.ExpressionParser>();
             services.AddSingleton<Ignixa.Search.Parsing.ISearchOptionsBuilderFactory, IgnixaSearchOptionsBuilderFactory>();
             services.AddSingleton<IIgnixaSearchOptionsAdapter, IgnixaSearchOptionsAdapter>();
+            services.AddSingleton<IIgnixaLegacyExpressionBridge, IgnixaLegacyExpressionBridge>();
             services.AddSingleton<IgnixaSearchTenantAccessor>();
             services.AddSingleton<ISearchOptionsFactory, SearchOptionsFactory>();
             services.AddSingleton<IReferenceToElementResolver, LightweightReferenceToElementResolver>();

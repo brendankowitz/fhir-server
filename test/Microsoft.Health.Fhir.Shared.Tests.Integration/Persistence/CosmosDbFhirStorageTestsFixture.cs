@@ -325,6 +325,7 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
                 cosmosDbPhysicalPartitionInfo,
                 compartmentSearchRewriter,
                 smartCompartmentSearchRewriter,
+                new IgnixaLegacyExpressionBridge(_searchParameterDefinitionManager),
                 NullLogger<FhirCosmosSearchService>.Instance);
 
             await _searchParameterDefinitionManager.EnsureInitializedAsync(CancellationToken.None);

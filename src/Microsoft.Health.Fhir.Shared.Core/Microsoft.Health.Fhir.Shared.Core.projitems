@@ -80,8 +80,11 @@
     <Compile Include="$(MSBuildThisFileDirectory)Features\Resources\Upsert\UpsertResourceValidator.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\BundleFactory.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Ignixa\IgnixaFhirVersionAdapter.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Ignixa\IgnixaLegacyExpressionBridge.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Ignixa\IgnixaLegacyExpressionBridgeVisitor.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Ignixa\IgnixaSearchOptionsAdapter.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Ignixa\IgnixaSearchTenantAccessor.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Ignixa\IgnixaSearchValueBridge.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Parameters\ISearchParameterValidator.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Parameters\PropertyMappingExtensions.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Features\Search\Parameters\SearchParameterSupportResolver.cs" />

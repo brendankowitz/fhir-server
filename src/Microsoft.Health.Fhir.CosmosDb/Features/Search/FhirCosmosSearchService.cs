@@ -39,6 +39,7 @@ namespace Microsoft.Health.Fhir.CosmosDb.Features.Search
         private readonly RequestContextAccessor<IFhirRequestContext> _requestContextAccessor;
         private readonly CosmosDataStoreConfiguration _cosmosConfig;
         private readonly ICosmosDbCollectionPhysicalPartitionInfo _physicalPartitionInfo;
+        private readonly IIgnixaLegacyExpressionBridge _ignixaLegacyExpressionBridge;
         private readonly Lazy<IReadOnlyCollection<IExpressionVisitorWithInitialContext<object, Expression>>> _expressionRewriters;
         private readonly ILogger<FhirCosmosSearchService> _logger;
         private readonly SearchParameterInfo _resourceTypeSearchParameter;
@@ -54,6 +55,7 @@ namespace Microsoft.Health.Fhir.CosmosDb.Features.Search
             ICosmosDbCollectionPhysicalPartitionInfo physicalPartitionInfo,
             CompartmentSearchRewriter compartmentSearchRewriter,
             SmartCompartmentSearchRewriter smartCompartmentSearchRewriter,
+            IIgnixaLegacyExpressionBridge ignixaLegacyExpressionBridge,
             ILogger<FhirCosmosSearchService> logger)
             : base(searchOptionsFactory, fhirDataStore, logger)
         {
@@ -64,6 +66,7 @@ namespace Microsoft.Health.Fhir.CosmosDb.Features.Search
             EnsureArg.IsNotNull(physicalPartitionInfo, nameof(physicalPartitionInfo));
             EnsureArg.IsNotNull(compartmentSearchRewriter, nameof(compartmentSearchRewriter));
             EnsureArg.IsNotNull(smartCompartmentSearchRewriter, nameof(smartCompartmentSearchRewriter));
+            EnsureArg.IsNotNull(ignixaLegacyExpressionBridge, nameof(ignixaLegacyExpressionBridge));
             EnsureArg.IsNotNull(logger, nameof(logger));
 
             _fhirDataStore = fhirDataStore;
@@ -71,6 +74,7 @@ namespace Microsoft.Health.Fhir.CosmosDb.Features.Search
             _requestContextAccessor = requestContextAccessor;
             _cosmosConfig = cosmosConfig;
             _physicalPartitionInfo = physicalPartitionInfo;
+            _ignixaLegacyExpressionBridge = ignixaLegacyExpressionBridge;
             _logger = logger;
             _resourceTypeSearchParameter = SearchParameterInfo.ResourceTypeSearchParameter;
             _resourceIdSearchParameter = new SearchParameterInfo(SearchParameterNames.Id, SearchParameterNames.Id);
@@ -107,6 +111,10 @@ namespace Microsoft.Health.Fhir.CosmosDb.Features.Search
         {
             // we're going to mutate searchOptions, so clone it first so the caller of this method does not see the changes.
             searchOptions = searchOptions.Clone();
+
+            // Route the canonical Ignixa expression through the one-way compatibility bridge before the FHIR Server
+            // Cosmos pipeline consumes searchOptions.Expression. See RouteThroughIgnixaBridge for the divergence guard.
+            RouteThroughIgnixaBridge(searchOptions);
 
             if (searchOptions.Expression != null)
             {
@@ -223,6 +231,54 @@ namespace Microsoft.Health.Fhir.CosmosDb.Features.Search
             }
 
             return base.SearchAsync(resourceType, queryParameters, cancellationToken, isAsyncOperation, resourceVersionTypes, onlyIds, isIncludesOperation);
+        }
+
+        /// <summary>
+        /// Lowers the canonical Ignixa expression with <see cref="Ignixa.Search.Expressions.LegacyExpressionLowerer"/>
+        /// and converts it to the FHIR Server expression model through <see cref="IIgnixaLegacyExpressionBridge"/>.
+        /// When the bridged expression matches the legacy projection (or no legacy projection exists) it becomes the
+        /// working expression, routing Cosmos search through the bridge. Any structural divergence or bridge failure is
+        /// logged and the fully-specified legacy projection is retained, so the canonical and projection paths can
+        /// never diverge silently and the query is never broadened.
+        /// </summary>
+        /// <param name="searchOptions">The cloned search options whose expression may be replaced in place.</param>
+        private void RouteThroughIgnixaBridge(SearchOptions searchOptions)
+        {
+            if (searchOptions.IgnixaOptions?.Expression == null)
+            {
+                // Nothing canonical to route (for example unmigrated internal search paths). Keep the legacy projection.
+                return;
+            }
+
+            Expression bridged;
+            try
+            {
+                Ignixa.Search.Expressions.Expression lowered =
+                    Ignixa.Search.Expressions.LegacyExpressionLowerer.LowerToLegacy(searchOptions.IgnixaOptions.Expression);
+                bridged = _ignixaLegacyExpressionBridge.Convert(lowered);
+            }
+            catch (SearchOperationNotSupportedException ex)
+            {
+                // The bridge could not faithfully represent a node or value that the legacy projection still covers.
+                // Retain the legacy projection (which remains fully specified) and surface the gap rather than broaden.
+                _logger.LogWarning(ex, "Ignixa expression bridge could not lower the canonical expression for Cosmos; retaining the legacy projection.");
+                return;
+            }
+
+            Expression legacy = searchOptions.Expression;
+            if (legacy != null && !bridged.ValueInsensitiveEquals(legacy))
+            {
+                // The FHIR Server request pipeline augments the legacy projection with concerns that are not present in
+                // the raw Ignixa tree (for example SMART compartment scoping and fine-grained access control unions).
+                // Retain the legacy projection for those cases, but log so the divergence is never silent.
+                _logger.LogWarning(
+                    "Ignixa bridged expression diverges structurally from the legacy projection; retaining the legacy projection. Bridged: {BridgedExpression}; Legacy: {LegacyExpression}",
+                    bridged.ToString(),
+                    legacy.ToString());
+                return;
+            }
+
+            searchOptions.Expression = bridged;
         }
 
         private async Task<List<Expression>> PerformChainedSearch(SearchOptions searchOptions, IReadOnlyList<ChainedExpression> chainedExpressions, CancellationToken cancellationToken)
