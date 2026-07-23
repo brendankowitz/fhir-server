@@ -12,9 +12,9 @@
 
 ## Scope and execution gates
 
-This is one combined plan because parser, Cosmos, SQL compilation, schema, writes, and continuation behavior must be validated as one search contract. Each task produces a testable increment, but the compiled SQL path must not be enabled for production traffic until Gate 4 and the differential gates pass.
+This is one combined plan because parser, Cosmos, SQL compilation, schema, writes, and continuation behavior must be validated as one search contract. Each task produces a testable increment, but the compiled SQL path must not be enabled for production traffic until Gate 4 and the differential gates pass. The initial integration uses the currently published `Ignixa.Search` 0.6.28 and `Ignixa.Search.Sql` 0.6.28-alpha packages; gaps fixed by PR #353 are tracked as explicit unsupported shapes and upstream-upgrade gates rather than silently approximated in FHIR Server.
 
-The implementation starts from the current `main`-based branch. The Ignixa dependency must be the exact package containing the merged fixes from PR #353 and the `worktree-ignixa-datalayer-sqlserver` work. If a public production API is missing, change it in the Ignixa repository first, publish a versioned package, and then update this branch; do not add a second SQL renderer or copy Ignixa semantic types into FHIR Server.
+The implementation starts from the current `main`-based branch. Pin the currently published Ignixa package versions first, then upgrade to the package containing PR #353 when it is available. If a public production API is missing, change it in the Ignixa repository first, publish a versioned package, and then update this branch; do not add a second SQL renderer or copy Ignixa semantic types into FHIR Server.
 
 ## File map
 
@@ -122,7 +122,7 @@ The implementation starts from the current `main`-based branch. The Ignixa depen
 
 - [ ] **Step 1: Record the required Ignixa API contract before changing FHIR Server**
 
-The package used by FHIR Server must expose these production-facing members without FHIR Server reaching into internal types:
+The initial package baseline is `Ignixa.Search` 0.6.28 and `Ignixa.Search.Sql` 0.6.28-alpha. Verify that baseline exposes these production-facing members without FHIR Server reaching into internal types:
 
 ```csharp
 using Ignixa.Abstractions;
@@ -151,22 +151,31 @@ public sealed record EmittedSql(
     IReadOnlyList<SqlTextRange>? TextRanges = null);
 ```
 
-The exact member names must match the published Ignixa package. `QueryPlan` supplies result-shape metadata through `Includes` and `CountOnly`; the adapter records the package assembly version and FHIR Server schema version alongside the emitted result. Before compiled execution, the Ignixa package must also expose a public way to carry physical resource/version/deleted/access-control/feed-range predicates into `Lower.Run` without FHIR Server editing SQL. If PR #353 has not yet published these required parser/compiler fixes, make that change in `brendankowitz/ignixa-fhir` and publish the package before continuing.
+The exact member names must match the published Ignixa package. `QueryPlan` supplies result-shape metadata through `Includes` and `CountOnly`; the adapter records the package assembly version and FHIR Server schema version alongside the emitted result. Any missing PR #353 behavior or public lowering input is recorded as an unsupported capability and routed to legacy; FHIR Server must not edit emitted SQL or reimplement the missing compiler behavior. Upgrade the package and remove each capability gate only after the upstream version is published and its contract tests pass.
 
 - [ ] **Step 2: Add exact, centrally managed package versions**
 
-Add the exact numeric package versions produced from the Ignixa commit containing PR #353 and the SQL data-layer changes. Do not use floating versions, branch URLs, or a source project reference in the committed FHIR Server build:
+Add the exact published baseline package versions `0.6.28` for `Ignixa.Search` and `0.6.28-alpha` for `Ignixa.Search.Sql`. Do not use floating versions, branch URLs, or a source project reference in the committed FHIR Server build. Upgrade both entries together when the package containing PR #353 is published:
 
 ```xml
 <ItemGroup>
   <PackageVersion Include="Ignixa.Search" Version="$(IgnixaSearchPackageVersion)" />
-  <PackageVersion Include="Ignixa.Search.Sql" Version="$(IgnixaSearchPackageVersion)" />
+  <PackageVersion Include="Ignixa.Search.Sql" Version="$(IgnixaSearchSqlPackageVersion)" />
 </ItemGroup>
 ```
 
-Add `IgnixaSearchPackageVersion` to the central property group with the exact numeric version published from the upstream commit before restore; the committed branch must contain a real released or prerelease number.
+Use separate central properties so the baseline's package versions remain explicit:
 
-Add explicit `PackageReference` entries to the six production project files listed above. Keep `Ignixa.Search` explicit even though `Ignixa.Search.Sql` depends on it so package restore cannot silently select a different semantic library version.
+```xml
+<PropertyGroup>
+  <IgnixaSearchPackageVersion>0.6.28</IgnixaSearchPackageVersion>
+  <IgnixaSearchSqlPackageVersion>0.6.28-alpha</IgnixaSearchSqlPackageVersion>
+</PropertyGroup>
+```
+
+The committed branch must contain real released or prerelease numbers; update both properties together when an upstream package containing PR #353 is available.
+
+Add explicit `PackageReference` entries to all listed production project files. Keep `Ignixa.Search` explicit even though `Ignixa.Search.Sql` depends on it so package restore cannot silently select a different semantic library version.
 
 - [ ] **Step 3: Restore and build the dependency-only change**
 
@@ -177,7 +186,7 @@ dotnet restore .\Microsoft.Health.Fhir.sln
 dotnet build .\Microsoft.Health.Fhir.sln --no-restore --configuration Debug --no-incremental
 ```
 
-Expected: restore resolves the two pinned Ignixa packages for `net10.0`, and the solution builds without any source changes.
+Expected: restore resolves `Ignixa.Search` 0.6.28 and `Ignixa.Search.Sql` 0.6.28-alpha for `net10.0`, and the solution builds without any source changes. If the baseline lacks a required public member, record the gap and keep that capability disabled rather than introducing a local renderer.
 
 - [ ] **Step 4: Commit the dependency boundary**
 
