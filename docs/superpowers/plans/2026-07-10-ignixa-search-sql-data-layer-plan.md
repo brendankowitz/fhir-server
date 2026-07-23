@@ -304,7 +304,7 @@ searchOptions.IgnixaOptions = _ignixaSearchOptionsAdapter.Build(
     _ignixaSearchTenantAccessor.GetTenantId(_contextAccessor.RequestContext));
 ```
 
-Set `Expression`, `SearchParameters`, `Sort`, `UnsupportedSearchParams`, and count/total compatibility values from the Ignixa result through dedicated mapping methods. Populate the legacy `Expression` property with the Task 3 lowerer/bridge projection, not by reparsing the query. Implement the Task 3 bridge before enabling this projection. Retain `_expressionParser` only under a test-oracle constructor path or a differential test helper; it must not be used by normal request creation.
+Set `Expression`, `SearchParameters`, `Sort`, `UnsupportedSearchParams`, and count/total compatibility values from the Ignixa result through dedicated mapping methods. Until Task 3 supplies the Cosmos bridge, retain a clearly named transitional `LegacyExpressionProjection` that invokes `_expressionParser` only to keep legacy Cosmos/SQL consumers operational; the Ignixa result remains canonical and the two representations must be compared in differential tests. Task 3 must replace this projection with the Ignixa lowerer/bridge before compiled or Cosmos production routing is enabled. After Task 3, `_expressionParser` is retained only under a test-oracle constructor path or differential helper.
 
 - [ ] **Step 6: Register the adapter and test parser parity**
 
