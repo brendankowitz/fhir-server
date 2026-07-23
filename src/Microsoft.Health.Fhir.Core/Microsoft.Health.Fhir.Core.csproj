@@ -54,7 +54,6 @@
     <PackageReference Include="Ensure.That" />
     <PackageReference Include="FluentValidation" />
     <PackageReference Include="Ignixa.Search" />
-    <PackageReference Include="Ignixa.Search.Sql" />
     <PackageReference Include="Medino" />
     <PackageReference Include="Microsoft.AspNetCore.JsonPatch" />
     <PackageReference Include="Microsoft.Data.SqlClient" />
