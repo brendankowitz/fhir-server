@@ -21,6 +21,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
 
         short GetSearchParamId(Uri searchParamUri);
 
+        bool TryGetSearchParamId(Uri searchParamUri, out short id);
+
         void TryAddSearchParamIdToUriMapping(string searchParamUri, short searchParamId);
 
         void RemoveSearchParamIdToUriMapping(string searchParamUri);
