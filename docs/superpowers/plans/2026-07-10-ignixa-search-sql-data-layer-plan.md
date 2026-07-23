@@ -334,7 +334,10 @@ Add differential cases that compare legacy and Ignixa outcomes for ordinary toke
 Run:
 
 ```powershell
-dotnet test .\src\Microsoft.Health.Fhir.Shared.Core.UnitTests\Microsoft.Health.Fhir.Shared.Core.UnitTests.csproj --configuration Debug --filter "FullyQualifiedName~SearchOptionsFactoryTests|FullyQualifiedName~IgnixaSearchOptionsAdapterTests"
+dotnet test .\src\Microsoft.Health.Fhir.R4.Core.UnitTests\Microsoft.Health.Fhir.R4.Core.UnitTests.csproj --configuration Debug --filter "FullyQualifiedName~SearchOptionsFactoryTests|FullyQualifiedName~IgnixaSearchOptionsAdapterTests"
+dotnet test .\src\Microsoft.Health.Fhir.R4B.Core.UnitTests\Microsoft.Health.Fhir.R4B.Core.UnitTests.csproj --configuration Debug --filter "FullyQualifiedName~SearchOptionsFactoryTests|FullyQualifiedName~IgnixaSearchOptionsAdapterTests"
+dotnet test .\src\Microsoft.Health.Fhir.R5.Core.UnitTests\Microsoft.Health.Fhir.R5.Core.UnitTests.csproj --configuration Debug --filter "FullyQualifiedName~SearchOptionsFactoryTests|FullyQualifiedName~IgnixaSearchOptionsAdapterTests"
+dotnet test .\src\Microsoft.Health.Fhir.Stu3.Core.UnitTests\Microsoft.Health.Fhir.Stu3.Core.UnitTests.csproj --configuration Debug --filter "FullyQualifiedName~SearchOptionsFactoryTests|FullyQualifiedName~IgnixaSearchOptionsAdapterTests"
 ```
 
 Expected: all existing control-parameter tests and new Ignixa parity tests pass for every compiled FHIR version.
