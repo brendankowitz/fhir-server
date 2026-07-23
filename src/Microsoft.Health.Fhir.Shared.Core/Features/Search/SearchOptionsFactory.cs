@@ -40,6 +40,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         private readonly ISearchParameterDefinitionManager _searchParameterDefinitionManager;
         private readonly ILogger _logger;
         private readonly CoreFeatureConfiguration _featureConfiguration;
+        private readonly IIgnixaSearchOptionsAdapter _ignixaSearchOptionsAdapter;
+        private readonly IgnixaSearchTenantAccessor _ignixaSearchTenantAccessor;
         private SearchParameterInfo _resourceTypeSearchParameter;
         private readonly HashSet<string> _queryHintParameterNames = new() { KnownQueryParameterNames.GlobalEndSurrogateId, KnownQueryParameterNames.EndSurrogateId, KnownQueryParameterNames.StartSurrogateId, KnownQueryParameterNames.IgnoreSearchParamHash };
 
@@ -50,6 +52,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             RequestContextAccessor<IFhirRequestContext> contextAccessor,
             ISortingValidator sortingValidator,
             ExpressionAccessControl expressionAccess,
+            IIgnixaSearchOptionsAdapter ignixaSearchOptionsAdapter,
+            IgnixaSearchTenantAccessor ignixaSearchTenantAccessor,
             ILogger<SearchOptionsFactory> logger)
         {
             EnsureArg.IsNotNull(expressionParser, nameof(expressionParser));
@@ -58,6 +62,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             EnsureArg.IsNotNull(contextAccessor, nameof(contextAccessor));
             EnsureArg.IsNotNull(sortingValidator, nameof(sortingValidator));
             EnsureArg.IsNotNull(expressionAccess, nameof(expressionAccess));
+            EnsureArg.IsNotNull(ignixaSearchOptionsAdapter, nameof(ignixaSearchOptionsAdapter));
+            EnsureArg.IsNotNull(ignixaSearchTenantAccessor, nameof(ignixaSearchTenantAccessor));
             EnsureArg.IsNotNull(logger, nameof(logger));
 
             _expressionParser = expressionParser;
@@ -67,6 +73,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             _searchParameterDefinitionManager = searchParameterDefinitionManagerResolver();
             _logger = logger;
             _featureConfiguration = featureConfiguration.Value;
+            _ignixaSearchOptionsAdapter = ignixaSearchOptionsAdapter;
+            _ignixaSearchTenantAccessor = ignixaSearchTenantAccessor;
         }
 
         private SearchParameterInfo ResourceTypeSearchParameter
@@ -127,6 +135,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 
             var searchParams = new SearchParams();
             var unsupportedSearchParameters = new List<Tuple<string, string>>();
+            var ignixaQueryParameters = new List<Tuple<string, string>>();
             bool setDefaultBundleTotal = true;
             var notReferencedSearches = new List<string>();
 
@@ -156,6 +165,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 }
                 else if (string.Equals(query.Item1, KnownQueryParameterNames.Type, StringComparison.OrdinalIgnoreCase))
                 {
+                    ignixaQueryParameters.Add(query);
+
                     if (string.IsNullOrWhiteSpace(query.Item2))
                     {
                         throw new BadRequestException(string.Format(Core.Resources.InvalidTypeParameter, query.Item2));
@@ -201,6 +212,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 }
                 else if (string.Equals(query.Item1, KnownQueryParameterNames.Total, StringComparison.OrdinalIgnoreCase))
                 {
+                    ignixaQueryParameters.Add(query);
+
                     if (Enum.TryParse<TotalType>(query.Item2, true, out var totalType))
                     {
                         ValidateTotalType(totalType);
@@ -215,6 +228,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 }
                 else if (query.Item1 == KnownQueryParameterNames.Count && Convert.ToInt32(query.Item2) == 0)
                 {
+                    ignixaQueryParameters.Add(query);
+
                     try
                     {
                         searchParams.Add(KnownQueryParameterNames.Summary, SummaryType.Count.ToString());
@@ -264,6 +279,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 }
                 else
                 {
+                    ignixaQueryParameters.Add(query);
+
                     // Parse the search parameters.
                     try
                     {
@@ -390,6 +407,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             }
 
             var resourceTypesString = parsedResourceTypes.Select(x => x.ToString()).ToArray();
+            searchOptions.IgnixaOptions = _ignixaSearchOptionsAdapter.Build(resourceType, ignixaQueryParameters, _ignixaSearchTenantAccessor.TenantId);
+            AddIgnixaBundleIssues(searchOptions.IgnixaOptions);
 
             // Form all the include revinclude expressions before for the Smart queries access control check
             // Collect all the resource types required by the include/revinclude expressions
@@ -415,7 +434,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             {
                 try
                 {
-                    var parsed = _expressionParser.Parse(resourceTypesString, q.Item1, q.Item2);
+                    var parsed = LegacyExpressionProjection(resourceTypesString, q.Item1, q.Item2);
 
                     foreach (var resourceTypeString in resourceTypesString)
                     {
@@ -462,10 +481,12 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 
                     if (useSmartCompartmentDefinition)
                     {
+                        AppendIgnixaCompartmentExpression(searchOptions, compartmentType, compartmentId, resourceTypesString);
                         searchExpressions.Add(Expression.SmartCompartmentSearch(compartmentType, compartmentId, resourceTypesString));
                     }
                     else
                     {
+                        AppendIgnixaCompartmentExpression(searchOptions, compartmentType, compartmentId, resourceTypesString);
                         searchExpressions.Add(Expression.CompartmentSearch(compartmentType, compartmentId, resourceTypesString));
                     }
                 }
@@ -491,6 +512,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                     // Don't add the smart compartment twice. this is a patch for bug number AB#152447.
                     if (!searchExpressions.Any(e => e.ValueInsensitiveEquals(Expression.SmartCompartmentSearch(smartCompartmentType, smartCompartmentId, null))))
                     {
+                        AppendIgnixaCompartmentExpression(searchOptions, smartCompartmentType, smartCompartmentId, resourceTypesString);
                         searchExpressions.Add(Expression.SmartCompartmentSearch(smartCompartmentType, smartCompartmentId, resourceTypesString));
                     }
                 }
@@ -529,6 +551,14 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             else if (searchExpressions.Count > 1)
             {
                 searchOptions.Expression = Expression.And(searchExpressions.ToArray());
+            }
+
+            if (searchOptions.IgnixaOptions?.UnsupportedParams != null)
+            {
+                unsupportedSearchParameters.AddRange(
+                    searchOptions.IgnixaOptions.UnsupportedParams
+                        .Select(param => Tuple.Create(param, string.Empty))
+                        .Where(param => !unsupportedSearchParameters.Any(existing => existing.Item1 == param.Item1)));
             }
 
             invalidSearchParameters.AddRange(unsupportedSearchParameters);
@@ -722,6 +752,65 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             }
         }
 
+        private Expression LegacyExpressionProjection(string[] resourceTypesString, string name, string value)
+        {
+            return _expressionParser.Parse(resourceTypesString, name, value);
+        }
+
+        private static void AppendIgnixaCompartmentExpression(SearchOptions searchOptions, string compartmentType, string compartmentId, IReadOnlyCollection<string> resourceTypesString)
+        {
+            if (searchOptions.IgnixaOptions == null)
+            {
+                return;
+            }
+
+            var compartmentExpression = new Ignixa.Search.Expressions.CompartmentSearchExpression(
+                compartmentType,
+                compartmentId,
+                resourceTypesString?.ToHashSet());
+
+            if (ContainsIgnixaExpression(searchOptions.IgnixaOptions.Expression, compartmentExpression))
+            {
+                return;
+            }
+
+            searchOptions.IgnixaOptions.Expression = searchOptions.IgnixaOptions.Expression == null
+                ? compartmentExpression
+                : Ignixa.Search.Expressions.Expression.And(searchOptions.IgnixaOptions.Expression, compartmentExpression);
+        }
+
+        private static bool ContainsIgnixaExpression(Ignixa.Search.Expressions.Expression expression, Ignixa.Search.Expressions.Expression expected)
+        {
+            if (expression == null)
+            {
+                return false;
+            }
+
+            if (expression.ValueInsensitiveEquals(expected))
+            {
+                return true;
+            }
+
+            return expression is Ignixa.Search.Expressions.MultiaryExpression multiaryExpression &&
+                multiaryExpression.Expressions.Any(item => ContainsIgnixaExpression(item, expected));
+        }
+
+        private void AddIgnixaBundleIssues(Ignixa.Search.Models.SearchOptions ignixaOptions)
+        {
+            if (ignixaOptions?.BundleIssues == null)
+            {
+                return;
+            }
+
+            foreach (Ignixa.Search.Models.IssueComponent issue in ignixaOptions.BundleIssues)
+            {
+                _contextAccessor.RequestContext?.BundleIssues.Add(new OperationOutcomeIssue(
+                    issue.Severity,
+                    issue.Code,
+                    issue.Diagnostics));
+            }
+        }
+
         private void LogExpresssionSearchParameters(Expression expression)
         {
             if (expression == null)
@@ -875,7 +964,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                                 {
                                     try
                                     {
-                                        return _expressionParser.Parse(new[] { clinicalScopeResourceType.ToString() }, q.Item1, q.Item2);
+                                        return LegacyExpressionProjection(new[] { clinicalScopeResourceType.ToString() }, q.Item1, q.Item2);
                                     }
                                     catch (SearchParameterNotSupportedException)
                                     {

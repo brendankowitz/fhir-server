@@ -52,6 +52,8 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
         private readonly CoreFeatureConfiguration _coreFeatures;
         private DefaultFhirRequestContext _defaultFhirRequestContext;
         private readonly ISortingValidator _sortingValidator;
+        private readonly IIgnixaSearchOptionsAdapter _ignixaAdapter;
+        private readonly IgnixaSearchTenantAccessor _ignixaSearchTenantAccessor;
 
         public SearchOptionsFactoryTests()
         {
@@ -65,8 +67,12 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
             _defaultFhirRequestContext = new DefaultFhirRequestContext();
 
             _sortingValidator = Substitute.For<ISortingValidator>();
+            _ignixaAdapter = Substitute.For<IIgnixaSearchOptionsAdapter>();
+            _ignixaAdapter.Build(Arg.Any<string>(), Arg.Any<IReadOnlyList<Tuple<string, string>>>(), Arg.Any<int?>())
+                .Returns(new global::Ignixa.Search.Models.SearchOptions());
 
             RequestContextAccessor<IFhirRequestContext> contextAccessor = _defaultFhirRequestContext.SetupAccessor();
+            _ignixaSearchTenantAccessor = new IgnixaSearchTenantAccessor(contextAccessor);
             _factory = new SearchOptionsFactory(
                 _expressionParser,
                 () => searchParameterDefinitionManager,
@@ -74,6 +80,8 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
                 contextAccessor,
                 _sortingValidator,
                 new ExpressionAccessControl(contextAccessor),
+                _ignixaAdapter,
+                _ignixaSearchTenantAccessor,
                 NullLogger<SearchOptionsFactory>.Instance);
         }
 
@@ -225,6 +233,47 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
 
             Assert.NotNull(options);
             Assert.Equal(5, options.MaxItemCount);
+        }
+
+        [Fact]
+        public void GivenSearchParameters_WhenCreated_ThenIgnixaAdapterReceivesCanonicalParametersAndTenant()
+        {
+            var ignixaOptions = new global::Ignixa.Search.Models.SearchOptions();
+            _defaultFhirRequestContext.Properties[IgnixaSearchContextPropertyNames.TenantId] = 17;
+
+            var queryParameters = new[]
+            {
+                Tuple.Create(KnownQueryParameterNames.ContinuationToken, ContinuationTokenEncoder.Encode("token")),
+                Tuple.Create(KnownQueryParameterNames.FeedRange, "range"),
+                Tuple.Create(KnownQueryParameterNames.Format, "json"),
+                Tuple.Create(KnownQueryParameterNames.Pretty, "true"),
+                Tuple.Create(KnownQueryParameterNames.Type, "Patient"),
+                Tuple.Create(KnownQueryParameterNames.Count, "5"),
+                Tuple.Create(KnownQueryParameterNames.Total, "none"),
+                Tuple.Create("name", "Smith"),
+            };
+
+            var expectedIgnixaParameters = new[]
+            {
+                Tuple.Create(KnownQueryParameterNames.Type, "Patient"),
+                Tuple.Create(KnownQueryParameterNames.Count, "5"),
+                Tuple.Create(KnownQueryParameterNames.Total, "none"),
+                Tuple.Create("name", "Smith"),
+            };
+
+            _ignixaAdapter.Build(
+                DefaultResourceType,
+                Arg.Is<IReadOnlyList<Tuple<string, string>>>(actual => actual.SequenceEqual(expectedIgnixaParameters)),
+                17)
+                .Returns(ignixaOptions);
+
+            SearchOptions options = CreateSearchOptions(queryParameters: queryParameters);
+
+            Assert.Same(ignixaOptions, options.IgnixaOptions);
+            _ignixaAdapter.Received(1).Build(
+                DefaultResourceType,
+                Arg.Is<IReadOnlyList<Tuple<string, string>>>(actual => actual.SequenceEqual(expectedIgnixaParameters)),
+                17);
         }
 
         [Fact]
@@ -846,6 +895,8 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
                 contextAccessor,
                 Substitute.For<ISortingValidator>(),
                 new ExpressionAccessControl(contextAccessor),
+                Substitute.For<IIgnixaSearchOptionsAdapter>(),
+                new IgnixaSearchTenantAccessor(contextAccessor),
                 NullLogger<SearchOptionsFactory>.Instance);
 
             // Act

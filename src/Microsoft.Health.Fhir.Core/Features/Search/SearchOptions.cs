@@ -31,6 +31,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             ContinuationToken = other.ContinuationToken;
             CountOnly = other.CountOnly;
             IncludeTotal = other.IncludeTotal;
+            IgnixaOptions = other.IgnixaOptions;
             OnlyIds = other.OnlyIds;
 
             MaxItemCountSpecifiedByClient = other.MaxItemCountSpecifiedByClient;
@@ -141,6 +142,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         /// Gets the search expression.
         /// </summary>
         public Expression Expression { get; internal set; }
+
+        internal Ignixa.Search.Models.SearchOptions IgnixaOptions { get; set; }
 
         /// <summary>
         /// Gets the collection of search parameters used for filtering and querying resources.

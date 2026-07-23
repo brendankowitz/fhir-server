@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using EnsureThat;
+using Ignixa.Specification.Extensions;
 using Medino;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -143,6 +144,16 @@ namespace Microsoft.Health.Fhir.Api.Modules
 
             services.AddSingleton<ISearchParameterExpressionParser, SearchParameterExpressionParser>();
             services.AddSingleton<IExpressionParser, ExpressionParser>();
+            services.AddSingleton(_ => IgnixaFhirVersionAdapter.Current.GetSchemaProvider());
+            services.AddSingleton<Ignixa.Search.Indexing.SearchValues.IReferenceSearchValueParser, Ignixa.Search.Indexing.SearchValues.ReferenceSearchValueParser>();
+            services.AddSingleton<Ignixa.Search.Expressions.Parsers.ISearchParameterExpressionParser, Ignixa.Search.Expressions.Parsers.SearchParameterExpressionParser>();
+            services.AddSingleton<Ignixa.Search.Definition.SearchParameterDefinitionManager>();
+            services.AddSingleton<Ignixa.Search.Definition.ISearchParameterDefinitionManager>(sp => new Ignixa.Search.Definition.SearchableSearchParameterDefinitionManager(sp.GetRequiredService<Ignixa.Search.Definition.SearchParameterDefinitionManager>()));
+            services.AddSingleton<Ignixa.Search.Definition.ISearchParameterDefinitionManager.SearchableSearchParameterDefinitionManagerResolver>(sp => () => sp.GetRequiredService<Ignixa.Search.Definition.ISearchParameterDefinitionManager>());
+            services.AddSingleton<Ignixa.Search.Expressions.Parsers.IExpressionParser, Ignixa.Search.Expressions.Parsers.ExpressionParser>();
+            services.AddSingleton<Ignixa.Search.Parsing.ISearchOptionsBuilderFactory, IgnixaSearchOptionsBuilderFactory>();
+            services.AddSingleton<IIgnixaSearchOptionsAdapter, IgnixaSearchOptionsAdapter>();
+            services.AddSingleton<IgnixaSearchTenantAccessor>();
             services.AddSingleton<ISearchOptionsFactory, SearchOptionsFactory>();
             services.AddSingleton<IReferenceToElementResolver, LightweightReferenceToElementResolver>();
             services.AddTransient<ExpressionAccessControl>();
