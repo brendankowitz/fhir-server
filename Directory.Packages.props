@@ -6,6 +6,8 @@
     <Hl7FhirLegacyVersion>5.11.0</Hl7FhirLegacyVersion>
     <DotNetSdkPackageVersion>10.0.10</DotNetSdkPackageVersion>
     <OpenIddictPackageVersion>6.2.0</OpenIddictPackageVersion>
+    <IgnixaSearchPackageVersion>0.6.28</IgnixaSearchPackageVersion>
+    <IgnixaSearchSqlPackageVersion>0.6.28-alpha</IgnixaSearchSqlPackageVersion>
   </PropertyGroup>
   <!-- SDK Packages -->
   <Choose>
@@ -49,6 +51,8 @@
     <PackageVersion Include="DotNet.ReproducibleBuilds" Version="1.2.25" />
     <PackageVersion Include="Ensure.That" Version="10.1.0" />
     <PackageVersion Include="FluentValidation" Version="11.11.0" />
+    <PackageVersion Include="Ignixa.Search" Version="$(IgnixaSearchPackageVersion)" />
+    <PackageVersion Include="Ignixa.Search.Sql" Version="$(IgnixaSearchSqlPackageVersion)" />
     <PackageVersion Include="Hl7.Fhir.Base" Version="$(Hl7FhirVersion)" />
     <PackageVersion Include="Hl7.Fhir.STU3" Version="$(Hl7FhirVersion)" />
     <PackageVersion Include="Hl7.Fhir.R4" Version="$(Hl7FhirVersion)" />

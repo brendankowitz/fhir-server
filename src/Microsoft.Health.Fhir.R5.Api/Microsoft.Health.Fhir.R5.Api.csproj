@@ -10,6 +10,8 @@
     <PackageReference Include="Azure.Storage.Blobs" />
     <PackageReference Include="Ensure.That" />
     <PackageReference Include="FluentValidation" />
+    <PackageReference Include="Ignixa.Search" />
+    <PackageReference Include="Ignixa.Search.Sql" />
     <PackageReference Include="Hl7.Fhir.R5" />
     <PackageReference Include="Hl7.Fhir.Specification.Data.R5" PrivateAssets="build;analyzers" />
     <PackageReference Include="Medino" />

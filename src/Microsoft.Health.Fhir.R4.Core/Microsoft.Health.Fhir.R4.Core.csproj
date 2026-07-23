@@ -14,6 +14,8 @@
     <PackageReference Include="AngleSharp" />
     <PackageReference Include="Ensure.That" />
     <PackageReference Include="FluentValidation" />
+    <PackageReference Include="Ignixa.Search" />
+    <PackageReference Include="Ignixa.Search.Sql" />
     <PackageReference Include="Medino" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" />
     <PackageReference Include="Microsoft.Extensions.Http" />

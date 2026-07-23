@@ -10,6 +10,8 @@
     <PackageReference Include="AngleSharp" />
     <PackageReference Include="Ensure.That" />
     <PackageReference Include="FluentValidation" />
+    <PackageReference Include="Ignixa.Search" />
+    <PackageReference Include="Ignixa.Search.Sql" />
     <PackageReference Include="Hl7.Fhir.Validation.Legacy.R4B" PrivateAssets="build;analyzers" />
     <PackageReference Include="Hl7.Fhir.R4B" />
     <PackageReference Include="Medino" />

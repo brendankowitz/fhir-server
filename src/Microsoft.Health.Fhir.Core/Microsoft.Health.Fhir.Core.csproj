@@ -1,4 +1,8 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Ignixa.Abstractions exposes Ignixa.Domain.Constants, which conflicts with existing FHIR Constants types under CA1724. -->
+    <NoWarn>$(NoWarn);CA1724</NoWarn>
+  </PropertyGroup>
   <ItemGroup>
     <None Remove="Features\Security\roles.schema.json" />
   </ItemGroup>
@@ -49,6 +53,8 @@
     <PackageReference Include="AngleSharp" />
     <PackageReference Include="Ensure.That" />
     <PackageReference Include="FluentValidation" />
+    <PackageReference Include="Ignixa.Search" />
+    <PackageReference Include="Ignixa.Search.Sql" />
     <PackageReference Include="Medino" />
     <PackageReference Include="Microsoft.AspNetCore.JsonPatch" />
     <PackageReference Include="Microsoft.Data.SqlClient" />
