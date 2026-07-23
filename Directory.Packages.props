@@ -6,8 +6,8 @@
     <Hl7FhirLegacyVersion>5.11.0</Hl7FhirLegacyVersion>
     <DotNetSdkPackageVersion>10.0.10</DotNetSdkPackageVersion>
     <OpenIddictPackageVersion>6.2.0</OpenIddictPackageVersion>
-    <IgnixaSearchPackageVersion>0.6.28</IgnixaSearchPackageVersion>
-    <IgnixaSearchSqlPackageVersion>0.6.28-alpha</IgnixaSearchSqlPackageVersion>
+    <IgnixaSearchPackageVersion>0.6.32</IgnixaSearchPackageVersion>
+    <IgnixaSearchSqlPackageVersion>0.6.32-alpha</IgnixaSearchSqlPackageVersion>
   </PropertyGroup>
   <!-- SDK Packages -->
   <Choose>
