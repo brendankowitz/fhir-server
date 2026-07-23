@@ -59,16 +59,6 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
                 Col("LastUpdated", "datetimeoffset", 7, null, false),
                 Col("IsPartiallySupported", "bit", null, null, false),
             }),
-            new ExpectedTable("System", "dbo", new[]
-            {
-                Col("SystemId", "int", null, null, false),
-                Col("Value", "nvarchar", 256, null, false),
-            }),
-            new ExpectedTable("QuantityCode", "dbo", new[]
-            {
-                Col("QuantityCodeId", "int", null, null, false),
-                Col("Value", "nvarchar", 256, "Latin1_General_100_CS_AS", false),
-            }),
             new ExpectedTable("StringSearchParam", "dbo", new[]
             {
                 Col("ResourceTypeId", "smallint", null, null, false),

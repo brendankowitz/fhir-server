@@ -65,5 +65,35 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
             return Task.FromResult<short?>(null);
         }
+
+        /// <inheritdoc />
+        public Task<int?> GetSystemIdAsync(string system, CancellationToken cancellationToken)
+        {
+            EnsureArg.IsNotNullOrWhiteSpace(system, nameof(system));
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (_model.TryGetSystemId(system, out int id))
+            {
+                return Task.FromResult<int?>(id);
+            }
+
+            return Task.FromResult<int?>(null);
+        }
+
+        /// <inheritdoc />
+        public Task<int?> GetQuantityCodeIdAsync(string code, CancellationToken cancellationToken)
+        {
+            EnsureArg.IsNotNullOrWhiteSpace(code, nameof(code));
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (_model.TryGetQuantityCodeId(code, out int id))
+            {
+                return Task.FromResult<int?>(id);
+            }
+
+            return Task.FromResult<int?>(null);
+        }
     }
 }

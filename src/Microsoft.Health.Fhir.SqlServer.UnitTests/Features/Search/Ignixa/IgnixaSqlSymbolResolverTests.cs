@@ -65,6 +65,156 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             Assert.Null(result);
         }
 
+        [Theory]
+        [InlineData(0)]
+        [InlineData(42)]
+        public async Task GetSystemIdAsync_WhenSystemExists_ReturnsId(int expectedId)
+        {
+            // Arrange
+            const string system = "http://example.org/system";
+            _model.TryGetSystemId(system, out Arg.Any<int>())
+                .Returns(x =>
+                {
+                    x[1] = expectedId;
+                    return true;
+                });
+
+            // Act
+            int? result = await _resolver.GetSystemIdAsync(system, CancellationToken.None);
+
+            // Assert
+            Assert.Equal(expectedId, result);
+        }
+
+        [Fact]
+        public async Task GetSystemIdAsync_WhenSystemMissing_ReturnsNull()
+        {
+            // Arrange
+            _model.TryGetSystemId("Unknown", out Arg.Any<int>())
+                .Returns(false);
+
+            // Act
+            int? result = await _resolver.GetSystemIdAsync("Unknown", CancellationToken.None);
+
+            // Assert
+            Assert.Null(result);
+        }
+
+        [Fact]
+        public async Task GetSystemIdAsync_WhenCancelled_DoesNotCallModel()
+        {
+            // Arrange
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+
+            // Act & Assert
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => _resolver.GetSystemIdAsync("http://example.org/system", cts.Token));
+            _model.DidNotReceiveWithAnyArgs().TryGetSystemId(default!, out Arg.Any<int>());
+        }
+
+        [Fact]
+        public async Task GetSystemIdAsync_WhenModelThrows_PropagatesException()
+        {
+            // Arrange
+            var expectedException = new InvalidOperationException("Model not initialized");
+            _model.TryGetSystemId(Arg.Any<string>(), out Arg.Any<int>())
+                .Throws(expectedException);
+
+            // Act & Assert
+            var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => _resolver.GetSystemIdAsync("http://example.org/system", CancellationToken.None));
+            Assert.Same(expectedException, thrown);
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData(" ")]
+        [InlineData("\t")]
+        public async Task GetSystemIdAsync_WhenSystemIsInvalid_ThrowsArgumentException(string system)
+        {
+            // Act & Assert
+            await Assert.ThrowsAnyAsync<ArgumentException>(
+                () => _resolver.GetSystemIdAsync(system, CancellationToken.None));
+            _model.DidNotReceiveWithAnyArgs().TryGetSystemId(default!, out Arg.Any<int>());
+        }
+
+        [Theory]
+        [InlineData(0)]
+        [InlineData(42)]
+        public async Task GetQuantityCodeIdAsync_WhenCodeExists_ReturnsId(int expectedId)
+        {
+            // Arrange
+            const string code = "mg";
+            _model.TryGetQuantityCodeId(code, out Arg.Any<int>())
+                .Returns(x =>
+                {
+                    x[1] = expectedId;
+                    return true;
+                });
+
+            // Act
+            int? result = await _resolver.GetQuantityCodeIdAsync(code, CancellationToken.None);
+
+            // Assert
+            Assert.Equal(expectedId, result);
+        }
+
+        [Fact]
+        public async Task GetQuantityCodeIdAsync_WhenCodeMissing_ReturnsNull()
+        {
+            // Arrange
+            _model.TryGetQuantityCodeId("Unknown", out Arg.Any<int>())
+                .Returns(false);
+
+            // Act
+            int? result = await _resolver.GetQuantityCodeIdAsync("Unknown", CancellationToken.None);
+
+            // Assert
+            Assert.Null(result);
+        }
+
+        [Fact]
+        public async Task GetQuantityCodeIdAsync_WhenCancelled_DoesNotCallModel()
+        {
+            // Arrange
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+
+            // Act & Assert
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => _resolver.GetQuantityCodeIdAsync("mg", cts.Token));
+            _model.DidNotReceiveWithAnyArgs().TryGetQuantityCodeId(default!, out Arg.Any<int>());
+        }
+
+        [Fact]
+        public async Task GetQuantityCodeIdAsync_WhenModelThrows_PropagatesException()
+        {
+            // Arrange
+            var expectedException = new InvalidOperationException("Model not initialized");
+            _model.TryGetQuantityCodeId(Arg.Any<string>(), out Arg.Any<int>())
+                .Throws(expectedException);
+
+            // Act & Assert
+            var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => _resolver.GetQuantityCodeIdAsync("mg", CancellationToken.None));
+            Assert.Same(expectedException, thrown);
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData(" ")]
+        [InlineData("\t")]
+        public async Task GetQuantityCodeIdAsync_WhenCodeIsInvalid_ThrowsArgumentException(string code)
+        {
+            // Act & Assert
+            await Assert.ThrowsAnyAsync<ArgumentException>(
+                () => _resolver.GetQuantityCodeIdAsync(code, CancellationToken.None));
+            _model.DidNotReceiveWithAnyArgs().TryGetQuantityCodeId(default!, out Arg.Any<int>());
+        }
+
         [Fact]
         public async Task GetSearchParamIdAsync_WhenParameterExists_ReturnsId()
         {
