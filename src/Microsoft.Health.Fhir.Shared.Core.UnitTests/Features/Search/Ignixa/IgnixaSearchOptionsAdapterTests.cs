@@ -5,14 +5,22 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Ignixa.Abstractions;
 using Ignixa.Search.Parsing;
 using Ignixa.Specification.Extensions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Health.Core.Features.Context;
+using Microsoft.Health.Fhir.Core.Exceptions;
 using Microsoft.Health.Fhir.Core.Features.Context;
+using Microsoft.Health.Fhir.Core.Features.Definition;
+using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
+using Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers;
+using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Core.UnitTests.Features.Context;
+using Microsoft.Health.Fhir.ValueSets;
 using Microsoft.Health.Test.Utilities;
 using NSubstitute;
 using Xunit;
@@ -28,10 +36,10 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Ignixa
         {
 #if Stu3
             const FhirVersion expectedVersion = FhirVersion.Stu3;
-#elif R4
-            const FhirVersion expectedVersion = FhirVersion.R4;
 #elif R4B
             const FhirVersion expectedVersion = FhirVersion.R4B;
+#elif R4
+            const FhirVersion expectedVersion = FhirVersion.R4;
 #elif R5
             const FhirVersion expectedVersion = FhirVersion.R5;
 #else
@@ -164,6 +172,58 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Ignixa
                 null);
 
             Assert.Contains("subject.name", options.UnsupportedParams);
+        }
+
+        [Theory]
+        [InlineData("name", "Smith")]
+        [InlineData("subject.name", "Smith")]
+        public void GivenSameSearchInput_WhenComparedWithLegacyParser_ThenSupportOutcomeMatches(string name, string value)
+        {
+            IgnixaSearchOptionsAdapter adapter = CreateRealAdapter();
+            global::Ignixa.Search.Models.SearchOptions ignixaOptions = adapter.Build(
+                "Patient",
+                new[] { Tuple.Create(name, value) },
+                null);
+
+            ISearchParameterDefinitionManager searchParameterDefinitionManager = Substitute.For<ISearchParameterDefinitionManager>();
+            var nameSearchParameter = new SearchParameterInfo("name", "name", SearchParamType.String);
+            searchParameterDefinitionManager.GetSearchParameter(Arg.Any<string>(), Arg.Any<string>())
+                .Returns(callInfo =>
+                {
+                    if (callInfo.ArgAt<string>(0) == "Patient" && callInfo.ArgAt<string>(1) == "name")
+                    {
+                        return nameSearchParameter;
+                    }
+
+                    throw new SearchParameterNotSupportedException(callInfo.ArgAt<string>(0), callInfo.ArgAt<string>(1));
+                });
+
+            var searchParameterExpressionParser = Substitute.For<ISearchParameterExpressionParser>();
+            searchParameterExpressionParser.Parse(
+                    Arg.Any<SearchParameterInfo>(),
+                    Arg.Any<SearchModifier>(),
+                    Arg.Any<string>())
+                .Returns(Expression.StringEquals(FieldName.String, null, value, true));
+
+            var legacyParser = new Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers.ExpressionParser(
+                () => searchParameterDefinitionManager,
+                searchParameterExpressionParser);
+
+            bool legacySupported;
+            try
+            {
+                Assert.NotNull(legacyParser.Parse(new[] { "Patient" }, name, value));
+                legacySupported = true;
+            }
+            catch (SearchParameterNotSupportedException)
+            {
+                legacySupported = false;
+            }
+
+            bool ignixaSupported = !ignixaOptions.UnsupportedParams.Contains(name);
+
+            Assert.Equal(legacySupported, ignixaSupported);
+            Assert.Equal(legacySupported, ignixaOptions.Expression != null);
         }
 
         [Fact]

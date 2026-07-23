@@ -61,5 +61,24 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
 
             Assert.Throws<InvalidOperationException>(() => searchOptions.IncludeCount = input);
         }
+
+        [Fact]
+        public void GivenIgnixaOptions_WhenCloned_ThenCloneHasIndependentIgnixaOptions()
+        {
+            var searchOptions = new SearchOptions
+            {
+                IgnixaOptions = new Ignixa.Search.Models.SearchOptions
+                {
+                    Expression = new Ignixa.Search.Expressions.CompartmentSearchExpression("Patient", "123", null),
+                },
+            };
+
+            SearchOptions clone = searchOptions.Clone();
+
+            clone.IgnixaOptions.Expression = null;
+
+            Assert.NotSame(searchOptions.IgnixaOptions, clone.IgnixaOptions);
+            Assert.NotNull(searchOptions.IgnixaOptions.Expression);
+        }
     }
 }

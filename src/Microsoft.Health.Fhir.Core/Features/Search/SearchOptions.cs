@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Models;
 
@@ -31,14 +32,17 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             ContinuationToken = other.ContinuationToken;
             CountOnly = other.CountOnly;
             IncludeTotal = other.IncludeTotal;
-            IgnixaOptions = other.IgnixaOptions;
+            IgnixaOptions = CloneIgnixaOptions(other.IgnixaOptions);
             OnlyIds = other.OnlyIds;
+            FeedRange = other.FeedRange;
+            IgnoreSearchParamHash = other.IgnoreSearchParamHash;
+            IncludeContinuationTokenSearch = other.IncludeContinuationTokenSearch;
 
             MaxItemCountSpecifiedByClient = other.MaxItemCountSpecifiedByClient;
             Expression = other.Expression;
-            SearchParameters = new List<SearchParameterInfo>(other.SearchParameters);
-            UnsupportedSearchParams = new List<Tuple<string, string>>(other.UnsupportedSearchParams);
-            Sort = new List<(SearchParameterInfo, SortOrder)>(other.Sort);
+            SearchParameters = other.SearchParameters == null ? null : new List<SearchParameterInfo>(other.SearchParameters);
+            UnsupportedSearchParams = other.UnsupportedSearchParams == null ? null : new List<Tuple<string, string>>(other.UnsupportedSearchParams);
+            Sort = other.Sort == null ? null : new List<(SearchParameterInfo, SortOrder)>(other.Sort);
 
             if (other.MaxItemCount > 0)
             {
@@ -50,7 +54,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 IncludeCount = other.IncludeCount;
             }
 
-            QueryHints = other.QueryHints;
+            QueryHints = other.QueryHints == null ? null : new List<(string Param, string Value)>(other.QueryHints);
 
             ResourceVersionTypes = other.ResourceVersionTypes;
             IncludesContinuationToken = other.IncludesContinuationToken;
@@ -196,8 +200,37 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         public bool ContainsIterativeInclude { get; set; }
 
         /// <summary>
-        /// Performs a shallow clone of this instance
+        /// Creates a clone of this instance.
         /// </summary>
-        public SearchOptions Clone() => (SearchOptions)MemberwiseClone();
+        public SearchOptions Clone() => new SearchOptions(this);
+
+        private static Ignixa.Search.Models.SearchOptions CloneIgnixaOptions(Ignixa.Search.Models.SearchOptions options)
+        {
+            if (options == null)
+            {
+                return null;
+            }
+
+            return new Ignixa.Search.Models.SearchOptions
+            {
+                MaxItemCount = options.MaxItemCount,
+                ContinuationToken = options.ContinuationToken,
+                Expression = options.Expression,
+                Sort = options.Sort?.ToList(),
+                Include = options.Include?.ToList(),
+                RevInclude = options.RevInclude?.ToList(),
+                Elements = options.Elements?.ToHashSet(),
+                Total = options.Total,
+                Summary = options.Summary,
+                UnsupportedParams = options.UnsupportedParams?.ToList(),
+                BundleIssues = options.BundleIssues?.ToList(),
+                ResourceType = options.ResourceType,
+                ResourceTypes = options.ResourceTypes?.ToList(),
+                StartSurrogateId = options.StartSurrogateId,
+                EndSurrogateId = options.EndSurrogateId,
+                IncludesMaxItemCount = options.IncludesMaxItemCount,
+                IncludesContinuationToken = options.IncludesContinuationToken,
+            };
+        }
     }
 }

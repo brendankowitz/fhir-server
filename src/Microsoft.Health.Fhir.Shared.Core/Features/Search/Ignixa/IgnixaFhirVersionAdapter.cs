@@ -21,10 +21,10 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             {
 #if Stu3
                 return Ignixa.Abstractions.FhirVersion.Stu3;
-#elif R4
-                return Ignixa.Abstractions.FhirVersion.R4;
 #elif R4B
                 return Ignixa.Abstractions.FhirVersion.R4B;
+#elif R4
+                return Ignixa.Abstractions.FhirVersion.R4;
 #elif R5
                 return Ignixa.Abstractions.FhirVersion.R5;
 #else
