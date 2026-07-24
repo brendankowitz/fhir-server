@@ -22,6 +22,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Registration
         public double QueryPlanReuseCheckerRefreshPeriod { get; set; } = 3600.0;
 
         /// <summary>
+        /// Enables Ignixa SQL compilation for eligible searches without executing the emitted SQL.
+        /// </summary>
+        public bool EnableIgnixaSqlCompileOnly { get; set; } = false;
+
+        /// <summary>
         /// When true (together with <see cref="EnableFhirDateContainment"/>),
         /// <see cref="Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.ScalarTemporalEqualityRewriter"/>
         /// collapses an exact-day equality on allow-listed scalar date parameters (currently <c>birthdate</c>)

@@ -123,6 +123,16 @@ namespace Microsoft.Extensions.DependencyInjection
                 .AsSelf()
                 .AsService<ISymbolResolver>();
 
+            services.Add<IgnixaSqlCompilerAdapter>()
+                .Scoped()
+                .AsSelf()
+                .AsService<IIgnixaSqlCompilerAdapter>();
+
+            services.Add<IgnixaSqlCompileOnlyRouter>()
+                .Scoped()
+                .AsSelf()
+                .AsService<IIgnixaSqlCompileOnlyRouter>();
+
             AddSqlServerTableRowParameterGenerators(services);
 
             services.Add<SearchParamTableExpressionQueryGeneratorFactory>()
