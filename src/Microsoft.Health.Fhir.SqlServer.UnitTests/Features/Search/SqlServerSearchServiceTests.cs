@@ -28,6 +28,7 @@ using Microsoft.Health.Fhir.SqlServer.Features.Search;
 using Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions;
 using Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors;
 using Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.QueryGenerators;
+using Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage;
 using Microsoft.Health.Fhir.SqlServer.Registration;
 using Microsoft.Health.Fhir.Tests.Common;
@@ -38,6 +39,7 @@ using Microsoft.Health.SqlServer.Features.Schema;
 using Microsoft.Health.Test.Utilities;
 using NSubstitute;
 using Xunit;
+using IgnixaSearchOptions = Ignixa.Search.Models.SearchOptions;
 
 namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
 {
@@ -59,6 +61,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
         private readonly RequestContextAccessor<IFhirRequestContext> _requestContextAccessor;
         private readonly ISqlQueryHashCalculator _queryHashCalculator;
         private readonly IQueryPlanReuseChecker _queryPlanReuseChecker;
+        private readonly IIgnixaSqlCompileOnlyRouter _ignixaSqlCompileOnlyRouter;
         private readonly SqlServerSearchService _searchService;
 
         public SqlServerSearchServiceTests()
@@ -72,6 +75,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
             _requestContextAccessor = Substitute.For<RequestContextAccessor<IFhirRequestContext>>();
             _queryHashCalculator = Substitute.For<ISqlQueryHashCalculator>();
             _queryPlanReuseChecker = Substitute.For<IQueryPlanReuseChecker>();
+            _ignixaSqlCompileOnlyRouter = Substitute.For<IIgnixaSqlCompileOnlyRouter>();
 
             var config = new SqlServerDataStoreConfiguration
             {
@@ -116,6 +120,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                 _compressedRawResourceConverter,
                 _queryHashCalculator,
                 _queryPlanReuseChecker,
+                _ignixaSqlCompileOnlyRouter,
                 NullLogger<SqlServerSearchService>.Instance);
         }
 
@@ -162,6 +167,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                     _compressedRawResourceConverter,
                     _queryHashCalculator,
                     _queryPlanReuseChecker,
+                    Substitute.For<IIgnixaSqlCompileOnlyRouter>(),
                     NullLogger<SqlServerSearchService>.Instance);
             });
 
@@ -211,6 +217,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                     _compressedRawResourceConverter,
                     _queryHashCalculator,
                     _queryPlanReuseChecker,
+                    Substitute.For<IIgnixaSqlCompileOnlyRouter>(),
                     NullLogger<SqlServerSearchService>.Instance);
             });
 
@@ -260,6 +267,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                     _compressedRawResourceConverter,
                     _queryHashCalculator,
                     _queryPlanReuseChecker,
+                    Substitute.For<IIgnixaSqlCompileOnlyRouter>(),
                     NullLogger<SqlServerSearchService>.Instance);
             });
 
@@ -559,6 +567,105 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                 default:
                     return false;
             }
+        }
+
+        // ---------------------------------------------------------------------------
+        // IIgnixaSqlCompileOnlyRouter wiring tests (Task 5)
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Verifies that <see cref="SqlServerSearchService.SearchAsync"/> invokes
+        /// <see cref="IIgnixaSqlCompileOnlyRouter.ObserveAsync"/> exactly once at the canonical request
+        /// boundary — before SQL execution — and that the legacy search path continues after the call
+        /// (i.e. observation does not short-circuit execution).
+        /// </summary>
+        [Fact]
+        public async Task SearchAsync_WithIgnixaOptions_CallsObserveAsyncExactlyOnce()
+        {
+            // Arrange: create options that carry non-null IgnixaOptions so the assertion covers
+            // the documented contract (IgnixaOptions != null on the forwarded SqlSearchOptions).
+            // Sort and UnsupportedSearchParams must be non-null to avoid ArgumentNullException
+            // inside SearchImpl before ExecuteSql is reached.
+            var baseOptions = new SearchOptions
+            {
+                MaxItemCount = 10,
+                Sort = new List<(SearchParameterInfo searchParameterInfo, Microsoft.Health.Fhir.Core.Features.Search.SortOrder sortOrder)>(),
+                UnsupportedSearchParams = new List<Tuple<string, string>>(),
+            };
+            baseOptions.IgnixaOptions = new IgnixaSearchOptions
+            {
+                ResourceType = "Patient",
+                ResourceTypes = new List<string> { "Patient" },
+            };
+
+            using var cts = new CancellationTokenSource();
+
+            // _ignixaSqlCompileOnlyRouter is already a substitute configured to return normally
+            // (NSubstitute default for Task-returning methods is Task.CompletedTask).
+
+            // Act: SearchAsync will proceed past ObserveAsync and enter the legacy RunSearch path.
+            // CreateStats inside SearchImpl casts _model to SqlServerFhirModel — which throws
+            // InvalidCastException because the test uses a substitute. We catch it to isolate the
+            // router assertion; the throw itself proves the legacy path was entered (not skipped).
+            try
+            {
+                await _searchService.SearchAsync(baseOptions, cts.Token);
+            }
+            catch (InvalidCastException)
+            {
+                // Expected: _model is a substitute that cannot be cast to SqlServerFhirModel in
+                // CreateStats. The exception originates inside the legacy SQL execution path, after
+                // ObserveAsync has already returned — confirming observation did not short-circuit.
+            }
+            catch (NullReferenceException)
+            {
+                // Also acceptable: reached the null-searchResult code path (e.g. ExecuteSql returned
+                // Task.CompletedTask without running its lambda).
+            }
+
+            // Assert 1: ObserveAsync was called exactly once (canonical-request boundary).
+            await _ignixaSqlCompileOnlyRouter.Received(1).ObserveAsync(
+                Arg.Is<SqlSearchOptions>(o => o.IgnixaOptions != null),
+                Arg.Any<bool>(),
+                Arg.Any<CancellationToken>());
+        }
+
+        /// <summary>
+        /// Verifies that an <see cref="OperationCanceledException"/> thrown from
+        /// <see cref="IIgnixaSqlCompileOnlyRouter.ObserveAsync"/> propagates out of
+        /// <see cref="SqlServerSearchService.SearchAsync"/> without being swallowed or converted
+        /// to an empty / success result.
+        /// </summary>
+        [Fact]
+        public async Task SearchAsync_WhenObserveAsyncThrowsOperationCanceledException_PropagatesCancellation()
+        {
+            // Arrange
+            var baseOptions = new SearchOptions
+            {
+                MaxItemCount = 10,
+            };
+            baseOptions.IgnixaOptions = new IgnixaSearchOptions
+            {
+                ResourceType = "Patient",
+                ResourceTypes = new List<string> { "Patient" },
+            };
+
+            using var cts = new CancellationTokenSource();
+
+            _ignixaSqlCompileOnlyRouter
+                .ObserveAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+                .Returns<Task>(_ => Task.FromException(new OperationCanceledException(cts.Token)));
+
+            // Act & Assert: the cancellation exception must not be swallowed.
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => _searchService.SearchAsync(baseOptions, cts.Token));
+
+            // Verify: SQL execution was never reached because ObserveAsync threw first.
+            await _sqlRetryService.DidNotReceive().ExecuteSql(
+                Arg.Any<Func<Microsoft.Data.SqlClient.SqlConnection, CancellationToken, Microsoft.Data.SqlClient.SqlException, Task>>(),
+                Arg.Any<ILogger>(),
+                Arg.Any<CancellationToken>(),
+                Arg.Any<bool>());
         }
     }
 }

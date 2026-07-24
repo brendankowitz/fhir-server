@@ -37,6 +37,7 @@ using Microsoft.Health.Fhir.SqlServer.Features.Schema.Model;
 using Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions;
 using Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors;
 using Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.QueryGenerators;
+using Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage.TvpRowGeneration;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage.TvpRowGeneration.Merge;
@@ -91,6 +92,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
         private readonly ISqlQueryHashCalculator _queryHashCalculator;
         private readonly IFhirDataStore _fhirDataStore;
         private readonly IQueryPlanReuseChecker _queryPlanReuseChecker;
+        private readonly IIgnixaSqlCompileOnlyRouter _ignixaSqlCompileOnlyRouter;
 
         private static readonly string[] NewLineSeparators = ["\r\n", "\n"];
         private static readonly Regex WhitespacePattern = new Regex(@"\s+", RegexOptions.Compiled);
@@ -163,6 +165,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
             ICompressedRawResourceConverter compressedRawResourceConverter,
             ISqlQueryHashCalculator queryHashCalculator,
             IQueryPlanReuseChecker queryPlanReuseChecker,
+            IIgnixaSqlCompileOnlyRouter ignixaSqlCompileOnlyRouter,
             ILogger<SqlServerSearchService> logger)
             : base(searchOptionsFactory, fhirDataStore, logger)
         {
@@ -192,6 +195,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
             _sqlRetryService = sqlRetryService;
             _queryHashCalculator = queryHashCalculator;
             _queryPlanReuseChecker = queryPlanReuseChecker;
+            _ignixaSqlCompileOnlyRouter = EnsureArg.IsNotNull(ignixaSqlCompileOnlyRouter, nameof(ignixaSqlCompileOnlyRouter));
             _logger = logger;
 
             _schemaInformation = schemaInformation;
@@ -231,6 +235,16 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
         public override async Task<SearchResult> SearchAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
         {
             SqlSearchOptions sqlSearchOptions = new SqlSearchOptions(searchOptions);
+
+            var requestContext = _requestContextAccessor.RequestContext;
+            bool accessControlPredicateRequired =
+                requestContext?.AccessControlContext?.ApplyFineGrainedAccessControl == true
+                || !string.IsNullOrWhiteSpace(requestContext?.AccessControlContext?.CompartmentResourceType);
+
+            await _ignixaSqlCompileOnlyRouter.ObserveAsync(
+                sqlSearchOptions,
+                accessControlPredicateRequired,
+                cancellationToken);
 
             if (sqlSearchOptions.IsIncludesOperation)
             {
