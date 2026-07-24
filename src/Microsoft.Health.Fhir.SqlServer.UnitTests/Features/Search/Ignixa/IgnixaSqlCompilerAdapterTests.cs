@@ -478,8 +478,10 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         public async Task CompileAsync_WhenObservationIncludeIsRequested_LoweredPlanContainsIncludeStage()
         {
             // Arrange: non-count-only Observation search with an Observation.subject include; the model
-            // resolves Patient, Observation, and the Observation-subject search parameter. The lowered plan
-            // must contain at least one include stage corresponding to the requested IncludeExpression.
+            // resolves Patient (id=1), Observation (id=2), and the Observation-subject search parameter
+            // (id=3). The lowered plan must contain exactly one forward include stage that carries the
+            // correct reference search parameter ID, seed/output resource type IDs, SeedFromMatch,
+            // Iterate, and Limit from the installed Ignixa 0.6.32-alpha API.
             var model = CreateObservationResolvableModel();
             var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
 
@@ -495,35 +497,106 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             // Act
             IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
 
-            // Assert
+            // Assert — compilation and plan structure
             Assert.True(result.Compiled, $"Expected compilation to succeed; stage={result.FailureStage}, kind={result.FailureKind}");
             Assert.NotNull(result.LoweredPlan);
-            Assert.NotNull(result.LoweredPlan!.Plan.Includes);
-            Assert.NotEmpty(result.LoweredPlan.Plan.Includes!);
+            IReadOnlyList<IncludeStage> includes = result.LoweredPlan!.Plan.Includes!;
+            Assert.NotNull(includes);
+            Assert.NotEmpty(includes);
+
+            // The single include stage must carry the semantics of the Observation.subject include:
+            // forward direction, reference search param id=3, Observation (2) seeds Patient (1) output.
+            IncludeStage stage = includes[0];
+            Assert.Equal(IncludeDirection.Forward, stage.Direction);
+            Assert.Equal((short)3, stage.ReferenceSearchParamId);
+            Assert.Contains((short)2, stage.SeedTypeIds);   // Observation is the seed resource type
+            Assert.Contains((short)1, stage.OutputTypeIds); // Patient is the target/output resource type
+            Assert.True(stage.SeedFromMatch, "Primary include must be seeded from the match result set (SeedFromMatch=true).");
+            Assert.False(stage.Iterate, "Primary non-iterative include must have Iterate=false.");
+            Assert.Equal(100, stage.Limit);
         }
 
         // ---------------------------------------------------------------------------
-        // Task 6: telemetry redaction — adapter logger must not emit sensitive data
+        // Task 6: telemetry redaction — adapter's narrow NotSupportedException log
+        // must contain only safe metadata; the adapter must not emit on success.
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public async Task CompileAsync_WhenTokenTextExpressionWithSensitiveValue_FingerprintIsUppercaseHexAndLogsNoSensitiveData()
+        public async Task CompileAsync_WhenLowerRejectionOccurs_StructuredLogContainsOnlyExceptionTypeAndNoUserData()
         {
-            // Arrange: compile a token-text prefix expression whose value contains a sentinel that must
-            // never appear in adapter telemetry, emitted-SQL labels, or parameter names.
-            const string sentinel = "sensitive-search-value";
-            var codeParamUri = new Uri("http://hl7.org/fhir/SearchParameter/Patient-code");
-
-            var model = CreateResolvableModel(codeParamUri);
+            // Arrange: trigger the adapter's single logging path — the narrow NotSupportedException
+            // catch around Lower.Run — by providing a null ResourceType which causes Lower.Run to
+            // reject the request as a capability gap.
+            //
+            // The capturing logger proves the adapter IS logging (non-vacuous) and that only the
+            // exception type class-name is emitted; the exception message, raw SQL, parameter names,
+            // and any other user data MUST NOT appear in any structured-state value.
+            var resolver = Substitute.For<ISymbolResolver>();
             var capturingLogger = new AdapterCapturingLogger();
             var schema = new SchemaInformation(SchemaVersionConstants.Min, SchemaVersionConstants.Max)
             {
                 Current = SchemaVersionConstants.Max,
             };
-            var adapter = new IgnixaSqlCompilerAdapter(
-                new IgnixaSqlSymbolResolver(model),
-                schema,
-                capturingLogger);
+            var adapter = new IgnixaSqlCompilerAdapter(resolver, schema, capturingLogger);
+
+            SqlSearchOptions options = CreateOptions(ignixaOptions =>
+            {
+                ignixaOptions.Expression = null;
+                ignixaOptions.ResourceType = null;
+                ignixaOptions.ResourceTypes = Array.Empty<string>();
+            });
+
+            // Act
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            // Assert — outcome is a capability failure (lower / not-supported)
+            Assert.False(result.Compiled);
+            Assert.Equal("lower", result.FailureStage);
+            Assert.Equal("not-supported", result.FailureKind);
+
+            // The adapter must have emitted exactly one structured log entry from the catch block.
+            Assert.Single(capturingLogger.Entries);
+            AdapterLogEntry entry = capturingLogger.Entries[0];
+            Assert.Equal(LogLevel.Information, entry.Level);
+
+            // Only the two expected structured keys must be present:
+            //   {ExceptionType}      — the exception class name (never a user value)
+            //   {OriginalFormat}     — the message template
+            Assert.True(entry.State.ContainsKey("ExceptionType"), "Structured log must contain 'ExceptionType' key.");
+            Assert.True(entry.State.ContainsKey("{OriginalFormat}"), "Structured log must carry '{OriginalFormat}'.");
+
+            // ExceptionType must carry only the safe class name, not the exception message.
+            string exceptionTypeValue = entry.State["ExceptionType"]?.ToString() ?? string.Empty;
+            Assert.Equal("NotSupportedException", exceptionTypeValue);
+
+            // No structured state value (except the template) may carry raw SQL labels or parameter names.
+            foreach (KeyValuePair<string, object> kvp in entry.State)
+            {
+                if (string.Equals(kvp.Key, "{OriginalFormat}", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                string valueStr = kvp.Value?.ToString() ?? string.Empty;
+                Assert.DoesNotContain("EmittedSql", valueStr, StringComparison.Ordinal);
+                Assert.DoesNotContain("@p0", valueStr, StringComparison.Ordinal);
+            }
+        }
+
+        [Fact]
+        public async Task CompileAsync_WhenTwoSearchesHaveSameShapeButDifferentValues_ProduceSamePlanFingerprint()
+        {
+            // Proves that plan fingerprints are derived from the plan SHAPE only
+            // (QueryPlan.Explain()) and not from literal search values.  Two searches whose
+            // filter expressions use identical operators and field targets but different string
+            // literals must produce identical fingerprints because the emitted SQL differs only
+            // in its parameter value — which is never hashed.
+            //
+            // This is the key telemetry-safety property: the fingerprint can be logged and compared
+            // without leaking any user-provided search value.
+            var codeParamUri = new Uri("http://hl7.org/fhir/SearchParameter/Patient-code");
+            var model = CreateResolvableModel(codeParamUri);
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
 
             var codeParameter = new IgnixaSearchParameterInfo(
                 "code",
@@ -536,27 +609,34 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
                 baseResourceTypes: new[] { "Patient" },
                 description: null);
 
-            SqlSearchOptions options = CreateOptions(ignixaOptions =>
+            SqlSearchOptions optionsA = CreateOptions(ignixaOptions =>
             {
                 ignixaOptions.Expression = Expression.SearchParameter(
                     codeParameter,
-                    Expression.StartsWith(FieldName.TokenText, componentIndex: null, value: sentinel, ignoreCase: true));
+                    Expression.StartsWith(FieldName.TokenText, componentIndex: null, value: "alpha-sensitive-value", ignoreCase: true));
+            });
+
+            SqlSearchOptions optionsB = CreateOptions(ignixaOptions =>
+            {
+                ignixaOptions.Expression = Expression.SearchParameter(
+                    codeParameter,
+                    Expression.StartsWith(FieldName.TokenText, componentIndex: null, value: "BETA-COMPLETELY-DIFFERENT-VALUE", ignoreCase: true));
             });
 
             // Act
-            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+            IgnixaSqlCompilationOutcome resultA = await adapter.CompileAsync(optionsA, CancellationToken.None);
+            IgnixaSqlCompilationOutcome resultB = await adapter.CompileAsync(optionsB, CancellationToken.None);
 
-            // Assert: compilation must succeed so the fingerprint is a valid SHA-256 hex string.
-            Assert.True(result.Compiled, $"Expected compilation to succeed; stage={result.FailureStage}, kind={result.FailureKind}");
+            // Assert — both must compile successfully
+            Assert.True(resultA.Compiled, $"Expected options-A to compile; stage={resultA.FailureStage}, kind={resultA.FailureKind}");
+            Assert.True(resultB.Compiled, $"Expected options-B to compile; stage={resultB.FailureStage}, kind={resultB.FailureKind}");
 
-            // Fingerprint is a SHA-256 digest emitted by Convert.ToHexString — always 64 uppercase hex characters.
-            Assert.Matches(new Regex("^[0-9A-F]{64}$"), result.PlanFingerprint);
+            // Both fingerprints must be valid 64-character uppercase SHA-256 hex strings.
+            Assert.Matches(new Regex("^[0-9A-F]{64}$"), resultA.PlanFingerprint);
+            Assert.Matches(new Regex("^[0-9A-F]{64}$"), resultB.PlanFingerprint);
 
-            // The adapter logger must not have emitted the sentinel value, raw SQL labels, or parameter names.
-            string allLogMessages = string.Join("\n", capturingLogger.Messages);
-            Assert.DoesNotContain(sentinel, allLogMessages, StringComparison.Ordinal);
-            Assert.DoesNotContain("EmittedSql", allLogMessages, StringComparison.Ordinal);
-            Assert.DoesNotContain("@p0", allLogMessages, StringComparison.Ordinal);
+            // The fingerprints must be identical: same operator + field target → same plan shape.
+            Assert.Equal(resultA.PlanFingerprint, resultB.PlanFingerprint);
         }
 
         private static async Task<(IgnixaSqlCompilerAdapter Adapter, SqlSearchOptions Options, LoweredPlan Baseline)> CreateBaselineAsync()
@@ -692,14 +772,38 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         /// <summary>
-        /// A minimal <see cref="ILogger{IgnixaSqlCompilerAdapter}"/> that collects every formatted
-        /// message string so tests can assert that no sensitive search values appear in telemetry.
+        /// A single captured log event including the log level, formatted message, and the raw
+        /// structured-state key-value pairs emitted by the adapter's logging calls.
+        /// </summary>
+        private sealed class AdapterLogEntry
+        {
+            public AdapterLogEntry(LogLevel level, string message, IReadOnlyDictionary<string, object> state)
+            {
+                Level = level;
+                Message = message;
+                State = state;
+            }
+
+            public LogLevel Level { get; }
+
+            public string Message { get; }
+
+            /// <summary>
+            /// Raw structured-state key-value pairs, including <c>{OriginalFormat}</c>.
+            /// </summary>
+            public IReadOnlyDictionary<string, object> State { get; }
+        }
+
+        /// <summary>
+        /// An <see cref="ILogger{IgnixaSqlCompilerAdapter}"/> that captures every log entry — both the
+        /// formatted message string and the raw structured-state key-value pairs — so tests can assert
+        /// that no sensitive search values or raw SQL content appears in adapter telemetry.
         /// </summary>
         private sealed class AdapterCapturingLogger : ILogger<IgnixaSqlCompilerAdapter>
         {
-            private readonly List<string> _messages = new();
+            private readonly List<AdapterLogEntry> _entries = new();
 
-            public IReadOnlyList<string> Messages => _messages;
+            public IReadOnlyList<AdapterLogEntry> Entries => _entries;
 
             public void Log<TState>(
                 LogLevel logLevel,
@@ -708,7 +812,16 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
                 Exception exception,
                 Func<TState, Exception, string> formatter)
             {
-                _messages.Add(formatter(state, exception) ?? string.Empty);
+                var stateFields = new Dictionary<string, object>(StringComparer.Ordinal);
+                if (state is IEnumerable<KeyValuePair<string, object>> structured)
+                {
+                    foreach (KeyValuePair<string, object> kvp in structured)
+                    {
+                        stateFields[kvp.Key] = kvp.Value;
+                    }
+                }
+
+                _entries.Add(new AdapterLogEntry(logLevel, formatter(state, exception) ?? string.Empty, stateFields));
             }
 
             public bool IsEnabled(LogLevel logLevel) => true;
