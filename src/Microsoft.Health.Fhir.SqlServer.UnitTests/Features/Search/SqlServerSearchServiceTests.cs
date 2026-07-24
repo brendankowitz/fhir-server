@@ -628,14 +628,18 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
         /// <summary>
         /// Verifies that <see cref="SqlServerSearchService.SearchAsync"/> calls
         /// <see cref="IIgnixaSqlCompileOnlyRouter.ObserveAsync"/> exactly once per canonical request —
-        /// before <c>RunSearch</c> — and that the <see cref="SearchResult"/> from the legacy search
-        /// path is returned to the caller unchanged (the router cannot replace or mutate it).
+        /// <em>before</em> <c>RunSearch</c> — and that the <see cref="SearchResult"/> from the legacy
+        /// search path is returned to the caller unchanged (the router cannot replace or mutate it).
         /// </summary>
         [Fact]
         public async Task SearchAsync_ObserveAsyncCalledOnceAndLegacyResultReturnedUnchanged()
         {
             // Arrange: a concrete SearchResult that the RunSearch stub will return.
             var expectedResult = new SearchResult(0, Array.Empty<Tuple<string, string>>());
+
+            // phases records the order in which ObserveAsync and RunSearch are entered so that the
+            // test can prove observation happens strictly before legacy SQL execution.
+            var phases = new List<string>();
 
             var baseOptions = new SearchOptions { MaxItemCount = 10 };
             baseOptions.IgnixaOptions = new IgnixaSearchOptions
@@ -647,12 +651,19 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
             using var cts = new CancellationTokenSource();
             var router = Substitute.For<IIgnixaSqlCompileOnlyRouter>();
 
-            int runSearchCallCount = 0;
+            router
+                .ObserveAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo =>
+                {
+                    phases.Add("observe");
+                    return Task.CompletedTask;
+                });
+
             var service = CreateTestableSearchService(
                 router,
                 (_, _) =>
                 {
-                    runSearchCallCount++;
+                    phases.Add("legacy");
                     return Task.FromResult(expectedResult);
                 });
 
@@ -670,7 +681,10 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                 cts.Token);
 
             // Assert 3: RunSearch was invoked exactly once — ObserveAsync did not short-circuit it.
-            Assert.Equal(1, runSearchCallCount);
+            Assert.Equal(1, phases.Count(p => p == "legacy"));
+
+            // Assert 4: observation happened strictly before legacy SQL execution.
+            Assert.Equal(new[] { "observe", "legacy" }, phases);
         }
 
         /// <summary>
@@ -710,6 +724,108 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                 () => service.SearchAsync(baseOptions, cts.Token));
 
             Assert.Equal(0, runSearchCallCount);
+        }
+
+        // ---------------------------------------------------------------------------
+        // accessControlPredicateRequired derivation tests (Task 5)
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Verifies that when there is no <see cref="AccessControlContext"/> on the request,
+        /// <see cref="IIgnixaSqlCompileOnlyRouter.ObserveAsync"/> receives <c>false</c>
+        /// for <c>accessControlPredicateRequired</c>.
+        /// </summary>
+        [Fact]
+        public async Task SearchAsync_AccessControlPredicateRequired_WhenNoAccessControlContext_IsFalse()
+        {
+            // Arrange: request context with null AccessControlContext (NSubstitute default).
+            var requestContext = Substitute.For<IFhirRequestContext>();
+            _requestContextAccessor.RequestContext.Returns(requestContext);
+
+            bool? capturedBool = null;
+            _ignixaSqlCompileOnlyRouter
+                .ObserveAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo =>
+                {
+                    capturedBool = callInfo.ArgAt<bool>(1);
+                    return Task.CompletedTask;
+                });
+
+            var service = CreateTestableSearchService(
+                _ignixaSqlCompileOnlyRouter,
+                (_, _) => Task.FromResult(new SearchResult(0, Array.Empty<Tuple<string, string>>())));
+
+            // Act
+            await service.SearchAsync(new SearchOptions { MaxItemCount = 10 }, CancellationToken.None);
+
+            // Assert: no access-control context ⇒ predicate not required.
+            Assert.False(capturedBool);
+        }
+
+        /// <summary>
+        /// Verifies that <see cref="AccessControlContext.ApplyFineGrainedAccessControl"/> <c>true</c>
+        /// causes <c>accessControlPredicateRequired</c> to be <c>true</c>.
+        /// </summary>
+        [Fact]
+        public async Task SearchAsync_AccessControlPredicateRequired_WhenApplyFineGrainedAccessControl_IsTrue()
+        {
+            // Arrange
+            var accessControl = new AccessControlContext { ApplyFineGrainedAccessControl = true };
+            var requestContext = Substitute.For<IFhirRequestContext>();
+            requestContext.AccessControlContext.Returns(accessControl);
+            _requestContextAccessor.RequestContext.Returns(requestContext);
+
+            bool? capturedBool = null;
+            _ignixaSqlCompileOnlyRouter
+                .ObserveAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo =>
+                {
+                    capturedBool = callInfo.ArgAt<bool>(1);
+                    return Task.CompletedTask;
+                });
+
+            var service = CreateTestableSearchService(
+                _ignixaSqlCompileOnlyRouter,
+                (_, _) => Task.FromResult(new SearchResult(0, Array.Empty<Tuple<string, string>>())));
+
+            // Act
+            await service.SearchAsync(new SearchOptions { MaxItemCount = 10 }, CancellationToken.None);
+
+            // Assert: fine-grained access control ⇒ predicate required.
+            Assert.True(capturedBool);
+        }
+
+        /// <summary>
+        /// Verifies that a non-empty <see cref="AccessControlContext.CompartmentResourceType"/>
+        /// causes <c>accessControlPredicateRequired</c> to be <c>true</c>.
+        /// </summary>
+        [Fact]
+        public async Task SearchAsync_AccessControlPredicateRequired_WhenCompartmentResourceTypeSet_IsTrue()
+        {
+            // Arrange
+            var accessControl = new AccessControlContext { CompartmentResourceType = "Patient" };
+            var requestContext = Substitute.For<IFhirRequestContext>();
+            requestContext.AccessControlContext.Returns(accessControl);
+            _requestContextAccessor.RequestContext.Returns(requestContext);
+
+            bool? capturedBool = null;
+            _ignixaSqlCompileOnlyRouter
+                .ObserveAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo =>
+                {
+                    capturedBool = callInfo.ArgAt<bool>(1);
+                    return Task.CompletedTask;
+                });
+
+            var service = CreateTestableSearchService(
+                _ignixaSqlCompileOnlyRouter,
+                (_, _) => Task.FromResult(new SearchResult(0, Array.Empty<Tuple<string, string>>())));
+
+            // Act
+            await service.SearchAsync(new SearchOptions { MaxItemCount = 10 }, CancellationToken.None);
+
+            // Assert: compartment resource type present ⇒ predicate required.
+            Assert.True(capturedBool);
         }
 
         // ---------------------------------------------------------------------------

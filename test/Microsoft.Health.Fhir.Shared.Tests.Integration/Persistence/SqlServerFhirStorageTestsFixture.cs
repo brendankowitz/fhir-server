@@ -36,6 +36,7 @@ using Microsoft.Health.Fhir.SqlServer.Features.Schema;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema.Model;
 using Microsoft.Health.Fhir.SqlServer.Features.Search;
 using Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors;
+using Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage.Registry;
 using Microsoft.Health.Fhir.SqlServer.Registration;
@@ -303,6 +304,7 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
                 new CompressedRawResourceConverter(),
                 SqlQueryHashCalculator,
                 queryPlanReuseChecker,
+                Substitute.For<IIgnixaSqlCompileOnlyRouter>(),
                 NullLogger<SqlServerSearchService>.Instance);
 
             ISearchParameterSupportResolver searchParameterSupportResolver = Substitute.For<ISearchParameterSupportResolver>();
