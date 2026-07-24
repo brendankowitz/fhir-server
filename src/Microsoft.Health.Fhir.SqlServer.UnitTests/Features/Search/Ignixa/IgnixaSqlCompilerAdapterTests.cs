@@ -28,6 +28,7 @@ using Xunit;
 using IgnixaSearchOptions = Ignixa.Search.Models.SearchOptions;
 using IgnixaSearchParameterInfo = Ignixa.Search.Models.SearchParameterInfo;
 using IgnixaSortOrder = Ignixa.Search.Expressions.SortOrder;
+using IgnixaSummaryType = Ignixa.Search.Models.SummaryType;
 
 namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
 {
@@ -434,6 +435,130 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             Assert.Equal("top-shape-mismatch", result.FailureKind);
         }
 
+        // ---------------------------------------------------------------------------
+        // Task 6: count-only Observation with SummaryType.Count + resolvable include
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task CompileAsync_WhenObservationCountOnlyWithResolvableInclude_SuppressesIncludesInLoweredPlan()
+        {
+            // Arrange: the model resolves Patient (id=1), Observation (id=2), and the Observation-subject
+            // search parameter (id=3) so that the include could theoretically be passed to Resolve.RunAsync.
+            // Because CountOnly=true the adapter must suppress the include BEFORE calling Resolve, so
+            // compilation succeeds and the lowered plan contains no include stages.
+            var model = CreateObservationResolvableModel();
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+
+            SqlSearchOptions options = CreateOptions(
+                ignixaOptions =>
+                {
+                    ignixaOptions.ResourceType = "Observation";
+                    ignixaOptions.ResourceTypes = new[] { "Observation" };
+                    ignixaOptions.Expression = null;
+                    ignixaOptions.Summary = IgnixaSummaryType.Count;
+                    ignixaOptions.Include = new[] { CreateIncludeExpression() };
+                },
+                countOnly: true);
+
+            // Act
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            // Assert
+            Assert.True(result.Compiled, $"Expected compilation to succeed; stage={result.FailureStage}, kind={result.FailureKind}");
+            Assert.NotNull(result.LoweredPlan);
+            Assert.True(result.LoweredPlan!.Plan.CountOnly, "Lowered plan must be count-only.");
+            Assert.Empty(result.LoweredPlan.Plan.Includes ?? (IReadOnlyList<IncludeStage>)Array.Empty<IncludeStage>());
+        }
+
+        // ---------------------------------------------------------------------------
+        // Task 6: include shape — successful include stage in non-count-only plan
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task CompileAsync_WhenObservationIncludeIsRequested_LoweredPlanContainsIncludeStage()
+        {
+            // Arrange: non-count-only Observation search with an Observation.subject include; the model
+            // resolves Patient, Observation, and the Observation-subject search parameter. The lowered plan
+            // must contain at least one include stage corresponding to the requested IncludeExpression.
+            var model = CreateObservationResolvableModel();
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+
+            SqlSearchOptions options = CreateOptions(ignixaOptions =>
+            {
+                ignixaOptions.ResourceType = "Observation";
+                ignixaOptions.ResourceTypes = new[] { "Observation" };
+                ignixaOptions.Expression = null;
+                ignixaOptions.Include = new[] { CreateIncludeExpression() };
+                ignixaOptions.IncludesMaxItemCount = 100;
+            });
+
+            // Act
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            // Assert
+            Assert.True(result.Compiled, $"Expected compilation to succeed; stage={result.FailureStage}, kind={result.FailureKind}");
+            Assert.NotNull(result.LoweredPlan);
+            Assert.NotNull(result.LoweredPlan!.Plan.Includes);
+            Assert.NotEmpty(result.LoweredPlan.Plan.Includes!);
+        }
+
+        // ---------------------------------------------------------------------------
+        // Task 6: telemetry redaction — adapter logger must not emit sensitive data
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task CompileAsync_WhenTokenTextExpressionWithSensitiveValue_FingerprintIsUppercaseHexAndLogsNoSensitiveData()
+        {
+            // Arrange: compile a token-text prefix expression whose value contains a sentinel that must
+            // never appear in adapter telemetry, emitted-SQL labels, or parameter names.
+            const string sentinel = "sensitive-search-value";
+            var codeParamUri = new Uri("http://hl7.org/fhir/SearchParameter/Patient-code");
+
+            var model = CreateResolvableModel(codeParamUri);
+            var capturingLogger = new AdapterCapturingLogger();
+            var schema = new SchemaInformation(SchemaVersionConstants.Min, SchemaVersionConstants.Max)
+            {
+                Current = SchemaVersionConstants.Max,
+            };
+            var adapter = new IgnixaSqlCompilerAdapter(
+                new IgnixaSqlSymbolResolver(model),
+                schema,
+                capturingLogger);
+
+            var codeParameter = new IgnixaSearchParameterInfo(
+                "code",
+                "code",
+                SearchParamType.Token,
+                codeParamUri,
+                components: null,
+                expression: null,
+                targetResourceTypes: null,
+                baseResourceTypes: new[] { "Patient" },
+                description: null);
+
+            SqlSearchOptions options = CreateOptions(ignixaOptions =>
+            {
+                ignixaOptions.Expression = Expression.SearchParameter(
+                    codeParameter,
+                    Expression.StartsWith(FieldName.TokenText, componentIndex: null, value: sentinel, ignoreCase: true));
+            });
+
+            // Act
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            // Assert: compilation must succeed so the fingerprint is a valid SHA-256 hex string.
+            Assert.True(result.Compiled, $"Expected compilation to succeed; stage={result.FailureStage}, kind={result.FailureKind}");
+
+            // Fingerprint is a SHA-256 digest emitted by Convert.ToHexString — always 64 uppercase hex characters.
+            Assert.Matches(new Regex("^[0-9A-F]{64}$"), result.PlanFingerprint);
+
+            // The adapter logger must not have emitted the sentinel value, raw SQL labels, or parameter names.
+            string allLogMessages = string.Join("\n", capturingLogger.Messages);
+            Assert.DoesNotContain(sentinel, allLogMessages, StringComparison.Ordinal);
+            Assert.DoesNotContain("EmittedSql", allLogMessages, StringComparison.Ordinal);
+            Assert.DoesNotContain("@p0", allLogMessages, StringComparison.Ordinal);
+        }
+
         private static async Task<(IgnixaSqlCompilerAdapter Adapter, SqlSearchOptions Options, LoweredPlan Baseline)> CreateBaselineAsync()
         {
             var model = CreateResolvableModel();
@@ -501,6 +626,107 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             {
                 IgnixaOptions = ignixaOptions,
             };
+        }
+
+        // ---------------------------------------------------------------------------
+        // Task 6 helpers: Observation model, include expression, capturing logger
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Creates a model that resolves Patient (id=1), Observation (id=2), and the
+        /// Observation-subject search parameter (id=3). Used for include and count-only tests.
+        /// </summary>
+        private static ISqlServerFhirModel CreateObservationResolvableModel()
+        {
+            var model = Substitute.For<ISqlServerFhirModel>();
+            model.TryGetResourceTypeId("Patient", out Arg.Any<short>())
+                .Returns(callInfo =>
+                {
+                    callInfo[1] = (short)1;
+                    return true;
+                });
+            model.TryGetResourceTypeId("Observation", out Arg.Any<short>())
+                .Returns(callInfo =>
+                {
+                    callInfo[1] = (short)2;
+                    return true;
+                });
+            model.TryGetSearchParamId(
+                new Uri("http://hl7.org/fhir/SearchParameter/Observation-subject"),
+                out Arg.Any<short>())
+                .Returns(callInfo =>
+                {
+                    callInfo[1] = (short)3;
+                    return true;
+                });
+            return model;
+        }
+
+        /// <summary>
+        /// Creates a valid forward <see cref="IncludeExpression"/> for Observation.subject targeting
+        /// Patient, using the 0.6.32 <see cref="IgnixaSearchParameterInfo"/> constructor. Does not
+        /// construct include values from raw query strings.
+        /// </summary>
+        private static IncludeExpression CreateIncludeExpression()
+        {
+            var reference = new IgnixaSearchParameterInfo(
+                "subject",
+                "subject",
+                SearchParamType.Reference,
+                new Uri("http://hl7.org/fhir/SearchParameter/Observation-subject"),
+                components: null,
+                expression: null,
+                targetResourceTypes: new[] { "Patient" },
+                baseResourceTypes: new[] { "Observation" },
+                description: null);
+
+            return new IncludeExpression(
+                new[] { "Observation" },
+                reference,
+                "Observation",
+                "Patient",
+                new[] { "Patient" },
+                wildCard: false,
+                reversed: false,
+                iterate: false);
+        }
+
+        /// <summary>
+        /// A minimal <see cref="ILogger{IgnixaSqlCompilerAdapter}"/> that collects every formatted
+        /// message string so tests can assert that no sensitive search values appear in telemetry.
+        /// </summary>
+        private sealed class AdapterCapturingLogger : ILogger<IgnixaSqlCompilerAdapter>
+        {
+            private readonly List<string> _messages = new();
+
+            public IReadOnlyList<string> Messages => _messages;
+
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception exception,
+                Func<TState, Exception, string> formatter)
+            {
+                _messages.Add(formatter(state, exception) ?? string.Empty);
+            }
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public IDisposable BeginScope<TState>(TState state) => NullScope.Instance;
+
+            private sealed class NullScope : IDisposable
+            {
+                public static readonly NullScope Instance = new NullScope();
+
+                private NullScope()
+                {
+                }
+
+                public void Dispose()
+                {
+                }
+            }
         }
     }
 }
