@@ -211,8 +211,15 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             Assert.Equal(string.Empty, result.PlanFingerprint);
         }
 
-        [Fact]
-        public async Task CompileAsync_WhenSortQuerySecondPhase_LowersMissingPrimarySortPhase()
+        [Theory]
+        [InlineData(IgnixaSortOrder.Ascending, false, SortPhase.MissingPrimary)]
+        [InlineData(IgnixaSortOrder.Ascending, true, SortPhase.Valued)]
+        [InlineData(IgnixaSortOrder.Descending, false, SortPhase.Valued)]
+        [InlineData(IgnixaSortOrder.Descending, true, SortPhase.MissingPrimary)]
+        public async Task CompileAsync_WhenSortingWithMissingValues_LowersExpectedSortPhase(
+            IgnixaSortOrder sortOrder,
+            bool sortQuerySecondPhase,
+            SortPhase expectedSortPhase)
         {
             // Arrange
             var sortParamUri = new Uri("http://hl7.org/fhir/SearchParameter/Patient-birthdate");
@@ -232,9 +239,9 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             SqlSearchOptions options = CreateOptions(ignixaOptions =>
             {
                 ignixaOptions.Expression = null;
-                ignixaOptions.Sort = new[] { new SortExpression(sortParameter, IgnixaSortOrder.Ascending) };
+                ignixaOptions.Sort = new[] { new SortExpression(sortParameter, sortOrder) };
             });
-            options.SortQuerySecondPhase = true;
+            options.SortQuerySecondPhase = sortQuerySecondPhase;
 
             // Act
             IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
@@ -243,33 +250,34 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             Assert.True(result.Compiled);
             Assert.NotNull(result.LoweredPlan);
             Assert.NotNull(result.LoweredPlan!.Plan.Sort);
-            Assert.Equal(SortPhase.MissingPrimary, result.LoweredPlan.Plan.Sort!.Phase);
+            Assert.Equal(expectedSortPhase, result.LoweredPlan.Plan.Sort!.Phase);
         }
 
-        [Fact]
-        public async Task CompileAsync_WhenNotSortQuerySecondPhase_LowersValuedSortPhase()
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task CompileAsync_WhenSortingByLastUpdated_AlwaysUsesValuedSortPhase(bool sortQuerySecondPhase)
         {
             // Arrange
-            var sortParamUri = new Uri("http://hl7.org/fhir/SearchParameter/Patient-birthdate");
-            var sortParameter = new IgnixaSearchParameterInfo(
-                "birthdate",
-                "birthdate",
+            var model = CreateResolvableModel();
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+            var lastUpdatedParameter = new IgnixaSearchParameterInfo(
+                "_lastUpdated",
+                "_lastUpdated",
                 SearchParamType.Date,
-                sortParamUri,
+                url: null,
                 components: null,
                 expression: null,
                 targetResourceTypes: null,
                 baseResourceTypes: new[] { "Patient" },
                 description: null);
-            var model = CreateResolvableModel(sortParamUri);
-            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
 
             SqlSearchOptions options = CreateOptions(ignixaOptions =>
             {
                 ignixaOptions.Expression = null;
-                ignixaOptions.Sort = new[] { new SortExpression(sortParameter, IgnixaSortOrder.Ascending) };
+                ignixaOptions.Sort = new[] { new SortExpression(lastUpdatedParameter, IgnixaSortOrder.Ascending) };
             });
-            options.SortQuerySecondPhase = false;
+            options.SortQuerySecondPhase = sortQuerySecondPhase;
 
             // Act
             IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);

@@ -82,11 +82,17 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             IReadOnlyList<IncludeExpression> includes = searchOptions.CountOnly ? EmptyIncludes : (ignixaOptions.Include ?? EmptyIncludes);
             IReadOnlyList<IncludeExpression> revIncludes = searchOptions.CountOnly ? EmptyIncludes : (ignixaOptions.RevInclude ?? EmptyIncludes);
 
-            // The legacy SQL search service issues a second query phase for sorts on parameters that may be
-            // missing (e.g. descending sort with nulls last): the first phase finds resources with the sort
-            // value, the second phase finds resources without it. Map that legacy flag to the corresponding
-            // Ignixa sort phase; ordinary (single-phase) sorting always lowers as SortPhase.Valued.
-            SortPhase sortPhase = searchOptions.SortQuerySecondPhase ? SortPhase.MissingPrimary : SortPhase.Valued;
+            // The legacy SQL search service issues two query phases for sorts on parameters that may be
+            // missing. Ascending sorts search missing values first, while descending sorts search valued
+            // values first. Map the legacy phase flag to the corresponding Ignixa sort phase.
+            SortPhase sortPhase = SortPhase.Valued;
+            if (requestedSort.Count > 0 &&
+                !ResourceColumnLoweringRule.IsResourceColumnCode(requestedSort[0].Parameter.Code))
+            {
+                bool ascendingSort = requestedSort[0].SortOrder == SortOrder.Ascending;
+                bool missingValuesPhase = ascendingSort != searchOptions.SortQuerySecondPhase;
+                sortPhase = missingValuesPhase ? SortPhase.MissingPrimary : SortPhase.Valued;
+            }
 
             // Stage 1: Resolve. This is the only stage that performs I/O (symbol lookups).
             ResolvedSymbols resolved = await Resolve.RunAsync(
