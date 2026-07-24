@@ -574,24 +574,70 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
         // ---------------------------------------------------------------------------
 
         /// <summary>
-        /// Verifies that <see cref="SqlServerSearchService.SearchAsync"/> invokes
-        /// <see cref="IIgnixaSqlCompileOnlyRouter.ObserveAsync"/> exactly once at the canonical request
-        /// boundary — before SQL execution — and that the legacy search path continues after the call
-        /// (i.e. observation does not short-circuit execution).
+        /// Verifies that passing <c>null</c> for the <see cref="IIgnixaSqlCompileOnlyRouter"/>
+        /// constructor parameter throws <see cref="ArgumentNullException"/> immediately.
         /// </summary>
         [Fact]
-        public async Task SearchAsync_WithIgnixaOptions_CallsObserveAsyncExactlyOnce()
+        public void Constructor_WithNullIgnixaSqlCompileOnlyRouter_ThrowsArgumentNullException()
         {
-            // Arrange: create options that carry non-null IgnixaOptions so the assertion covers
-            // the documented contract (IgnixaOptions != null on the forwarded SqlSearchOptions).
-            // Sort and UnsupportedSearchParams must be non-null to avoid ArgumentNullException
-            // inside SearchImpl before ExecuteSql is reached.
-            var baseOptions = new SearchOptions
+            var queryGeneratorFactory = new SearchParamTableExpressionQueryGeneratorFactory(new SearchParameterToSearchValueTypeMap());
+            var sqlRootExpressionRewriter = new SqlRootExpressionRewriter(queryGeneratorFactory);
+            var chainFlatteningRewriter = new ChainFlatteningRewriter(queryGeneratorFactory);
+            var sortRewriter = new SortRewriter(queryGeneratorFactory);
+            var model = Substitute.For<ISqlServerFhirModel>();
+            var schemaInfo = new SchemaInformation(SchemaVersionConstants.Min, SchemaVersionConstants.Max);
+            var partitionEliminationRewriter = new PartitionEliminationRewriter(model, schemaInfo, () => Substitute.For<ISearchParameterDefinitionManager>());
+            var compartmentDefinitionManager = Substitute.For<ICompartmentDefinitionManager>();
+            var searchParameterDefinitionManager = Substitute.For<ISearchParameterDefinitionManager>();
+            var compartmentSearchRewriter = new SqlCompartmentSearchRewriter(
+                new Lazy<ICompartmentDefinitionManager>(() => compartmentDefinitionManager),
+                new Lazy<ISearchParameterDefinitionManager>(() => searchParameterDefinitionManager));
+            var smartCompartmentSearchRewriter = new SmartCompartmentSearchRewriter(
+                compartmentSearchRewriter,
+                new Lazy<ISearchParameterDefinitionManager>(() => searchParameterDefinitionManager),
+                Options.Create(new CoreFeatureConfiguration()));
+
+            var ex = Assert.Throws<ArgumentNullException>(() =>
             {
-                MaxItemCount = 10,
-                Sort = new List<(SearchParameterInfo searchParameterInfo, Microsoft.Health.Fhir.Core.Features.Search.SortOrder sortOrder)>(),
-                UnsupportedSearchParams = new List<Tuple<string, string>>(),
-            };
+                _ = new SqlServerSearchService(
+                    _searchOptionsFactory,
+                    _fhirDataStore,
+                    model,
+                    sqlRootExpressionRewriter,
+                    chainFlatteningRewriter,
+                    sortRewriter,
+                    partitionEliminationRewriter,
+                    compartmentSearchRewriter,
+                    smartCompartmentSearchRewriter,
+                    queryGeneratorFactory,
+                    _sqlRetryService,
+                    Options.Create(new SqlServerDataStoreConfiguration()),
+                    new FhirSqlServerConfiguration(),
+                    schemaInfo,
+                    _requestContextAccessor,
+                    _compressedRawResourceConverter,
+                    _queryHashCalculator,
+                    _queryPlanReuseChecker,
+                    null, // ignixaSqlCompileOnlyRouter — must not be null
+                    NullLogger<SqlServerSearchService>.Instance);
+            });
+
+            Assert.Equal("ignixaSqlCompileOnlyRouter", ex.ParamName);
+        }
+
+        /// <summary>
+        /// Verifies that <see cref="SqlServerSearchService.SearchAsync"/> calls
+        /// <see cref="IIgnixaSqlCompileOnlyRouter.ObserveAsync"/> exactly once per canonical request —
+        /// before <c>RunSearch</c> — and that the <see cref="SearchResult"/> from the legacy search
+        /// path is returned to the caller unchanged (the router cannot replace or mutate it).
+        /// </summary>
+        [Fact]
+        public async Task SearchAsync_ObserveAsyncCalledOnceAndLegacyResultReturnedUnchanged()
+        {
+            // Arrange: a concrete SearchResult that the RunSearch stub will return.
+            var expectedResult = new SearchResult(0, Array.Empty<Tuple<string, string>>());
+
+            var baseOptions = new SearchOptions { MaxItemCount = 10 };
             baseOptions.IgnixaOptions = new IgnixaSearchOptions
             {
                 ResourceType = "Patient",
@@ -599,51 +645,43 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
             };
 
             using var cts = new CancellationTokenSource();
+            var router = Substitute.For<IIgnixaSqlCompileOnlyRouter>();
 
-            // _ignixaSqlCompileOnlyRouter is already a substitute configured to return normally
-            // (NSubstitute default for Task-returning methods is Task.CompletedTask).
+            int runSearchCallCount = 0;
+            var service = CreateTestableSearchService(
+                router,
+                (_, _) =>
+                {
+                    runSearchCallCount++;
+                    return Task.FromResult(expectedResult);
+                });
 
-            // Act: SearchAsync will proceed past ObserveAsync and enter the legacy RunSearch path.
-            // CreateStats inside SearchImpl casts _model to SqlServerFhirModel — which throws
-            // InvalidCastException because the test uses a substitute. We catch it to isolate the
-            // router assertion; the throw itself proves the legacy path was entered (not skipped).
-            try
-            {
-                await _searchService.SearchAsync(baseOptions, cts.Token);
-            }
-            catch (InvalidCastException)
-            {
-                // Expected: _model is a substitute that cannot be cast to SqlServerFhirModel in
-                // CreateStats. The exception originates inside the legacy SQL execution path, after
-                // ObserveAsync has already returned — confirming observation did not short-circuit.
-            }
-            catch (NullReferenceException)
-            {
-                // Also acceptable: reached the null-searchResult code path (e.g. ExecuteSql returned
-                // Task.CompletedTask without running its lambda).
-            }
+            // Act
+            var actualResult = await service.SearchAsync(baseOptions, cts.Token);
 
-            // Assert 1: ObserveAsync was called exactly once (canonical-request boundary).
-            await _ignixaSqlCompileOnlyRouter.Received(1).ObserveAsync(
+            // Assert 1: the exact legacy SearchResult is returned — router did not replace it.
+            Assert.Same(expectedResult, actualResult);
+
+            // Assert 2: ObserveAsync was called exactly once at the canonical-request boundary
+            // (before RunSearch), with non-null IgnixaOptions and the original CancellationToken.
+            await router.Received(1).ObserveAsync(
                 Arg.Is<SqlSearchOptions>(o => o.IgnixaOptions != null),
                 Arg.Any<bool>(),
-                Arg.Any<CancellationToken>());
+                cts.Token);
+
+            // Assert 3: RunSearch was invoked exactly once — ObserveAsync did not short-circuit it.
+            Assert.Equal(1, runSearchCallCount);
         }
 
         /// <summary>
         /// Verifies that an <see cref="OperationCanceledException"/> thrown from
         /// <see cref="IIgnixaSqlCompileOnlyRouter.ObserveAsync"/> propagates out of
-        /// <see cref="SqlServerSearchService.SearchAsync"/> without being swallowed or converted
-        /// to an empty / success result.
+        /// <see cref="SqlServerSearchService.SearchAsync"/> without being swallowed or converted.
         /// </summary>
         [Fact]
         public async Task SearchAsync_WhenObserveAsyncThrowsOperationCanceledException_PropagatesCancellation()
         {
-            // Arrange
-            var baseOptions = new SearchOptions
-            {
-                MaxItemCount = 10,
-            };
+            var baseOptions = new SearchOptions { MaxItemCount = 10 };
             baseOptions.IgnixaOptions = new IgnixaSearchOptions
             {
                 ResourceType = "Patient",
@@ -652,20 +690,136 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
 
             using var cts = new CancellationTokenSource();
 
+            // _ignixaSqlCompileOnlyRouter is the class-level substitute shared by all tests.
             _ignixaSqlCompileOnlyRouter
                 .ObserveAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
                 .Returns<Task>(_ => Task.FromException(new OperationCanceledException(cts.Token)));
 
-            // Act & Assert: the cancellation exception must not be swallowed.
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(
-                () => _searchService.SearchAsync(baseOptions, cts.Token));
+            // Act & Assert: the cancellation must propagate — it must NOT be converted to a
+            // successful empty result, and RunSearch must never be entered.
+            int runSearchCallCount = 0;
+            var service = CreateTestableSearchService(
+                _ignixaSqlCompileOnlyRouter,
+                (_, _) =>
+                {
+                    runSearchCallCount++;
+                    return Task.FromResult(new SearchResult(0, Array.Empty<Tuple<string, string>>()));
+                });
 
-            // Verify: SQL execution was never reached because ObserveAsync threw first.
-            await _sqlRetryService.DidNotReceive().ExecuteSql(
-                Arg.Any<Func<Microsoft.Data.SqlClient.SqlConnection, CancellationToken, Microsoft.Data.SqlClient.SqlException, Task>>(),
-                Arg.Any<ILogger>(),
-                Arg.Any<CancellationToken>(),
-                Arg.Any<bool>());
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => service.SearchAsync(baseOptions, cts.Token));
+
+            Assert.Equal(0, runSearchCallCount);
+        }
+
+        // ---------------------------------------------------------------------------
+        // Helpers for router wiring tests
+        // ---------------------------------------------------------------------------
+
+        /// <summary>
+        /// Creates a <see cref="SqlServerSearchService"/> subclass whose <c>RunSearch</c> is
+        /// replaced by a caller-supplied stub, enabling deterministic <see cref="SearchResult"/>
+        /// return without requiring a real SQL connection or a concrete SqlServerFhirModel.
+        /// </summary>
+        private TestableSqlServerSearchService CreateTestableSearchService(
+            IIgnixaSqlCompileOnlyRouter router,
+            Func<SqlSearchOptions, CancellationToken, Task<SearchResult>> runSearchStub)
+        {
+            var sqlRootExpressionRewriter = new SqlRootExpressionRewriter(_queryGeneratorFactory);
+            var chainFlatteningRewriter = new ChainFlatteningRewriter(_queryGeneratorFactory);
+            var sortRewriter = new SortRewriter(_queryGeneratorFactory);
+            var partitionEliminationRewriter = new PartitionEliminationRewriter(
+                _model, _schemaInformation, () => Substitute.For<ISearchParameterDefinitionManager>());
+            var compartmentSearchRewriter = new SqlCompartmentSearchRewriter(
+                new Lazy<ICompartmentDefinitionManager>(() => Substitute.For<ICompartmentDefinitionManager>()),
+                new Lazy<ISearchParameterDefinitionManager>(() => Substitute.For<ISearchParameterDefinitionManager>()));
+            var smartCompartmentSearchRewriter = new SmartCompartmentSearchRewriter(
+                compartmentSearchRewriter,
+                new Lazy<ISearchParameterDefinitionManager>(() => Substitute.For<ISearchParameterDefinitionManager>()),
+                Options.Create(new CoreFeatureConfiguration()));
+
+            return new TestableSqlServerSearchService(
+                runSearchStub,
+                _searchOptionsFactory,
+                _fhirDataStore,
+                _model,
+                sqlRootExpressionRewriter,
+                chainFlatteningRewriter,
+                sortRewriter,
+                partitionEliminationRewriter,
+                compartmentSearchRewriter,
+                smartCompartmentSearchRewriter,
+                _queryGeneratorFactory,
+                _sqlRetryService,
+                Options.Create(new SqlServerDataStoreConfiguration { CommandTimeout = TimeSpan.FromSeconds(30) }),
+                new FhirSqlServerConfiguration(),
+                _schemaInformation,
+                _requestContextAccessor,
+                _compressedRawResourceConverter,
+                _queryHashCalculator,
+                _queryPlanReuseChecker,
+                router,
+                NullLogger<SqlServerSearchService>.Instance);
+        }
+
+        /// <summary>
+        /// Test-only subclass that replaces <c>RunSearch</c> with a caller-supplied stub so that
+        /// <see cref="SearchAsync"/> can be driven deterministically without a real SQL connection.
+        /// </summary>
+        private sealed class TestableSqlServerSearchService : SqlServerSearchService
+        {
+            private readonly Func<SqlSearchOptions, CancellationToken, Task<SearchResult>> _runSearchStub;
+
+            internal TestableSqlServerSearchService(
+                Func<SqlSearchOptions, CancellationToken, Task<SearchResult>> runSearchStub,
+                ISearchOptionsFactory searchOptionsFactory,
+                IFhirDataStore fhirDataStore,
+                ISqlServerFhirModel model,
+                SqlRootExpressionRewriter sqlRootExpressionRewriter,
+                ChainFlatteningRewriter chainFlatteningRewriter,
+                SortRewriter sortRewriter,
+                PartitionEliminationRewriter partitionEliminationRewriter,
+                CompartmentSearchRewriter compartmentSearchRewriter,
+                SmartCompartmentSearchRewriter smartCompartmentSearchRewriter,
+                SearchParamTableExpressionQueryGeneratorFactory queryGeneratorFactory,
+                ISqlRetryService sqlRetryService,
+                IOptions<SqlServerDataStoreConfiguration> sqlServerDataStoreConfiguration,
+                FhirSqlServerConfiguration fhirSqlServerConfiguration,
+                SchemaInformation schemaInformation,
+                RequestContextAccessor<IFhirRequestContext> requestContextAccessor,
+                ICompressedRawResourceConverter compressedRawResourceConverter,
+                ISqlQueryHashCalculator queryHashCalculator,
+                IQueryPlanReuseChecker queryPlanReuseChecker,
+                IIgnixaSqlCompileOnlyRouter ignixaSqlCompileOnlyRouter,
+                ILogger<SqlServerSearchService> logger)
+                : base(
+                    searchOptionsFactory,
+                    fhirDataStore,
+                    model,
+                    sqlRootExpressionRewriter,
+                    chainFlatteningRewriter,
+                    sortRewriter,
+                    partitionEliminationRewriter,
+                    compartmentSearchRewriter,
+                    smartCompartmentSearchRewriter,
+                    queryGeneratorFactory,
+                    sqlRetryService,
+                    sqlServerDataStoreConfiguration,
+                    fhirSqlServerConfiguration,
+                    schemaInformation,
+                    requestContextAccessor,
+                    compressedRawResourceConverter,
+                    queryHashCalculator,
+                    queryPlanReuseChecker,
+                    ignixaSqlCompileOnlyRouter,
+                    logger)
+            {
+                _runSearchStub = runSearchStub;
+            }
+
+            internal override Task<SearchResult> RunSearch(
+                SqlSearchOptions sqlSearchOptions, CancellationToken cancellationToken)
+                => _runSearchStub(sqlSearchOptions, cancellationToken);
         }
     }
 }
