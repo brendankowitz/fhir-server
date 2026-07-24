@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Ignixa.Search.Expressions;
 using Ignixa.Search.Sql.Ast;
+using Ignixa.Search.Sql.Lowering;
 using Ignixa.Search.Sql.Symbols;
 using Ignixa.Specification.ValueSets.Normative;
 using Microsoft.Extensions.Logging;
@@ -26,6 +27,7 @@ using NSubstitute;
 using Xunit;
 using IgnixaSearchOptions = Ignixa.Search.Models.SearchOptions;
 using IgnixaSearchParameterInfo = Ignixa.Search.Models.SearchParameterInfo;
+using IgnixaSortOrder = Ignixa.Search.Expressions.SortOrder;
 
 namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
 {
@@ -179,6 +181,284 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             Assert.NotNull(result.LoweredPlan);
             Assert.True(result.LoweredPlan!.Plan.CountOnly);
             Assert.Empty(result.LoweredPlan.Plan.Includes ?? (IReadOnlyList<IncludeStage>)Array.Empty<IncludeStage>());
+        }
+
+        [Fact]
+        public async Task CompileAsync_WhenLowerRejectsMissingTargetResourceType_ReturnsLowerCapabilityOutcome()
+        {
+            // Arrange: an unstubbed resolver returns default (null) ids without throwing, so Resolve.RunAsync
+            // completes with no unresolved symbols; Lower.Run itself rejects the missing target resource type
+            // as a capability gap via the narrow NotSupportedException boundary.
+            var resolver = Substitute.For<ISymbolResolver>();
+            var adapter = CreateAdapter(resolver);
+            SqlSearchOptions options = CreateOptions(ignixaOptions =>
+            {
+                ignixaOptions.Expression = null;
+                ignixaOptions.ResourceType = null;
+                ignixaOptions.ResourceTypes = Array.Empty<string>();
+            });
+
+            // Act
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            // Assert
+            Assert.False(result.Compiled);
+            Assert.Equal("lower", result.FailureStage);
+            Assert.Equal("not-supported", result.FailureKind);
+            Assert.NotNull(result.FailureMessage);
+            Assert.Null(result.LoweredPlan);
+            Assert.Null(result.EmittedSql);
+            Assert.Equal(string.Empty, result.PlanFingerprint);
+        }
+
+        [Fact]
+        public async Task CompileAsync_WhenSortQuerySecondPhase_LowersMissingPrimarySortPhase()
+        {
+            // Arrange
+            var sortParamUri = new Uri("http://hl7.org/fhir/SearchParameter/Patient-birthdate");
+            var sortParameter = new IgnixaSearchParameterInfo(
+                "birthdate",
+                "birthdate",
+                SearchParamType.Date,
+                sortParamUri,
+                components: null,
+                expression: null,
+                targetResourceTypes: null,
+                baseResourceTypes: new[] { "Patient" },
+                description: null);
+            var model = CreateResolvableModel(sortParamUri);
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+
+            SqlSearchOptions options = CreateOptions(ignixaOptions =>
+            {
+                ignixaOptions.Expression = null;
+                ignixaOptions.Sort = new[] { new SortExpression(sortParameter, IgnixaSortOrder.Ascending) };
+            });
+            options.SortQuerySecondPhase = true;
+
+            // Act
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            // Assert
+            Assert.True(result.Compiled);
+            Assert.NotNull(result.LoweredPlan);
+            Assert.NotNull(result.LoweredPlan!.Plan.Sort);
+            Assert.Equal(SortPhase.MissingPrimary, result.LoweredPlan.Plan.Sort!.Phase);
+        }
+
+        [Fact]
+        public async Task CompileAsync_WhenNotSortQuerySecondPhase_LowersValuedSortPhase()
+        {
+            // Arrange
+            var sortParamUri = new Uri("http://hl7.org/fhir/SearchParameter/Patient-birthdate");
+            var sortParameter = new IgnixaSearchParameterInfo(
+                "birthdate",
+                "birthdate",
+                SearchParamType.Date,
+                sortParamUri,
+                components: null,
+                expression: null,
+                targetResourceTypes: null,
+                baseResourceTypes: new[] { "Patient" },
+                description: null);
+            var model = CreateResolvableModel(sortParamUri);
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+
+            SqlSearchOptions options = CreateOptions(ignixaOptions =>
+            {
+                ignixaOptions.Expression = null;
+                ignixaOptions.Sort = new[] { new SortExpression(sortParameter, IgnixaSortOrder.Ascending) };
+            });
+            options.SortQuerySecondPhase = false;
+
+            // Act
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            // Assert
+            Assert.True(result.Compiled);
+            Assert.NotNull(result.LoweredPlan);
+            Assert.NotNull(result.LoweredPlan!.Plan.Sort);
+            Assert.Equal(SortPhase.Valued, result.LoweredPlan.Plan.Sort!.Phase);
+        }
+
+        [Fact]
+        public async Task CompileAsync_WhenCountOnlyWithUnresolvableInclude_SuppressesIncludeBeforeResolve()
+        {
+            // Arrange: the include references a search parameter the model cannot resolve. If a count-only
+            // request incorrectly carried includes into Resolve.RunAsync, this would surface as an
+            // unresolved-symbol capability failure. Because count-only requests must suppress includes before
+            // Resolve is ever invoked, compilation succeeds instead.
+            var model = CreateResolvableModel();
+            model.TryGetSearchParamId(Arg.Any<Uri>(), out Arg.Any<short>()).Returns(false);
+
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+
+            var includeParameter = new IgnixaSearchParameterInfo(
+                "organization",
+                "organization",
+                SearchParamType.Reference,
+                new Uri("http://hl7.org/fhir/SearchParameter/Patient-organization"),
+                components: null,
+                expression: null,
+                targetResourceTypes: new[] { "Organization" },
+                baseResourceTypes: new[] { "Patient" },
+                description: null);
+            var include = new IncludeExpression(
+                new[] { "Patient" },
+                includeParameter,
+                "Patient",
+                targetResourceType: null,
+                referencedTypes: new[] { "Organization" },
+                wildCard: false,
+                reversed: false,
+                iterate: false);
+
+            SqlSearchOptions options = CreateOptions(
+                ignixaOptions =>
+                {
+                    ignixaOptions.Expression = null;
+                    ignixaOptions.Include = new[] { include };
+                },
+                countOnly: true);
+
+            // Act
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            // Assert
+            Assert.True(result.Compiled);
+            Assert.Empty(result.UnresolvedParameters);
+            Assert.True(result.LoweredPlan!.Plan.CountOnly);
+            Assert.Empty(result.LoweredPlan.Plan.Includes ?? (IReadOnlyList<IncludeStage>)Array.Empty<IncludeStage>());
+        }
+
+        [Fact]
+        public async Task ValidateResultShape_WhenCountOnlyMismatches_ReturnsCountOnlyMismatchCapability()
+        {
+            // Arrange: a real, successful compile provides a genuine baseline plan; the test then asks
+            // for a shape different from the one that plan actually has, proving the classification branch
+            // deterministically rather than relying on an undocumented divergence in real lowering behavior.
+            (IgnixaSqlCompilerAdapter adapter, SqlSearchOptions options, LoweredPlan baseline) = await CreateBaselineAsync();
+            var mismatchedOptions = new SqlSearchOptions(options) { IgnixaOptions = options.IgnixaOptions };
+            mismatchedOptions.CountOnly = !baseline.Plan.CountOnly;
+
+            // Act
+            IgnixaSqlCompilationOutcome result = adapter.ValidateResultShape(mismatchedOptions, options.IgnixaOptions, baseline);
+
+            // Assert
+            Assert.NotNull(result);
+            Assert.False(result!.Compiled);
+            Assert.Equal("shape", result.FailureStage);
+            Assert.Equal("count-only-mismatch", result.FailureKind);
+            Assert.Equal(string.Empty, result.PlanFingerprint);
+        }
+
+        [Fact]
+        public async Task ValidateResultShape_WhenIncludeCountMismatches_ReturnsIncludeShapeMismatchCapability()
+        {
+            // Arrange
+            (IgnixaSqlCompilerAdapter adapter, SqlSearchOptions options, LoweredPlan baseline) = await CreateBaselineAsync();
+            var extraInclude = new IncludeStage(
+                Direction: IncludeDirection.Forward,
+                ReferenceSearchParamId: null,
+                SeedTypeIds: Array.Empty<short>(),
+                OutputTypeIds: Array.Empty<short>(),
+                SeedStages: Array.Empty<int>(),
+                SeedFromMatch: true,
+                Iterate: false,
+                Limit: 0);
+            QueryPlan mismatchedPlan = new(
+                baseline.Plan.Ctes,
+                baseline.Plan.Match,
+                baseline.Plan.Top,
+                baseline.Plan.OuterPredicate,
+                new[] { extraInclude },
+                baseline.Plan.Sort,
+                baseline.Plan.Page,
+                baseline.Plan.CountOnly);
+            var mismatchedLowered = new LoweredPlan(mismatchedPlan, baseline.Provenance);
+
+            // Act
+            IgnixaSqlCompilationOutcome result = adapter.ValidateResultShape(options, options.IgnixaOptions, mismatchedLowered);
+
+            // Assert
+            Assert.NotNull(result);
+            Assert.False(result!.Compiled);
+            Assert.Equal("shape", result.FailureStage);
+            Assert.Equal("include-shape-mismatch", result.FailureKind);
+        }
+
+        [Fact]
+        public async Task ValidateResultShape_WhenSortRequestedButPlanHasNoSort_ReturnsSortShapeMismatchCapability()
+        {
+            // Arrange: the baseline plan was lowered without a sort. Requesting a sort against that same
+            // plan proves the sort-shape-mismatch branch without needing Lower.Run to actually diverge.
+            (IgnixaSqlCompilerAdapter adapter, SqlSearchOptions options, LoweredPlan baseline) = await CreateBaselineAsync();
+            Assert.Null(baseline.Plan.Sort);
+
+            var sortParameter = new IgnixaSearchParameterInfo("birthdate", "birthdate");
+            options.IgnixaOptions.Sort = new[] { new SortExpression(sortParameter, IgnixaSortOrder.Ascending) };
+
+            // Act
+            IgnixaSqlCompilationOutcome result = adapter.ValidateResultShape(options, options.IgnixaOptions, baseline);
+
+            // Assert
+            Assert.NotNull(result);
+            Assert.False(result!.Compiled);
+            Assert.Equal("shape", result.FailureStage);
+            Assert.Equal("sort-shape-mismatch", result.FailureKind);
+        }
+
+        [Fact]
+        public async Task ValidateResultShape_WhenTopMismatches_ReturnsTopShapeMismatchCapability()
+        {
+            // Arrange
+            (IgnixaSqlCompilerAdapter adapter, SqlSearchOptions options, LoweredPlan baseline) = await CreateBaselineAsync();
+            var mismatchedOptions = new SqlSearchOptions(options) { IgnixaOptions = options.IgnixaOptions };
+            mismatchedOptions.MaxItemCount = (baseline.Plan.Top ?? 0) + 1;
+
+            // Act
+            IgnixaSqlCompilationOutcome result = adapter.ValidateResultShape(mismatchedOptions, options.IgnixaOptions, baseline);
+
+            // Assert
+            Assert.NotNull(result);
+            Assert.False(result!.Compiled);
+            Assert.Equal("shape", result.FailureStage);
+            Assert.Equal("top-shape-mismatch", result.FailureKind);
+        }
+
+        private static async Task<(IgnixaSqlCompilerAdapter Adapter, SqlSearchOptions Options, LoweredPlan Baseline)> CreateBaselineAsync()
+        {
+            var model = CreateResolvableModel();
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+            SqlSearchOptions options = CreateOptions(ignixaOptions => ignixaOptions.Expression = null);
+
+            IgnixaSqlCompilationOutcome baseline = await adapter.CompileAsync(options, CancellationToken.None);
+            Assert.True(baseline.Compiled);
+
+            return (adapter, options, baseline.LoweredPlan!);
+        }
+
+        private static ISqlServerFhirModel CreateResolvableModel(Uri sortParamUri = null)
+        {
+            var model = Substitute.For<ISqlServerFhirModel>();
+            model.TryGetResourceTypeId("Patient", out Arg.Any<short>())
+                .Returns(callInfo =>
+                {
+                    callInfo[1] = (short)1;
+                    return true;
+                });
+
+            if (sortParamUri != null)
+            {
+                model.TryGetSearchParamId(sortParamUri, out Arg.Any<short>())
+                    .Returns(callInfo =>
+                    {
+                        callInfo[1] = (short)2;
+                        return true;
+                    });
+            }
+
+            return model;
         }
 
         private static IgnixaSqlCompilerAdapter CreateAdapter(ISymbolResolver resolver)

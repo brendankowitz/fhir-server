@@ -76,15 +76,23 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
             IgnixaSearchOptions ignixaOptions = searchOptions.IgnixaOptions;
 
-            IReadOnlyList<IncludeExpression> requestedIncludes = ignixaOptions.Include ?? EmptyIncludes;
-            IReadOnlyList<IncludeExpression> requestedRevIncludes = ignixaOptions.RevInclude ?? EmptyIncludes;
             IReadOnlyList<SortExpression> requestedSort = ignixaOptions.Sort ?? EmptySort;
+
+            // Count-only requests never carry includes/revincludes into either Resolve or Lower.
+            IReadOnlyList<IncludeExpression> includes = searchOptions.CountOnly ? EmptyIncludes : (ignixaOptions.Include ?? EmptyIncludes);
+            IReadOnlyList<IncludeExpression> revIncludes = searchOptions.CountOnly ? EmptyIncludes : (ignixaOptions.RevInclude ?? EmptyIncludes);
+
+            // The legacy SQL search service issues a second query phase for sorts on parameters that may be
+            // missing (e.g. descending sort with nulls last): the first phase finds resources with the sort
+            // value, the second phase finds resources without it. Map that legacy flag to the corresponding
+            // Ignixa sort phase; ordinary (single-phase) sorting always lowers as SortPhase.Valued.
+            SortPhase sortPhase = searchOptions.SortQuerySecondPhase ? SortPhase.MissingPrimary : SortPhase.Valued;
 
             // Stage 1: Resolve. This is the only stage that performs I/O (symbol lookups).
             ResolvedSymbols resolved = await Resolve.RunAsync(
                 ignixaOptions.Expression,
-                requestedIncludes,
-                requestedRevIncludes,
+                includes,
+                revIncludes,
                 requestedSort,
                 _resolver,
                 ignixaOptions.ResourceType,
@@ -96,10 +104,6 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 // Do not lower or emit; the caller falls back to the legacy SQL path.
                 return CapabilityFailure("resolve", "unresolved-symbol", resolved.Unresolved);
             }
-
-            // Count-only requests never carry includes/revincludes through lowering.
-            IReadOnlyList<IncludeExpression> includes = searchOptions.CountOnly ? EmptyIncludes : requestedIncludes;
-            IReadOnlyList<IncludeExpression> revIncludes = searchOptions.CountOnly ? EmptyIncludes : requestedRevIncludes;
 
             LoweredPlan lowered;
             try
@@ -113,7 +117,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                     revIncludes,
                     ignixaOptions.IncludesMaxItemCount ?? searchOptions.IncludeCount,
                     requestedSort,
-                    SortPhase.Valued,
+                    sortPhase,
                     page: null,
                     countOnly: searchOptions.CountOnly,
                     top: searchOptions.MaxItemCount);
@@ -159,7 +163,12 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
         /// text. Returns <see langword="null"/> when the shape matches, or a capability outcome describing
         /// the specific mismatch.
         /// </summary>
-        private IgnixaSqlCompilationOutcome ValidateResultShape(
+        /// <remarks>
+        /// Internal (rather than private) solely so that unit tests can exercise each classification branch
+        /// directly against a deliberately mismatched, hand-built <see cref="LoweredPlan"/> without depending
+        /// on an undocumented divergence in the real Ignixa lowering behavior.
+        /// </remarks>
+        internal IgnixaSqlCompilationOutcome ValidateResultShape(
             SqlSearchOptions searchOptions,
             IgnixaSearchOptions ignixaOptions,
             LoweredPlan lowered)
