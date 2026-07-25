@@ -23,8 +23,9 @@ the Cosmos path, which is converted to consume Ignixa expressions.
    *types* may be rewritten against Ignixa nodes; tests that assert on *behavior* must pass
    unchanged.
 4. Every existing SQL integration test passes against a live database.
-5. `LegacyCorpusDifferentialTests` in ignixa-fhir compiles 100% of `legacy-sql-corpus.json` with
-   no `NotSupportedException`.
+5. The legacy-SQL corpus in ignixa-fhir shows strictly fewer queries omitting a filter, and strictly
+   more matching the shipping engine, than today's baseline (46 and 69 respectively). **Not** "100%
+   compiles" — all 185 already compile, so that measure cannot detect a regression.
 6. The branch is a genuine merge candidate, not a spike.
 
 ## Current state
@@ -147,15 +148,24 @@ These land in a branch of `brendankowitz/ignixa-fhir` **before** any fhir-server
 8. **`$everything` plan shape** — `PatientEverythingExpression` becomes a first-class plan shape
    alongside includes, rather than being expanded by the caller.
 
-Additionally, `Lower` currently throws `NotSupportedException` for `SearchModifierCode.Not` on
-`SearchParameterPredicateExpression`; this must be supported.
+Additionally, a correctness gap found while planning: an untyped reference search
+(`/Patient?organization=X`) emits no `ReferenceResourceTypeId` filter, so it matches a reference to
+any resource type carrying that id. It must narrow to the search parameter's declared target types.
+
+`:not` was originally listed here as a gap. It is not — `LowerSearchParameter` handles it, and the
+`NotSupportedException` at `Lower.cs:103` guards a shape the binder never produces.
 
 ### Verification gate for the Ignixa branch
 
 `test/Ignixa.Search.Sql.Tests/Corpus/LegacyCorpusDifferentialTests.cs` compiles the 430 KB
-`legacy-sql-corpus.json` extracted from real FHIR Server queries. The gate is 100% clean
-compilation with no `NotSupportedException`. This proves capability parity inside ignixa-fhir
-before a single line of fhir-server code is deleted.
+`legacy-sql-corpus.json` extracted from real FHIR Server queries. **All 185 entries already
+compile**, so compile success proves nothing — `/Patient/{id}/$everything` compiles today and
+silently returns only the Patient. The gate is therefore the divergence classes: 46 queries where
+the compiler omits a filter the shipping engine applies, and 69 that match exactly. Both must move
+in the right direction, guarded by a new `DivergenceBaseline`.
+
+Each capability additionally carries its own behavioural test; the corpus is a regression net, not
+a capability oracle.
 
 ## FHIR Server SQL cutover
 
@@ -218,7 +228,7 @@ there is no fallback path, so failure handling becomes explicit:
 
 Parity is proven in three layers, in order.
 
-1. **Ignixa layer** — the legacy-SQL corpus gate described above. Blocking.
+1. **Ignixa layer** — the divergence-class gate described above. Blocking.
 2. **fhir-server unit layer** — the existing SQL and Cosmos search unit suites. A behavioral test
    requiring modification is treated as a defect signal, not as expected churn.
 3. **fhir-server integration layer** — existing SQL integration tests against a live database,
@@ -239,8 +249,8 @@ Ignixa-first, single cutover.
    coherent change.
 
 The tradeoff is accepted deliberately: the fhir-server tree will not build mid-cutover. The
-corpus gate is what makes this acceptable — capability risk is retired in ignixa-fhir, where it
-can be measured, before any deletion happens here.
+divergence-class gate is what makes this acceptable — capability risk is retired in ignixa-fhir,
+where it can be measured, before any deletion happens here.
 
 ## Package distribution
 
