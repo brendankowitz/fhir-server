@@ -125,8 +125,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                     requestedSort,
                     sortPhase,
                     page: null,
-                    countOnly: searchOptions.CountOnly,
-                    top: searchOptions.MaxItemCount);
+                    new LowerOptions
+                    {
+                        CountOnly = searchOptions.CountOnly,
+                        Top = searchOptions.MaxItemCount,
+                    });
             }
             catch (NotSupportedException ex)
             {

@@ -1,4 +1,4 @@
-﻿// -------------------------------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
@@ -264,7 +264,13 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Ignixa
         private static IgnixaSearchOptionsAdapter CreateRealAdapter()
         {
             IFhirSchemaProvider schemaProvider = IgnixaFhirVersionAdapter.Current.GetSchemaProvider();
-            var referenceSearchValueParser = new global::Ignixa.Search.Indexing.SearchValues.ReferenceSearchValueParser(schemaProvider);
+
+            // The parser collapses an absolute reference whose base matches this server to an internal one.
+            // No server base is configured here, so nothing collapses and every absolute reference stays
+            // external — a defined posture these tests do not depend on either way.
+            var baseUriProvider = Substitute.For<global::Ignixa.Abstractions.IFhirBaseUriProvider>();
+            baseUriProvider.GetServiceBaseUris().Returns(Array.Empty<Uri>());
+            var referenceSearchValueParser = new global::Ignixa.Search.Indexing.SearchValues.ReferenceSearchValueParser(schemaProvider, baseUriProvider);
             var searchParameterExpressionParser = new global::Ignixa.Search.Expressions.Parsers.SearchParameterExpressionParser(referenceSearchValueParser, schemaProvider);
             var searchParameterDefinitionManager = new global::Ignixa.Search.Definition.SearchParameterDefinitionManager(
                 schemaProvider,

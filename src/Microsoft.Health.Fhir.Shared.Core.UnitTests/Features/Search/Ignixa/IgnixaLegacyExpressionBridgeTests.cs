@@ -129,15 +129,19 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Ignixa
 
         public static IEnumerable<object[]> BinaryValueCases()
         {
-            yield return new object[] { IgnixaFieldName.Number, 5m };
-            yield return new object[] { IgnixaFieldName.Quantity, 5.4m };
-            yield return new object[] { IgnixaFieldName.DateTimeStart, DateTimeOffset.Parse("2020-01-02T03:04:05Z") };
-            yield return new object[] { IgnixaFieldName.DateTimeEnd, DateTimeOffset.Parse("2020-12-31T23:59:59Z") };
+            // Ignixa names both bounds of a numeric/quantity range; Cosmos indexes a single scalar, so both
+            // collapse onto one FHIR Server field. Cover each bound so the collapse stays proven on both sides.
+            yield return new object[] { IgnixaFieldName.NumberLow, 5m, FhirFieldName.Number };
+            yield return new object[] { IgnixaFieldName.NumberHigh, 5m, FhirFieldName.Number };
+            yield return new object[] { IgnixaFieldName.QuantityLow, 5.4m, FhirFieldName.Quantity };
+            yield return new object[] { IgnixaFieldName.QuantityHigh, 5.4m, FhirFieldName.Quantity };
+            yield return new object[] { IgnixaFieldName.DateTimeStart, DateTimeOffset.Parse("2020-01-02T03:04:05Z"), FhirFieldName.DateTimeStart };
+            yield return new object[] { IgnixaFieldName.DateTimeEnd, DateTimeOffset.Parse("2020-12-31T23:59:59Z"), FhirFieldName.DateTimeEnd };
         }
 
         [Theory]
         [MemberData(nameof(BinaryValueCases))]
-        public void GivenBinaryFieldValue_WhenConverted_ThenOperatorFieldAndValuePreserved(IgnixaFieldName ignixaFieldName, object value)
+        public void GivenBinaryFieldValue_WhenConverted_ThenOperatorFieldAndValuePreserved(IgnixaFieldName ignixaFieldName, object value, FhirFieldName expectedFieldName)
         {
             IgnixaExpr input = IgnixaExpr.GreaterThanOrEqual(ignixaFieldName, null, value);
 
@@ -145,6 +149,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Ignixa
 
             var binary = Assert.IsType<FhirBinaryExpression>(result);
             Assert.Equal(FhirBinaryOperator.GreaterThanOrEqual, binary.BinaryOperator);
+            Assert.Equal(expectedFieldName, binary.FieldName);
             Assert.Equal(value, binary.Value);
         }
 
@@ -165,7 +170,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Ignixa
         [Fact]
         public void GivenCompositeComponentIndex_WhenConverted_ThenComponentIndexPreserved()
         {
-            IgnixaExpr input = IgnixaExpr.Equals(IgnixaFieldName.Quantity, 1, 9.9m);
+            IgnixaExpr input = IgnixaExpr.Equals(IgnixaFieldName.QuantityLow, 1, 9.9m);
 
             FhirExpression result = CreateBridge().Convert(input);
 
@@ -448,7 +453,13 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Ignixa
         private static IgnixaSearchOptionsAdapter CreateRealAdapter()
         {
             global::Ignixa.Abstractions.IFhirSchemaProvider schemaProvider = IgnixaFhirVersionAdapter.Current.GetSchemaProvider();
-            var referenceSearchValueParser = new global::Ignixa.Search.Indexing.SearchValues.ReferenceSearchValueParser(schemaProvider);
+
+            // The parser collapses an absolute reference whose base matches this server to an internal one.
+            // No server base is configured here, so nothing collapses and every absolute reference stays
+            // external — a defined posture these tests do not depend on either way.
+            var baseUriProvider = Substitute.For<global::Ignixa.Abstractions.IFhirBaseUriProvider>();
+            baseUriProvider.GetServiceBaseUris().Returns(Array.Empty<Uri>());
+            var referenceSearchValueParser = new global::Ignixa.Search.Indexing.SearchValues.ReferenceSearchValueParser(schemaProvider, baseUriProvider);
             var searchParameterExpressionParser = new global::Ignixa.Search.Expressions.Parsers.SearchParameterExpressionParser(referenceSearchValueParser, schemaProvider);
             var searchParameterDefinitionManager = new global::Ignixa.Search.Definition.SearchParameterDefinitionManager(
                 schemaProvider,

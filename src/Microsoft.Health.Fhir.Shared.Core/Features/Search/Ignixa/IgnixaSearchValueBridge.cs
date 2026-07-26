@@ -45,11 +45,20 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             {
                 IgnixaFieldName.DateTimeStart => FhirFieldName.DateTimeStart,
                 IgnixaFieldName.DateTimeEnd => FhirFieldName.DateTimeEnd,
-                IgnixaFieldName.Number => FhirFieldName.Number,
+
+                // Ignixa names the two bounds of a numeric or quantity range separately because SQL Server
+                // stores them as separate low/high columns, and the FHIR prefix table maps gt to the high
+                // bound but sa to the low bound — so one field plus an operator cannot say which column is
+                // meant. Cosmos has no such split: it indexes a single scalar per value ("n"/"q"), and its
+                // LowNumberName/HighNumberName/LowQuantityName/HighQuantityName constants are unused
+                // throughout src. Collapsing both bounds onto the one FHIR Server field is therefore
+                // faithful here rather than lossy — against a point-valued index the operator alone carries
+                // the full comparison semantics, which is exactly what the legacy Cosmos path already did.
+                IgnixaFieldName.NumberLow or IgnixaFieldName.NumberHigh => FhirFieldName.Number,
                 IgnixaFieldName.ParamName => FhirFieldName.ParamName,
                 IgnixaFieldName.QuantityCode => FhirFieldName.QuantityCode,
                 IgnixaFieldName.QuantitySystem => FhirFieldName.QuantitySystem,
-                IgnixaFieldName.Quantity => FhirFieldName.Quantity,
+                IgnixaFieldName.QuantityLow or IgnixaFieldName.QuantityHigh => FhirFieldName.Quantity,
                 IgnixaFieldName.ReferenceBaseUri => FhirFieldName.ReferenceBaseUri,
                 IgnixaFieldName.ReferenceResourceType => FhirFieldName.ReferenceResourceType,
                 IgnixaFieldName.ReferenceResourceId => FhirFieldName.ReferenceResourceId,

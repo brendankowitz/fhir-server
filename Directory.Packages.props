@@ -6,8 +6,13 @@
     <Hl7FhirLegacyVersion>5.11.0</Hl7FhirLegacyVersion>
     <DotNetSdkPackageVersion>10.0.10</DotNetSdkPackageVersion>
     <OpenIddictPackageVersion>6.2.0</OpenIddictPackageVersion>
-    <IgnixaSearchPackageVersion>0.6.32</IgnixaSearchPackageVersion>
-    <IgnixaSearchSqlPackageVersion>0.6.32-alpha</IgnixaSearchSqlPackageVersion>
+    <!--
+      Built locally from brendankowitz/ignixa-fhir into ./local-packages (see NuGet.config).
+      0.6.99 is a deliberately non-release version so it cannot collide with a published one.
+      Repoint at the published versions before this branch is proposed for merge.
+    -->
+    <IgnixaSearchPackageVersion>0.6.100</IgnixaSearchPackageVersion>
+    <IgnixaSearchSqlPackageVersion>0.6.100-alpha</IgnixaSearchSqlPackageVersion>
   </PropertyGroup>
   <!-- SDK Packages -->
   <Choose>

@@ -185,11 +185,13 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
-        public async Task CompileAsync_WhenLowerRejectsMissingTargetResourceType_ReturnsLowerCapabilityOutcome()
+        public async Task CompileAsync_WhenNoTargetResourceTypeIsNamed_CompilesAsASystemWideSearch()
         {
-            // Arrange: an unstubbed resolver returns default (null) ids without throwing, so Resolve.RunAsync
-            // completes with no unresolved symbols; Lower.Run itself rejects the missing target resource type
-            // as a capability gap via the narrow NotSupportedException boundary.
+            // Arrange: no resource type and no _type filter is a system-wide search (GET /). The Ignixa
+            // compiler lowers that to a MultiTypeResourceSource over every type, so this is no longer the
+            // capability gap it was before multi-type support landed — it compiles. An unstubbed resolver
+            // returns default (null) ids without throwing, which is fine here because a system-wide base
+            // set needs no symbol lookups.
             var resolver = Substitute.For<ISymbolResolver>();
             var adapter = CreateAdapter(resolver);
             SqlSearchOptions options = CreateOptions(ignixaOptions =>
@@ -203,13 +205,14 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
 
             // Assert
-            Assert.False(result.Compiled);
-            Assert.Equal("lower", result.FailureStage);
-            Assert.Equal("not-supported", result.FailureKind);
-            Assert.NotNull(result.FailureMessage);
-            Assert.Null(result.LoweredPlan);
-            Assert.Null(result.EmittedSql);
-            Assert.Equal(string.Empty, result.PlanFingerprint);
+            Assert.True(result.Compiled);
+            Assert.NotNull(result.LoweredPlan);
+
+            // The base set must span every type rather than being scoped to one. An empty id list is what
+            // "every type" means to the compiler, so assert the CTE kind rather than an id count.
+            Assert.Contains(
+                result.LoweredPlan!.Plan.Ctes,
+                cte => cte is CteDefinition.MultiTypeResourceSource);
         }
 
         [Theory]
@@ -542,8 +545,25 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             SqlSearchOptions options = CreateOptions(ignixaOptions =>
             {
                 ignixaOptions.Expression = null;
-                ignixaOptions.ResourceType = null;
-                ignixaOptions.ResourceTypes = Array.Empty<string>();
+
+                // The trigger must reach Lower, so it cannot depend on symbol resolution: an unstubbed
+                // resolver returns null ids, which fails at Resolve and never gets there. _lastUpdated is a
+                // resource-column sort key that needs no lookup, and Lower caps _sort at three keys, so four
+                // of them is a pure count check that throws inside Lower with no I/O at all. The subject
+                // under test is the redaction of the log entry, not the particular gap that provokes it.
+                var lastUpdated = new IgnixaSearchParameterInfo(
+                    "_lastUpdated",
+                    "_lastUpdated",
+                    SearchParamType.Date,
+                    new Uri("http://hl7.org/fhir/SearchParameter/Resource-lastUpdated"));
+
+                ignixaOptions.Sort = new[]
+                {
+                    new SortExpression(lastUpdated, IgnixaSortOrder.Ascending),
+                    new SortExpression(lastUpdated, IgnixaSortOrder.Ascending),
+                    new SortExpression(lastUpdated, IgnixaSortOrder.Ascending),
+                    new SortExpression(lastUpdated, IgnixaSortOrder.Ascending),
+                };
             });
 
             // Act
