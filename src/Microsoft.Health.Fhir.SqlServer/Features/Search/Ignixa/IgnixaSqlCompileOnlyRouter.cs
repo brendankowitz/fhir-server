@@ -208,15 +208,6 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return false;
             }
 
-            if (!searchOptions.ResourceVersionTypes.HasFlag(ResourceVersionType.Latest))
-            {
-                // History-only and SoftDeleted-only requests render in legacy as an exact IsHistory=1 /
-                // IsDeleted=1 filter, which the compiler's relaxation-only ResourceVisibility cannot express.
-                // Only Latest-inclusive combinations map faithfully, so keep the rest on the legacy path.
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "non-latest-version-type");
-                return false;
-            }
-
             if (searchOptions.IsAsyncOperation)
             {
                 // Async operations (export/bulk) take the client _count verbatim as MaxItemCount and fold the
@@ -225,15 +216,6 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 // exercised by the differential suite. Keep async operations on the legacy path until that agreement
                 // can be proven.
                 _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "async-operation");
-                return false;
-            }
-
-            if (searchOptions.FeedRange != null)
-            {
-                // FeedRange is a Cosmos physical-partition token consumed only by FhirCosmosSearchService; the SQL
-                // search service never reads it and GetFeedRanges is unimplemented for SQL, so this gate is inert on
-                // the SQL path. It is not a surrogate-id range, so it cannot be mapped to the compiler's SurrogateRange.
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "feed-range");
                 return false;
             }
 

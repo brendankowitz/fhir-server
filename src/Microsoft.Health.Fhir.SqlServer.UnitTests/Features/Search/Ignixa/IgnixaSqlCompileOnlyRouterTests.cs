@@ -66,64 +66,27 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         // ---------------------------------------------------------------------------
 
         /// <summary>
-        /// Raw <see cref="ResourceVersionType"/> integer values that do NOT include
-        /// <see cref="ResourceVersionType.Latest"/> (= 1). Legacy renders these as an exact IsHistory=1 /
-        /// IsDeleted=1 filter that the compiler's relaxation-only visibility model cannot express, so the
-        /// router must skip all of them.
+        /// Every non-empty <see cref="ResourceVersionType"/> combination. The compiler's tri-state
+        /// <see cref="Ignixa.Search.Sql.Ast.ResourceVisibility"/> filters the IsHistory and IsDeleted axes
+        /// independently, so all seven reproduce the legacy truth table and none is gated.
         /// <list type="bullet">
+        ///   <item>1  = Latest</item>
         ///   <item>2  = History</item>
-        ///   <item>4  = SoftDeleted</item>
-        ///   <item>6  = History | SoftDeleted</item>
-        /// </list>
-        /// </summary>
-        public static IEnumerable<object[]> GetNonLatestVersionTypes()
-        {
-            return new[]
-            {
-                new object[] { 2 }, // ResourceVersionType.History
-                new object[] { 4 }, // ResourceVersionType.SoftDeleted
-                new object[] { 6 }, // History | SoftDeleted
-            };
-        }
-
-        /// <summary>
-        /// Raw <see cref="ResourceVersionType"/> integer values that include
-        /// <see cref="ResourceVersionType.Latest"/> (= 1). These map faithfully onto the compiler's
-        /// <see cref="Ignixa.Search.Sql.Ast.ResourceVisibility"/>, so the router routes them to Ignixa.
-        /// <list type="bullet">
         ///   <item>3  = Latest | History</item>
+        ///   <item>4  = SoftDeleted</item>
         ///   <item>5  = Latest | SoftDeleted</item>
+        ///   <item>6  = History | SoftDeleted</item>
         ///   <item>7  = Latest | History | SoftDeleted</item>
         /// </list>
         /// </summary>
-        public static IEnumerable<object[]> GetLatestInclusiveVersionTypes()
+        public static IEnumerable<object[]> GetVersionTypes()
         {
-            return new[]
-            {
-                new object[] { 3 }, // Latest | History
-                new object[] { 5 }, // Latest | SoftDeleted
-                new object[] { 7 }, // Latest | History | SoftDeleted
-            };
+            return Enumerable.Range(1, 7).Select(x => new object[] { x });
         }
 
         [Theory]
-        [MemberData(nameof(GetNonLatestVersionTypes))]
-        public async Task ObserveAsync_WhenResourceVersionTypeExcludesLatest_DoesNotCompile(int rawVersionType)
-        {
-            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
-            var router = CreateRouter(adapter, EnabledConfig());
-
-            SqlSearchOptions options = CreateEligibleOptions();
-            options.ResourceVersionTypes = (ResourceVersionType)rawVersionType;
-
-            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
-
-            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
-        }
-
-        [Theory]
-        [MemberData(nameof(GetLatestInclusiveVersionTypes))]
-        public async Task ObserveAsync_WhenResourceVersionTypeIncludesLatest_IsEligibleAndCompiles(int rawVersionType)
+        [MemberData(nameof(GetVersionTypes))]
+        public async Task ObserveAsync_ForAnyResourceVersionType_IsEligibleAndCompiles(int rawVersionType)
         {
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
             adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
@@ -218,9 +181,14 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
-        public async Task ObserveAsync_WhenFeedRangeSet_DoesNotCompile()
+        public async Task ObserveAsync_WhenFeedRangeSet_StillCompiles()
         {
+            // FeedRange is a Cosmos physical-partition token consumed only by FhirCosmosSearchService. The SQL
+            // search service never reads it and GetFeedRanges is unimplemented for SQL, so it cannot change the
+            // rows a SQL query returns and must not gate routing.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
             var router = CreateRouter(adapter, EnabledConfig());
 
             SqlSearchOptions options = CreateEligibleOptions();
@@ -228,7 +196,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
 
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
 
-            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
         }
 
         [Fact]

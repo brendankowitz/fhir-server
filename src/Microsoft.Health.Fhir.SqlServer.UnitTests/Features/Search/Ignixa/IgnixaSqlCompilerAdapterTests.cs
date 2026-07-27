@@ -112,46 +112,61 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             }
         }
 
-        [Fact]
-        public async Task CompileAsync_WhenVersionTypeIsLatest_EmitsTheCurrentVisibilityFilter()
+        /// <summary>
+        /// The legacy <c>AppendHistoryClause</c> / <c>AppendDeletedClause</c> truth table, expressed as
+        /// (versionTypes, expected IsHistory filter, expected IsDeleted filter). A <see langword="null"/>
+        /// expectation means no filter at all should be emitted on that axis.
+        /// </summary>
+        public static IEnumerable<object[]> GetVisibilityTruthTable()
         {
-            // Arrange: a plain Latest search must scope rows to the current version, i.e. the emitter has to
-            // render the IsHistory = 0 filter. This is the baseline the History relaxation is measured against.
-            var model = CreateResolvableModel();
-            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
-            SqlSearchOptions options = CreateOptions(ignixaOptions => ignixaOptions.Expression = null, countOnly: true);
-            options.ResourceVersionTypes = ResourceVersionType.Latest;
-
-            // Act
-            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
-
-            // Assert: Latest maps to the compiler's Current visibility, so both the history and the deleted
-            // filters are present.
-            Assert.True(result.Compiled);
-            Assert.NotNull(result.EmittedSql);
-            Assert.Contains("IsHistory = 0", result.EmittedSql!.Sql, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("IsDeleted = 0", result.EmittedSql.Sql, StringComparison.OrdinalIgnoreCase);
+            return new[]
+            {
+                new object[] { ResourceVersionType.Latest, "IsHistory = 0", "IsDeleted = 0" },
+                new object[] { ResourceVersionType.History, "IsHistory = 1", null },
+                new object[] { ResourceVersionType.SoftDeleted, null, "IsDeleted = 1" },
+                new object[] { ResourceVersionType.Latest | ResourceVersionType.History, null, "IsDeleted = 0" },
+                new object[] { ResourceVersionType.Latest | ResourceVersionType.SoftDeleted, "IsHistory = 0", null },
+                new object[] { ResourceVersionType.History | ResourceVersionType.SoftDeleted, "IsHistory = 1", "IsDeleted = 1" },
+                new object[] { ResourceVersionType.Latest | ResourceVersionType.History | ResourceVersionType.SoftDeleted, null, null },
+            };
         }
 
-        [Fact]
-        public async Task CompileAsync_WhenVersionTypeIncludesHistory_RelaxesOnlyTheHistoryVisibilityFilter()
+        [Theory]
+        [MemberData(nameof(GetVisibilityTruthTable))]
+        public async Task CompileAsync_ForEachResourceVersionType_EmitsTheLegacyVisibilityFilters(
+            ResourceVersionType versionTypes,
+            string expectedHistoryFilter,
+            string expectedDeletedFilter)
         {
-            // Arrange: Latest | History must relax the IsHistory = 0 filter (so historical rows can appear) while
-            // still hiding soft-deleted rows. This proves the ResourceVersionType -> ResourceVisibility mapping is
-            // actually forwarded and takes effect on the emitted SQL, not silently dropped.
+            // Each axis is filtered independently, so this covers not just the relaxations but the two exact
+            // filters legacy emits for history-only and soft-deleted-only - the cases that used to be routed away
+            // from Ignixa entirely. Asserting the *absence* of both polarities on an unconstrained axis is what
+            // stops a mapping that always emits something from passing.
             var model = CreateResolvableModel();
             var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
             SqlSearchOptions options = CreateOptions(ignixaOptions => ignixaOptions.Expression = null, countOnly: true);
-            options.ResourceVersionTypes = ResourceVersionType.Latest | ResourceVersionType.History;
+            options.ResourceVersionTypes = versionTypes;
 
-            // Act
             IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
 
-            // Assert: the history filter is gone (relaxed) but the deleted filter remains (not requested).
             Assert.True(result.Compiled);
             Assert.NotNull(result.EmittedSql);
-            Assert.DoesNotContain("IsHistory = 0", result.EmittedSql!.Sql, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("IsDeleted = 0", result.EmittedSql.Sql, StringComparison.OrdinalIgnoreCase);
+
+            AssertAxis("IsHistory", expectedHistoryFilter, result.EmittedSql!.Sql);
+            AssertAxis("IsDeleted", expectedDeletedFilter, result.EmittedSql.Sql);
+
+            static void AssertAxis(string column, string expected, string sql)
+            {
+                if (expected == null)
+                {
+                    Assert.DoesNotContain($"{column} = 0", sql, StringComparison.OrdinalIgnoreCase);
+                    Assert.DoesNotContain($"{column} = 1", sql, StringComparison.OrdinalIgnoreCase);
+                }
+                else
+                {
+                    Assert.Contains(expected, sql, StringComparison.OrdinalIgnoreCase);
+                }
+            }
         }
 
         [Fact]

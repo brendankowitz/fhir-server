@@ -704,6 +704,109 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenAHistoryOnlySearch_WhenExecutedOnBothEngines_ThenIgnixaReturnsOnlySupersededVersionsLikeLegacy()
+        {
+            // History alone is not a relaxation - legacy renders it as an exact IsHistory = 1 filter, so the
+            // CURRENT version must be excluded. That asymmetry is the whole point of the tri-state visibility
+            // model: a mapping that merely relaxed IsHistory = 0 would return both versions and pass a test that
+            // only checked "the historical version is present".
+            //
+            // Observation (not Patient) is used deliberately: the fixture's mocked capability statement marks
+            // Observation as Versioned, so upserting twice retains version 1 as history. Patient carries the
+            // default policy and its prior version is simply overwritten, which would leave nothing to find and
+            // make this test vacuous.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var observation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Preliminary,
+                Code = new CodeableConcept { Text = $"IgnixaHistory_{Guid.NewGuid()}" },
+            };
+            string observationId = observation.Id;
+
+            await _fixture.Mediator.UpsertResourceAsync(observation.ToResourceElement());
+            observation.Status = ObservationStatus.Final;
+            await _fixture.Mediator.UpsertResourceAsync(observation.ToResourceElement());
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", observationId),
+                Tuple.Create("_count", "1000"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync(
+                "Observation", query, CancellationToken.None, resourceVersionTypes: ResourceVersionType.History);
+            SearchResult legacyResults = await legacySearchService.SearchAsync(
+                "Observation", query, CancellationToken.None, resourceVersionTypes: ResourceVersionType.History);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the history-only search to run on Ignixa.");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            List<string> legacyVersions = OrderedResourceIdVersions(legacyResults, observationId);
+            List<string> ignixaVersions = OrderedResourceIdVersions(ignixaResults, observationId);
+
+            // Anti-vacuity, both directions: legacy found the superseded version 1, and did NOT surface the
+            // current version 2. Without the second assertion a relaxation-only mapping would still pass.
+            Assert.Equal(new[] { $"{observationId}/1" }, legacyVersions);
+            Assert.Equal(legacyVersions, ignixaVersions);
+        }
+
+        [Fact]
+        public async Task GivenASoftDeletedOnlySearch_WhenExecutedOnBothEngines_ThenIgnixaReturnsOnlyDeletedRowsLikeLegacy()
+        {
+            // SoftDeleted alone renders in legacy as an exact IsDeleted = 1 filter with NO history filter. Two
+            // resources are seeded and only one is deleted, so the live one must be absent from both engines -
+            // which is what distinguishes an exact filter from a relaxed one.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var deletedPatient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            deletedPatient.Id = Guid.NewGuid().ToString();
+            await _fixture.Mediator.UpsertResourceAsync(deletedPatient.ToResourceElement());
+            await _fixture.Mediator.DeleteResourceAsync(
+                new ResourceKey("Patient", deletedPatient.Id), Core.Messages.Delete.DeleteOperation.SoftDelete);
+
+            var livePatient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            livePatient.Id = Guid.NewGuid().ToString();
+            await _fixture.Mediator.UpsertResourceAsync(livePatient.ToResourceElement());
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", $"{deletedPatient.Id},{livePatient.Id}"),
+                Tuple.Create("_count", "1000"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync(
+                "Patient", query, CancellationToken.None, resourceVersionTypes: ResourceVersionType.SoftDeleted);
+            SearchResult legacyResults = await legacySearchService.SearchAsync(
+                "Patient", query, CancellationToken.None, resourceVersionTypes: ResourceVersionType.SoftDeleted);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the soft-deleted-only search to run on Ignixa.");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            var seeded = new HashSet<string>(new[] { deletedPatient.Id, livePatient.Id }, StringComparer.Ordinal);
+            List<string> legacyMatches = ResourceIdsInResultOrder(legacyResults).Where(seeded.Contains).ToList();
+            List<string> ignixaMatches = ResourceIdsInResultOrder(ignixaResults).Where(seeded.Contains).ToList();
+
+            Assert.Equal(new[] { deletedPatient.Id }, legacyMatches);
+            Assert.Equal(legacyMatches, ignixaMatches);
+        }
+
+        [Fact]
         public async Task GivenAnIgnoreSearchParamHashSearch_WhenExecutedOnBothEngines_ThenIgnixaTakesThePathAndAgreesWithLegacy()
         {
             // Step 3 removes the ignore-search-param-hash gate. The flag is consumed only by the reindex-only

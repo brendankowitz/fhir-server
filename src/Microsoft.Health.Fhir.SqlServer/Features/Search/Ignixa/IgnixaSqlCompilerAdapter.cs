@@ -206,10 +206,10 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                         // stages rather than as a filter over the match set.
                         AllowedResourceTypes = ignixaOptions.AllowedResourceTypes,
 
-                        // Map the server's requested resource visibility onto the compiler's relaxation-only
-                        // model. The router only routes Latest-inclusive combinations here, for which this
-                        // mapping is exact; History-only / SoftDeleted-only (which legacy renders as IsHistory=1
-                        // / IsDeleted=1, a filter ResourceVisibility cannot express) stay on the legacy path.
+                        // Map the server's requested resource visibility onto the compiler's tri-state model,
+                        // which filters each of the IsHistory / IsDeleted axes independently and so reproduces
+                        // the legacy generator's truth table exactly - including History-only and
+                        // SoftDeleted-only, which legacy renders as IsHistory = 1 / IsDeleted = 1.
                         Visibility = ToVisibility(searchOptions.ResourceVersionTypes),
                     });
             }
@@ -425,24 +425,48 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
         }
 
         /// <summary>
-        /// Maps the FHIR Server's <see cref="ResourceVersionType"/> onto the SQL compiler's relaxation-only
-        /// <see cref="ResourceVisibility"/>. <see cref="ResourceVersionType.Latest"/> alone returns
-        /// <see langword="null"/> rather than an explicit <see cref="ResourceVisibility.Current"/> — both leave
-        /// the plan's effective visibility at Current, so null is the smaller diff. This mapping is faithful to
-        /// the legacy generator only for Latest-inclusive combinations; the router keeps History-only and
-        /// SoftDeleted-only requests (which legacy renders as an exact IsHistory=1 / IsDeleted=1 filter that a
-        /// relaxation-only model cannot express) on the legacy path.
+        /// Maps the FHIR Server's <see cref="ResourceVersionType"/> onto the SQL compiler's tri-state
+        /// <see cref="ResourceVisibility"/>, where <see langword="null"/> on an axis means "emit no filter",
+        /// <see langword="false"/> means <c>= 0</c> and <see langword="true"/> means <c>= 1</c>.
         /// </summary>
+        /// <remarks>
+        /// This reproduces the legacy generator's <c>AppendHistoryClause</c> / <c>AppendDeletedClause</c> truth
+        /// table exactly:
+        /// <list type="table">
+        /// <item><description>Latest                  -> IsHistory = 0, IsDeleted = 0</description></item>
+        /// <item><description>History                 -> IsHistory = 1, no deleted filter</description></item>
+        /// <item><description>SoftDeleted             -> no history filter, IsDeleted = 1</description></item>
+        /// <item><description>Latest | History        -> no history filter, IsDeleted = 0</description></item>
+        /// <item><description>Latest | SoftDeleted    -> IsHistory = 0, no deleted filter</description></item>
+        /// <item><description>History | SoftDeleted   -> IsHistory = 1, IsDeleted = 1</description></item>
+        /// <item><description>all three               -> no filter on either axis</description></item>
+        /// </list>
+        /// Each axis is anchored on <see cref="ResourceVersionType.Latest"/>, which asks for live current rows
+        /// (IsHistory = 0 AND IsDeleted = 0); History and SoftDeleted each opt one axis away from that anchor.
+        /// That is what makes the "no filter" corners (Latest|History on the history axis, Latest|SoftDeleted on
+        /// the deleted axis, and History alone on the deleted axis) fall out rather than needing special cases.
+        /// </remarks>
         private static ResourceVisibility ToVisibility(ResourceVersionType versionTypes)
         {
-            if (versionTypes == ResourceVersionType.Latest)
-            {
-                return null;
-            }
+            bool wantsLatest = versionTypes.HasFlag(ResourceVersionType.Latest);
+            bool wantsHistory = versionTypes.HasFlag(ResourceVersionType.History);
+            bool wantsSoftDeleted = versionTypes.HasFlag(ResourceVersionType.SoftDeleted);
 
+            // Both axes are anchored on Latest, which is the flag that asks for live current rows: IsHistory = 0
+            // AND IsDeleted = 0. History and SoftDeleted each opt one axis away from that anchor. Asking for both
+            // sides of an axis (or neither, because the other flag drives that axis) means no filter can be
+            // correct, so none is emitted.
+            //
+            // Note this must never return null for the "unfiltered on both axes" case: a null Visibility means
+            // "use the compiler default", which is Current - the opposite of unfiltered.
             return new ResourceVisibility(
-                IncludeHistory: versionTypes.HasFlag(ResourceVersionType.History),
-                IncludeDeleted: versionTypes.HasFlag(ResourceVersionType.SoftDeleted));
+                AxisFilter(wantsCurrent: wantsLatest, wantsNonCurrent: wantsHistory),
+                AxisFilter(wantsCurrent: wantsLatest, wantsNonCurrent: wantsSoftDeleted));
+
+            static bool? AxisFilter(bool wantsCurrent, bool wantsNonCurrent)
+            {
+                return wantsCurrent == wantsNonCurrent ? null : wantsNonCurrent;
+            }
         }
 
         /// <summary>

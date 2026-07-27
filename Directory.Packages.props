@@ -11,8 +11,8 @@
       0.6.99 is a deliberately non-release version so it cannot collide with a published one.
       Repoint at the published versions before this branch is proposed for merge.
     -->
-    <IgnixaSearchPackageVersion>0.6.102</IgnixaSearchPackageVersion>
-    <IgnixaSearchSqlPackageVersion>0.6.102-alpha</IgnixaSearchSqlPackageVersion>
+    <IgnixaSearchPackageVersion>0.6.103</IgnixaSearchPackageVersion>
+    <IgnixaSearchSqlPackageVersion>0.6.103-alpha</IgnixaSearchSqlPackageVersion>
   </PropertyGroup>
   <!-- SDK Packages -->
   <Choose>
