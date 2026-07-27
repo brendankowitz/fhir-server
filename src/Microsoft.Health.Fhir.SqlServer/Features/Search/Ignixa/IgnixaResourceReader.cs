@@ -150,12 +150,18 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
         }
 
         /// <summary>
-        /// Reads a 0/1 boolean flag column tolerant of its emitted SQL type. Ignixa's UNION ALL can surface
-        /// <c>IsPartial</c> as <c>int</c> (bit match arm unioned with an int include-arm CASE), so a plain
-        /// <see cref="SqlDataReader.GetBoolean(int)"/> would throw <see cref="InvalidCastException"/>. Reading
-        /// the raw value and coercing keeps the reader correct regardless of whether the column resolves to
-        /// <c>bit</c> or <c>int</c>.
+        /// Reads a 0/1 boolean flag column tolerant of its emitted SQL type.
         /// </summary>
+        /// <remarks>
+        /// This originally worked around an Ignixa defect: the match arm emitted <c>CAST(0 AS bit) AS IsPartial</c>
+        /// while an include stage emitted a bare int <c>CASE</c>, and T-SQL union type precedence promoted the
+        /// column to <c>int</c>, so <see cref="SqlDataReader.GetBoolean(int)"/> threw on include rows only. That
+        /// defect is fixed upstream (both arms now emit <c>bit</c>) and pinned by a regression test there, so this
+        /// coercion is no longer load-bearing. It is kept deliberately: the column's type is decided by a
+        /// generator in another repository, and tolerating either representation costs one boxed read per flag
+        /// while turning a future type drift into correct results rather than a runtime cast failure on a code
+        /// path that only executes for searches carrying includes.
+        /// </remarks>
         private static bool ReadBooleanFlag(SqlDataReader reader, int ordinal)
         {
             object value = reader.GetValue(ordinal);
