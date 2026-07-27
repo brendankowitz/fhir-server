@@ -14,6 +14,7 @@ using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.SqlServer.Features.Search;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Fhir.Tests.Common.FixtureParameters;
+using Microsoft.Health.Fhir.ValueSets;
 using Microsoft.Health.Test.Utilities;
 using Xunit;
 using Xunit.Abstractions;
@@ -142,11 +143,221 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             Assert.Equal(OrderedResourceIds(legacyResults), OrderedResourceIds(ignixaResults));
         }
 
+        [Theory]
+        [InlineData("-date", true)]
+        [InlineData("date", false)]
+        public async Task GivenACustomDateSort_WhenExecutedOnBothEngines_ThenIgnixaTakesTheSortPathAndAgreesWithLegacyOnOrder(string sortExpression, bool descending)
+        {
+            // Closing the materialisation sort guard means a custom "_sort" now runs through the Ignixa
+            // execution path rather than falling back to legacy. This differential exercises the novel part of
+            // that change - the SortValueN keyset projection and the valued/missing two-phase - and proves two
+            // things a wrong sort would break: the emitted SQL projects the sort columns at the ordinals the
+            // reader expects (so the rows come back at all), and it orders them into the exact same sequence
+            // the trusted legacy generator produces (so a reversed or mis-keyed ORDER BY would diverge and
+            // fail). The assertion compares the ordered id sequence, not just the set, because "right rows,
+            // wrong order" is the failure mode that matters.
+            //
+            // Note on scope: this integration fixture does not index every search parameter's sort value (see
+            // the same observation in GivenATokenSearch and the "requires indexing" note in
+            // SqlServerSearchServiceIntegrationTests), so a date sort here can legitimately collapse to
+            // surrogate order on BOTH engines. That is why correctness is checked against legacy - the trusted
+            // oracle - rather than an absolute value order the fixture cannot guarantee. The companion
+            // _lastUpdated test below asserts a concrete, deterministic reordering to prove the sort direction
+            // is honoured and the path is not an inert no-op.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            // Seed four observations with distinct effective years, chosen by direction so the seeds sit inside
+            // the first page: descending shows the newest rows first (future years), ascending shows the oldest
+            // first. Insert them in a deliberately shuffled order so insertion order matches neither sort
+            // direction.
+            int baseYear = descending ? 2090 : 1970;
+            var chronological = new[]
+            {
+                new DateTimeOffset(baseYear + 0, 1, 1, 0, 0, 0, TimeSpan.Zero),
+                new DateTimeOffset(baseYear + 1, 1, 1, 0, 0, 0, TimeSpan.Zero),
+                new DateTimeOffset(baseYear + 2, 1, 1, 0, 0, 0, TimeSpan.Zero),
+                new DateTimeOffset(baseYear + 3, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            };
+            var insertionOrder = new[] { chronological[1], chronological[3], chronological[0], chronological[2] };
+            var dateToId = new Dictionary<DateTimeOffset, string>();
+
+            var sortQuery = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_sort", sortExpression),
+                Tuple.Create("_count", "1000"),
+            };
+
+            long ignixaBefore = 0;
+            long legacyInstanceBefore = 0;
+            List<string> ignixaSeededInOrder = null;
+            List<string> legacySeededInOrder = null;
+
+            // The shared dbo.Resource table can be truncated by a concurrently running test class between the
+            // seed and the reads. Retry the seed + both searches a few times so a concurrent truncation does
+            // not turn a correct implementation into a flake.
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                dateToId.Clear();
+                foreach (var effectiveDate in insertionOrder)
+                {
+                    var observation = new Observation
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        Status = ObservationStatus.Final,
+                        Code = new CodeableConcept { Text = $"IgnixaSort_{Guid.NewGuid()}" },
+                        Effective = new FhirDateTime(effectiveDate.Year, effectiveDate.Month, effectiveDate.Day),
+                    };
+                    dateToId[effectiveDate] = observation.Id;
+                    await _fixture.Mediator.UpsertResourceAsync(observation.ToResourceElement());
+                }
+
+                ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                var seededIds = new HashSet<string>(dateToId.Values, StringComparer.Ordinal);
+
+                SearchResult ignixaResults = await ignixaSearchService.SearchAsync("Observation", sortQuery, CancellationToken.None);
+                SearchResult legacyResults = await legacySearchService.SearchAsync("Observation", sortQuery, CancellationToken.None);
+
+                ignixaSeededInOrder = ResourceIdsInResultOrder(ignixaResults).Where(seededIds.Contains).ToList();
+                legacySeededInOrder = ResourceIdsInResultOrder(legacyResults).Where(seededIds.Contains).ToList();
+
+                if (ignixaSeededInOrder.Count == chronological.Length && legacySeededInOrder.Count == chronological.Length)
+                {
+                    break;
+                }
+            }
+
+            long ignixaAfter = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceAfter = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            _output.WriteLine($"sort={sortExpression} ignixa=[{string.Join(",", ignixaSeededInOrder)}]");
+            _output.WriteLine($"sort={sortExpression} legacy=[{string.Join(",", legacySeededInOrder)}]");
+
+            // Counter evidence: the sorted search actually ran through the Ignixa execution path...
+            Assert.True(
+                ignixaAfter > ignixaBefore,
+                $"Expected the Ignixa sort path to run. before={ignixaBefore} after={ignixaAfter}");
+
+            // ...and it was Ignixa end to end, not a silent legacy fallback for one of the sort phases: the
+            // instance legacy-execution counter did not move.
+            Assert.Equal(legacyInstanceBefore, legacyInstanceAfter);
+
+            // Every seeded observation came back on both engines, so the projection reader materialised the
+            // sorted rows rather than dropping or duplicating them.
+            Assert.Equal(chronological.Length, ignixaSeededInOrder.Count);
+            Assert.Equal(chronological.Length, legacySeededInOrder.Count);
+
+            // Order correctness against the trusted legacy generator: Ignixa produced the seeded ids in exactly
+            // the same sequence legacy did. A reversed or mis-keyed ORDER BY on the Ignixa side would diverge
+            // here.
+            Assert.Equal(legacySeededInOrder, ignixaSeededInOrder);
+        }
+
+        [Theory]
+        [InlineData("_lastUpdated", false)]
+        [InlineData("-_lastUpdated", true)]
+        public async Task GivenALastUpdatedSort_WhenExecutedOnBothEngines_ThenIgnixaOrdersBySurrogateInTheRequestedDirection(string sortExpression, bool descending)
+        {
+            // _lastUpdated sorts by ResourceSurrogateId, which is intrinsic to every row and needs no search
+            // parameter indexing, so unlike a date sort it produces a concrete, deterministic order in this
+            // fixture: ascending returns the seeds in insertion order, descending returns them reversed. That
+            // gives the widening real teeth - it proves Ignixa honours the sort DIRECTION and is not an inert
+            // no-op - on top of the legacy differential.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var sortQuery = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_sort", sortExpression),
+                Tuple.Create("_count", "1000"),
+            };
+
+            long ignixaBefore = 0;
+            long legacyInstanceBefore = 0;
+            List<string> insertionIds = null;
+            List<string> ignixaSeededInOrder = null;
+            List<string> legacySeededInOrder = null;
+
+            // The shared dbo.Resource table can be truncated by a concurrently running test class between the
+            // seed and the reads. Retry the seed + both searches a few times so a concurrent truncation does
+            // not turn a correct implementation into a flake.
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                insertionIds = new List<string>();
+                for (int i = 0; i < 4; i++)
+                {
+                    var observation = new Observation
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        Status = ObservationStatus.Final,
+                        Code = new CodeableConcept { Text = $"IgnixaLastUpdated_{Guid.NewGuid()}" },
+                    };
+                    insertionIds.Add(observation.Id);
+                    await _fixture.Mediator.UpsertResourceAsync(observation.ToResourceElement());
+                }
+
+                ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                var seededIds = new HashSet<string>(insertionIds, StringComparer.Ordinal);
+
+                SearchResult ignixaResults = await ignixaSearchService.SearchAsync("Observation", sortQuery, CancellationToken.None);
+                SearchResult legacyResults = await legacySearchService.SearchAsync("Observation", sortQuery, CancellationToken.None);
+
+                ignixaSeededInOrder = ResourceIdsInResultOrder(ignixaResults).Where(seededIds.Contains).ToList();
+                legacySeededInOrder = ResourceIdsInResultOrder(legacyResults).Where(seededIds.Contains).ToList();
+
+                if (ignixaSeededInOrder.Count == insertionIds.Count && legacySeededInOrder.Count == insertionIds.Count)
+                {
+                    break;
+                }
+            }
+
+            long ignixaAfter = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceAfter = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            var expectedOrder = descending ? Enumerable.Reverse(insertionIds).ToList() : insertionIds;
+
+            _output.WriteLine($"sort={sortExpression} expected=[{string.Join(",", expectedOrder)}]");
+            _output.WriteLine($"sort={sortExpression} ignixa  =[{string.Join(",", ignixaSeededInOrder)}]");
+            _output.WriteLine($"sort={sortExpression} legacy  =[{string.Join(",", legacySeededInOrder)}]");
+
+            // Counter evidence: the sorted search actually ran through the Ignixa execution path, and no phase
+            // silently fell back to legacy.
+            Assert.True(
+                ignixaAfter > ignixaBefore,
+                $"Expected the Ignixa sort path to run. before={ignixaBefore} after={ignixaAfter}");
+            Assert.Equal(legacyInstanceBefore, legacyInstanceAfter);
+
+            Assert.Equal(insertionIds.Count, ignixaSeededInOrder.Count);
+            Assert.Equal(insertionIds.Count, legacySeededInOrder.Count);
+
+            // Deterministic order teeth: surrogate ids ascend with insertion time, so the seeds must come back
+            // in insertion order for _lastUpdated and reversed for -_lastUpdated. This would fail if the Ignixa
+            // ORDER BY dropped or inverted the requested direction.
+            Assert.Equal(expectedOrder, ignixaSeededInOrder);
+
+            // And Ignixa agrees with the trusted legacy generator id for id.
+            Assert.Equal(legacySeededInOrder, ignixaSeededInOrder);
+        }
+
         private static string OrderedResourceIds(SearchResult results)
         {
             return string.Join(
                 ",",
                 results.Results.Select(r => r.Resource.ResourceId).OrderBy(id => id, StringComparer.Ordinal));
+        }
+
+        private static List<string> ResourceIdsInResultOrder(SearchResult results)
+        {
+            return results.Results
+                .Where(r => r.SearchEntryMode == SearchEntryMode.Match)
+                .Select(r => r.Resource.ResourceId)
+                .ToList();
         }
     }
 }

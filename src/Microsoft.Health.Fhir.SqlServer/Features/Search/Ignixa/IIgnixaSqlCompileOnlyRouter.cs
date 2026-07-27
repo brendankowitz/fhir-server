@@ -57,8 +57,20 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
     /// <param name="EmittedSql">The emitted parameterized SQL and its typed parameters.</param>
     /// <param name="HasIncludes">Whether the plan carries includes, so rows expose <c>IsMatch</c>/<c>IsPartial</c>.</param>
     /// <param name="CountOnly">Whether the plan emits a single count scalar rather than resource rows.</param>
+    /// <param name="SortKeyColumnCount">
+    /// The number of <c>SortValueN</c> keyset columns Ignixa projects between the identity/flag prefix and the
+    /// resource projection — one per active sort key. The reader skips exactly this many columns to reach the
+    /// projection.
+    /// </param>
+    /// <param name="CaptureSortValue">
+    /// Whether the reader must read the primary key's <c>SortValue0</c> column so the continuation token can
+    /// carry it. True only when the plan searched the valued segment of a search-parameter-table primary sort
+    /// key, matching the legacy <c>IsSortValueNeeded</c> contract.
+    /// </param>
     internal sealed record IgnixaSqlExecutionPlan(
         EmittedSql EmittedSql,
         bool HasIncludes,
-        bool CountOnly);
+        bool CountOnly,
+        int SortKeyColumnCount,
+        bool CaptureSortValue);
 }

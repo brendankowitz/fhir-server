@@ -616,6 +616,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                         var isSortValueNeeded = false;
                         var useIgnixaExecution = false;
                         var ignixaHasIncludes = false;
+                        var ignixaSortKeyColumnCount = 0;
+                        var ignixaCaptureSortValue = false;
 
                         var exportTimeTravel = clonedSearchOptions.QueryHints != null && ContainsGlobalEndSurrogateId(clonedSearchOptions);
                         if (exportTimeTravel)
@@ -650,10 +652,14 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                             {
                                 useIgnixaExecution = true;
                                 ignixaHasIncludes = ignixaPlan.HasIncludes;
+                                ignixaSortKeyColumnCount = ignixaPlan.SortKeyColumnCount;
+                                ignixaCaptureSortValue = ignixaPlan.CaptureSortValue;
 
-                                // Ignixa emits its own parameterized SQL and does not project the named sort
-                                // column the legacy reader reads, so no legacy parameters or sort flag apply.
-                                isSortValueNeeded = false;
+                                // Ignixa emits its own parameterized SQL. When the plan searched the valued
+                                // segment of a search-parameter-table sort key, the reader captures the primary
+                                // SortValue0 column so the continuation token stays legacy-compatible; otherwise
+                                // no sort value is projected for the token to carry.
+                                isSortValueNeeded = ignixaPlan.CaptureSortValue;
                                 queryText = ignixaPlan.EmittedSql.Sql;
 
                                 foreach (EmittedSqlParameter ignixaParameter in ignixaPlan.EmittedSql.Parameters)
@@ -776,12 +782,15 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                                     byte[] rawResourceBytes;
                                     bool isInvisible;
                                     bool isHistory;
+                                    object ignixaRowSortValue = null;
 
                                     if (useIgnixaExecution)
                                     {
                                         IgnixaResourceReader.Read(
                                             reader,
                                             ignixaHasIncludes,
+                                            ignixaSortKeyColumnCount,
+                                            ignixaCaptureSortValue,
                                             out resourceTypeId,
                                             out resourceId,
                                             out version,
@@ -790,6 +799,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                                             out requestMethod,
                                             out isMatch,
                                             out isPartialEntry,
+                                            out ignixaRowSortValue,
                                             out isRawResourceMetaSet,
                                             out searchParameterHash,
                                             out rawResourceBytes,
@@ -865,8 +875,12 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                                         // Keep track of sort value if this is the last row.
                                         if (matchCount == clonedSearchOptions.MaxItemCount - 1 && isSortValueNeeded)
                                         {
-                                            var tempSortValue = reader.GetValue(SortValueColumnName);
-                                            sortValue = (tempSortValue as DateTime?) != null ? (tempSortValue as DateTime?).Value.ToString("o") : tempSortValue.ToString();
+                                            // The Ignixa reader captured the primary SortValue0 column while it
+                                            // read the row (sequential access cannot revisit it here); the legacy
+                                            // reader still exposes a named SortValue column to read now. Both
+                                            // format identically so the minted continuation token is engine-agnostic.
+                                            var tempSortValue = useIgnixaExecution ? ignixaRowSortValue : reader.GetValue(SortValueColumnName);
+                                            sortValue = (tempSortValue as DateTime?) != null ? (tempSortValue as DateTime?).Value.ToString("o") : tempSortValue?.ToString();
                                         }
 
                                         matchCount++;

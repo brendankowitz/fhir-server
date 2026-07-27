@@ -148,15 +148,9 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
             QueryPlan plan = outcome.LoweredPlan.Plan;
 
-            // Materialisation guards. A custom sort projects an extra ordering column the reader does not
-            // model, and includes require the include-truncation and includes-continuation interplay that has
-            // not been validated against the emitted UNION ALL shape yet. Both fall back to legacy for now.
-            if (plan.Sort != null)
-            {
-                _logger.LogDebug("Falling back to legacy SQL: Ignixa plan carries a custom sort. Reason={Reason}", "custom-sort");
-                return null;
-            }
-
+            // Materialisation guard for includes. Includes require the include-truncation and
+            // includes-continuation interplay that has not been validated against the emitted UNION ALL shape
+            // yet, so a plan carrying includes still falls back to legacy for now.
             bool hasIncludes = (plan.Includes?.Count ?? 0) > 0;
             if (hasIncludes)
             {
@@ -164,7 +158,44 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return null;
             }
 
-            return new IgnixaSqlExecutionPlan(outcome.EmittedSql, hasIncludes, plan.CountOnly);
+            // Materialisation guard for the sort phases legacy handles specially. When the sort parameter is
+            // also a filter (IsSortWithFilter) legacy skips the missing-values phase and searches valued rows
+            // directly, and a ":missing" modifier on the sort parameter (SortHasMissingModifier) drives yet
+            // another phase shape. The Ignixa adapter derives its Valued/MissingPrimary phase purely from
+            // sort order and SortQuerySecondPhase, so it would emit the wrong phase for these two cases and
+            // silently return the wrong rows. Both flags are set by the SortRewriter, which runs before this
+            // router, so fall back to legacy when either is present.
+            if (plan.Sort != null && (searchOptions.IsSortWithFilter || searchOptions.SortHasMissingModifier))
+            {
+                _logger.LogDebug(
+                    "Falling back to legacy SQL: Ignixa does not model this sort phase. Reason={Reason}",
+                    searchOptions.IsSortWithFilter ? "sort-with-filter" : "sort-missing-modifier");
+                return null;
+            }
+
+            // A custom sort projects SortValueN keyset columns between the identity prefix and the resource
+            // projection. Model exactly how many the reader must skip, and whether the primary key's value must
+            // be captured for the continuation token.
+            int sortKeyColumnCount = 0;
+            bool captureSortValue = false;
+            if (plan.Sort is { } sortSpec)
+            {
+                // Ignixa projects one SortValueN column per active key: every key in the Valued phase, or every
+                // key except the missing primary in the MissingPrimary phase. This mirrors
+                // SqlBuilder.ActiveKeyIndices, which is what the emitter uses to render the columns.
+                sortKeyColumnCount = sortSpec.Phase == SortPhase.Valued
+                    ? sortSpec.Keys.Count
+                    : sortSpec.Keys.Count - 1;
+
+                // The legacy reader captures a sort value into the continuation token only when the query
+                // searched the valued segment of a search-parameter-table primary key (IsSortValueNeeded).
+                // _lastUpdated orders by the surrogate id, which the token already carries, so it needs no
+                // captured value; the MissingPrimary phase has no primary value to capture.
+                captureSortValue = sortSpec.Phase == SortPhase.Valued
+                    && sortSpec.Keys[0].Kind != SortKeyKind.LastUpdated;
+            }
+
+            return new IgnixaSqlExecutionPlan(outcome.EmittedSql, hasIncludes, plan.CountOnly, sortKeyColumnCount, captureSortValue);
         }
 
         /// <summary>

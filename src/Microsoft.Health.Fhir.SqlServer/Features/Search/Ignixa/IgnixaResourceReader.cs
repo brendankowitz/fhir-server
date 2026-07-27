@@ -3,6 +3,7 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
+using System;
 using System.Collections.Generic;
 using EnsureThat;
 using Microsoft.Data.SqlClient;
@@ -14,7 +15,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 {
     /// <summary>
     /// Reads the row shape produced by Ignixa-emitted search SQL. Ignixa projects <c>(T1, Sid1)</c> — or
-    /// <c>(T1, Sid1, IsMatch, IsPartial)</c> when the plan carries includes — followed by the
+    /// <c>(T1, Sid1, IsMatch, IsPartial)</c> when the plan carries includes — then one <c>SortValueN</c>
+    /// keyset column per active sort key when the plan carries a custom sort, followed by the
     /// <see cref="ProjectionColumns"/> projected from <c>dbo.Resource</c>. This is a different column
     /// layout from the legacy generator, so it is materialised here rather than through
     /// <c>SqlServerSearchService.ReadWrapper</c>, which continues to serve the legacy shape unchanged.
@@ -52,6 +54,16 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
         /// <c>IsMatch</c> and <c>IsPartial</c> at ordinals 2 and 3; when <see langword="false"/> those columns
         /// are absent and every row is treated as a non-partial match.
         /// </param>
+        /// <param name="sortKeyColumnCount">
+        /// The number of <c>SortValueN</c> keyset columns Ignixa projects between the identity/flag prefix and
+        /// the resource projection. Zero when the plan carries no custom sort. The reader skips these columns
+        /// to reach the projection at the correct ordinal.
+        /// </param>
+        /// <param name="captureSortValue">
+        /// Whether to read the primary key's <c>SortValue0</c> column into <paramref name="primarySortValue"/>
+        /// so the caller can mint a continuation token. Only meaningful when
+        /// <paramref name="sortKeyColumnCount"/> is greater than zero.
+        /// </param>
         /// <param name="resourceTypeId">The resource type id, from <c>T1</c>.</param>
         /// <param name="resourceId">The resource id.</param>
         /// <param name="version">The resource version.</param>
@@ -60,6 +72,10 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
         /// <param name="requestMethod">The originating request method.</param>
         /// <param name="isMatch">Whether the row is a match (as opposed to an included resource).</param>
         /// <param name="isPartialEntry">Whether the row is a partial include entry.</param>
+        /// <param name="primarySortValue">
+        /// The raw value of the primary sort key's <c>SortValue0</c> column, or <see langword="null"/> when it
+        /// was not captured. The caller formats it into the continuation token.
+        /// </param>
         /// <param name="isRawResourceMetaSet">Whether the raw resource meta is set.</param>
         /// <param name="searchParameterHash">The search parameter hash.</param>
         /// <param name="rawResourceBytes">The compressed raw resource bytes.</param>
@@ -68,6 +84,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
         public static void Read(
             SqlDataReader reader,
             bool hasIncludes,
+            int sortKeyColumnCount,
+            bool captureSortValue,
             out short resourceTypeId,
             out string resourceId,
             out int version,
@@ -76,6 +94,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             out string requestMethod,
             out bool isMatch,
             out bool isPartialEntry,
+            out object primarySortValue,
             out bool isRawResourceMetaSet,
             out string searchParameterHash,
             out byte[] rawResourceBytes,
@@ -87,20 +106,35 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             resourceTypeId = reader.Read(VLatest.Resource.ResourceTypeId, 0);
             resourceSurrogateId = reader.Read(VLatest.Resource.ResourceSurrogateId, 1);
 
-            int projectionBase;
+            int prefixColumns;
             if (hasIncludes)
             {
                 isMatch = reader.Read(IsMatchColumn, 2);
                 isPartialEntry = reader.Read(IsPartialColumn, 3);
-                projectionBase = 4;
+                prefixColumns = 4;
             }
             else
             {
                 isMatch = true;
                 isPartialEntry = false;
-                projectionBase = 2;
+                prefixColumns = 2;
             }
 
+            // Ignixa projects the SortValueN keyset columns immediately after the identity/flag prefix and
+            // before the resource projection. Read the primary key's value (SortValue0) when the continuation
+            // token needs it, then advance past any remaining keyset columns; sequential access forbids
+            // revisiting an earlier column, not skipping a later one.
+            if (captureSortValue && sortKeyColumnCount > 0)
+            {
+                object rawSortValue = reader.GetValue(prefixColumns);
+                primarySortValue = rawSortValue is DBNull ? null : rawSortValue;
+            }
+            else
+            {
+                primarySortValue = null;
+            }
+
+            int projectionBase = prefixColumns + sortKeyColumnCount;
             resourceId = reader.Read(VLatest.Resource.ResourceId, projectionBase);
             version = reader.Read(VLatest.Resource.Version, projectionBase + 1);
             isDeleted = reader.Read(VLatest.Resource.IsDeleted, projectionBase + 2);
