@@ -1176,6 +1176,136 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             Assert.Equal(SeededModeMap(legacyResults, seeded), SeededModeMap(ignixaResults, seeded));
         }
 
+        [Theory]
+        [InlineData("date")]
+        [InlineData("-date")]
+        public async Task GivenASortParameterThatIsAlsoAFilter_WhenExecutedOnBothEngines_ThenIgnixaRunsTheValuedPhaseAndAgreesWithLegacy(string sortExpression)
+        {
+            // IsSortWithFilter: legacy emits a SortWithFilter table expression and never runs the missing-values
+            // phase, because a row with no value cannot satisfy the filter anyway. Ignixa derives its phase from
+            // sort direction, so before the adapter special-cased this flag an ascending first page compiled to
+            // MissingPrimary and returned the complement of the correct rows. Both directions are exercised
+            // because the bug only manifests on one of them.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            string tag = $"IgnixaSortFilter_{Guid.NewGuid():N}";
+            var chronological = new[] { 1970, 1980, 1990 };
+            var expectedIds = new List<string>();
+            foreach (int year in chronological)
+            {
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept { Text = tag },
+                    Effective = new FhirDateTime(year, 1, 1),
+                };
+                await UpsertWithSearchIndicesAsync(observation);
+                expectedIds.Add(observation.Id);
+            }
+
+            // The sort parameter (date) is ALSO a filter here - that is what sets IsSortWithFilter. _id keeps the
+            // result set restricted to this test's seeds so a shared, concurrently-written table cannot page them out.
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", string.Join(",", expectedIds)),
+                Tuple.Create("date", "ge1960"),
+                Tuple.Create("_sort", sortExpression),
+                Tuple.Create("_count", "1000"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+            SearchResult legacyResults = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the sort-with-filter search to run on Ignixa.");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            var seeded = new HashSet<string>(expectedIds, StringComparer.Ordinal);
+            List<string> legacyMatches = ResourceIdsInResultOrder(legacyResults).Where(seeded.Contains).ToList();
+            List<string> ignixaMatches = ResourceIdsInResultOrder(ignixaResults).Where(seeded.Contains).ToList();
+
+            // Anti-vacuity + correctness: all three seeded observations have a date and satisfy the filter, so a
+            // correct valued-phase query returns all three in date order. A MissingPrimary phase would return none
+            // of them, which is exactly the divergence this test exists to catch - so pin the expected sequence
+            // rather than only asserting the two engines agree.
+            List<string> expectedOrder = sortExpression.StartsWith('-')
+                ? Enumerable.Reverse(expectedIds).ToList()
+                : expectedIds;
+
+            Assert.Equal(expectedOrder, legacyMatches);
+            Assert.Equal(legacyMatches, ignixaMatches);
+        }
+
+        [Fact]
+        public async Task GivenASortParameterWithAMissingModifier_WhenExecutedOnBothEngines_ThenIgnixaRunsTheValuedPhaseAndAgreesWithLegacy()
+        {
+            // SortHasMissingModifier: "date:missing=false" makes SortRewriter skip the block that emits the
+            // NotExists (missing) phase entirely, so legacy only ever runs the valued phase here too.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            string tag = $"IgnixaSortMissing_{Guid.NewGuid():N}";
+            var withDate = new List<string>();
+            foreach (int year in new[] { 1972, 1982 })
+            {
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept { Text = tag },
+                    Effective = new FhirDateTime(year, 2, 2),
+                };
+                await UpsertWithSearchIndicesAsync(observation);
+                withDate.Add(observation.Id);
+            }
+
+            // Seeded without a date so ":missing=false" has something to exclude - otherwise the modifier would
+            // be a no-op and the test would not distinguish the phases.
+            var undated = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept { Text = tag },
+            };
+            await UpsertWithSearchIndicesAsync(undated);
+            string excludedId = undated.Id;
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", string.Join(",", withDate.Concat(new[] { excludedId }))),
+                Tuple.Create("date:missing", "false"),
+                Tuple.Create("_sort", "date"),
+                Tuple.Create("_count", "1000"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+            SearchResult legacyResults = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the sort :missing search to run on Ignixa.");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            var seeded = new HashSet<string>(withDate.Concat(new[] { excludedId }), StringComparer.Ordinal);
+            List<string> legacyMatches = ResourceIdsInResultOrder(legacyResults).Where(seeded.Contains).ToList();
+            List<string> ignixaMatches = ResourceIdsInResultOrder(ignixaResults).Where(seeded.Contains).ToList();
+
+            Assert.Equal(withDate, legacyMatches);
+            Assert.Equal(legacyMatches, ignixaMatches);
+            Assert.DoesNotContain(excludedId, ignixaMatches);
+        }
+
         /// <summary>
         /// Upserts a resource with real search indices extracted by a real <see cref="TypedElementSearchIndexer"/>.
         /// </summary>
@@ -1201,12 +1331,15 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
 
             ResourceElement resourceElement = resource.ToResourceElement();
             var rawResource = new RawResource(resource.ToJson(), FhirResourceFormat.Json, isMetaSet: false);
+            IReadOnlyCollection<SearchIndexEntry> searchIndices = indexer.Extract(resourceElement);
+            MarkMinAndMaxSortValues(searchIndices);
+
             var wrapper = new ResourceWrapper(
                 resourceElement,
                 rawResource,
                 new ResourceRequest("PUT"),
                 deleted: false,
-                indexer.Extract(resourceElement),
+                searchIndices,
                 Substitute.For<CompartmentIndices>(),
                 new List<KeyValuePair<string, string>>(),
                 _fixture.SearchParameterDefinitionManager.GetSearchParameterHashForResourceType(resource.TypeName));
@@ -1216,6 +1349,56 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
                 CancellationToken.None);
 
             return resource.Id;
+        }
+
+        /// <summary>
+        /// Mirrors <c>ResourceWrapperFactory.ExtractMinAndMaxValues</c>, which this file bypasses by building the
+        /// <see cref="ResourceWrapper"/> directly.
+        /// </summary>
+        /// <remarks>
+        /// The SQL sort expressions do not join the search-param index table on value alone - they additionally
+        /// require IsMin = 1 (ascending) or IsMax = 1 (descending), which is how a resource with several values for
+        /// the sort parameter contributes exactly one sort key. Those two bit columns are populated from
+        /// <see cref="ISupportSortSearchValue"/> flags that only the production wrapper factory sets. Without this
+        /// pass the rows are written with IsMin = IsMax = 0, so a *filter* on the parameter matches while a *sort*
+        /// on the same parameter silently returns nothing - on both engines, which would make a sort differential
+        /// agree vacuously.
+        /// </remarks>
+        private static void MarkMinAndMaxSortValues(IReadOnlyCollection<SearchIndexEntry> searchIndices)
+        {
+            var minValues = new Dictionary<Uri, ISupportSortSearchValue>();
+            var maxValues = new Dictionary<Uri, ISupportSortSearchValue>();
+
+            foreach (SearchIndexEntry entry in searchIndices)
+            {
+                if (entry.Value is not ISupportSortSearchValue currentValue ||
+                    entry.SearchParameter.SortStatus == SortParameterStatus.Disabled)
+                {
+                    continue;
+                }
+
+                if (!minValues.TryGetValue(entry.SearchParameter.Url, out ISupportSortSearchValue existingMin) ||
+                    currentValue.CompareTo(existingMin, ComparisonRange.Min) < 0)
+                {
+                    minValues[entry.SearchParameter.Url] = currentValue;
+                }
+
+                if (!maxValues.TryGetValue(entry.SearchParameter.Url, out ISupportSortSearchValue existingMax) ||
+                    currentValue.CompareTo(existingMax, ComparisonRange.Max) > 0)
+                {
+                    maxValues[entry.SearchParameter.Url] = currentValue;
+                }
+            }
+
+            foreach (ISupportSortSearchValue value in minValues.Values)
+            {
+                value.IsMin = true;
+            }
+
+            foreach (ISupportSortSearchValue value in maxValues.Values)
+            {
+                value.IsMax = true;
+            }
         }
 
         /// <summary>

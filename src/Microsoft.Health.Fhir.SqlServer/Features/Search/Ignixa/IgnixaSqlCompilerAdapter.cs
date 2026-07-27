@@ -103,9 +103,23 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             // The legacy SQL search service issues two query phases for sorts on parameters that may be
             // missing. Ascending sorts search missing values first, while descending sorts search valued
             // values first. Map the legacy phase flag to the corresponding Ignixa sort phase.
+            //
+            // Two legacy flags suppress the missing-values phase outright, and both must force Valued regardless
+            // of direction or phase flag:
+            //   * IsSortWithFilter - the sort parameter also appears as a filter, so SortRewriter emits a
+            //     SortWithFilter table expression and SearchImpl never sets SortQuerySecondPhase (see the
+            //     !IsSortWithFilter guard on the second-phase block). Rows without a value cannot satisfy the
+            //     filter, so there is nothing for a missing phase to find.
+            //   * SortHasMissingModifier - a ":missing=false" on the sort parameter. SortRewriter's
+            //     "!matchFound && !sortHasMissingModifier" guard skips the whole NotExists-emitting block, so
+            //     legacy again only ever runs the valued phase.
+            // Deriving the phase from direction alone would emit MissingPrimary for an ascending first page in
+            // both cases and silently return the complement of the correct rows.
             SortPhase sortPhase = SortPhase.Valued;
             if (requestedSort.Count > 0 &&
-                !ResourceColumnLoweringRule.IsResourceColumnCode(requestedSort[0].Parameter.Code))
+                !ResourceColumnLoweringRule.IsResourceColumnCode(requestedSort[0].Parameter.Code) &&
+                !searchOptions.IsSortWithFilter &&
+                !searchOptions.SortHasMissingModifier)
             {
                 bool ascendingSort = requestedSort[0].SortOrder == SortOrder.Ascending;
                 bool missingValuesPhase = ascendingSort != searchOptions.SortQuerySecondPhase;

@@ -165,20 +165,10 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             // dbo.ReferenceSearchParam rows and assert the full seeded (id -> match/include) map matches legacy.
             bool hasIncludes = (plan.Includes?.Count ?? 0) > 0;
 
-            // Materialisation guard for the sort phases legacy handles specially. When the sort parameter is
-            // also a filter (IsSortWithFilter) legacy skips the missing-values phase and searches valued rows
-            // directly, and a ":missing" modifier on the sort parameter (SortHasMissingModifier) drives yet
-            // another phase shape. The Ignixa adapter derives its Valued/MissingPrimary phase purely from
-            // sort order and SortQuerySecondPhase, so it would emit the wrong phase for these two cases and
-            // silently return the wrong rows. Both flags are set by the SortRewriter, which runs before this
-            // router, so fall back to legacy when either is present.
-            if (plan.Sort != null && (searchOptions.IsSortWithFilter || searchOptions.SortHasMissingModifier))
-            {
-                _logger.LogDebug(
-                    "Falling back to legacy SQL: Ignixa does not model this sort phase. Reason={Reason}",
-                    searchOptions.IsSortWithFilter ? "sort-with-filter" : "sort-missing-modifier");
-                return null;
-            }
+            // The sort-phase mapping in IgnixaSqlCompilerAdapter now handles the two cases legacy treats
+            // specially - IsSortWithFilter and a ":missing" modifier on the sort parameter - by forcing the
+            // Valued phase, which is the only phase legacy ever runs for either. See the phase derivation there
+            // for why direction and SortQuerySecondPhase must be ignored in those cases.
 
             // A custom sort projects SortValueN keyset columns between the identity prefix and the resource
             // projection. Model exactly how many the reader must skip, and whether the primary key's value must
