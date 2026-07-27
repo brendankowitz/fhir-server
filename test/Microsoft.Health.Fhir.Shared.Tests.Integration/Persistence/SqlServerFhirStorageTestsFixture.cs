@@ -139,6 +139,14 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         // SQL against the live database for eligible searches.
         internal SqlServerSearchService IgnixaSearchService { get; private set; }
 
+        /// <summary>
+        /// The request context both search services read. Exposed so a test can install an
+        /// <see cref="AccessControlContext"/> and drive the SMART clinical-scope path, which is otherwise
+        /// unreachable from an integration test: the scopes live on the request context, not in the query string.
+        /// A test that sets this must clear it again, since the fixture is shared across the class.
+        /// </summary>
+        internal RequestContextAccessor<IFhirRequestContext> FhirRequestContextAccessor => _fhirRequestContextAccessor;
+
         internal static string GetDatabaseName(string test = null)
         {
             return $"{ModelInfoProvider.Version}{(test == null ? string.Empty : $"_{test}")}_{DateTimeOffset.UtcNow.ToString("s").Replace("-", string.Empty).Replace(":", string.Empty)}_{Guid.NewGuid().ToString().Replace("-", string.Empty)}";

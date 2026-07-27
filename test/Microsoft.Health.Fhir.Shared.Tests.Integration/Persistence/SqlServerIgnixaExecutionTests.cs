@@ -10,13 +10,19 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Hl7.Fhir.Model;
+using Microsoft.Extensions.Primitives;
+using Microsoft.Health.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Extensions;
+using Microsoft.Health.Fhir.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.Core.Features.Security;
+using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer.Features.Search;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Fhir.Tests.Common.FixtureParameters;
 using Microsoft.Health.Fhir.ValueSets;
 using Microsoft.Health.Test.Utilities;
+using NSubstitute;
 using Xunit;
 using Xunit.Abstractions;
 using Task = System.Threading.Tasks.Task;
@@ -860,6 +866,92 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             }
 
             return (ids, pages);
+        }
+
+        [Fact]
+        public async Task GivenClinicalScopes_WhenExecutedOnBothEngines_ThenIgnixaEnforcesThemLikeLegacy()
+        {
+            // The proof that opening the access-control gate is safe. Two searches differing only in which
+            // resource type the caller's SMART scope grants: the same query must return the seeded Patient when
+            // the scope allows Patient and nothing when it does not. Both cases run through Ignixa (asserted via
+            // the counters), so the allowed case proves the plan is not simply blocking everything, and the denied
+            // case proves the allow-list actually restricts. Either assertion alone would pass against a broken
+            // implementation - a plan that returned everything passes the first, one that returned nothing passes
+            // the second - so only the pair is evidence.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            patient.Id = Guid.NewGuid().ToString();
+            await _fixture.Mediator.UpsertResourceAsync(patient.ToResourceElement());
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", patient.Id),
+            };
+
+            // A fresh request context rather than mutating the fixture's: stubbing AccessControlContext through the
+            // accessor chain does not take (NSubstitute binds the Returns to get_RequestContext), and the fixture is
+            // shared across the class, so the original is restored in the finally below.
+            RequestContextAccessor<IFhirRequestContext> contextAccessor = fixture.FhirRequestContextAccessor;
+            IFhirRequestContext originalContext = contextAccessor.RequestContext;
+
+            var accessControl = new AccessControlContext { ApplyFineGrainedAccessControl = true };
+            var scopedContext = Substitute.For<IFhirRequestContext>();
+            scopedContext.AccessControlContext.Returns(accessControl);
+            scopedContext.CorrelationId.Returns(Guid.NewGuid().ToString());
+            scopedContext.RouteName.Returns("routeName");
+            scopedContext.RequestHeaders.Returns(new Dictionary<string, StringValues>());
+            scopedContext.ResponseHeaders.Returns(new Dictionary<string, StringValues>());
+            contextAccessor.RequestContext.Returns(scopedContext);
+
+            try
+            {
+                // Scope grants Patient: both engines return the seeded resource.
+                accessControl.AllowedResourceActions.Add(new ScopeRestriction(KnownResourceTypes.Patient, DataActions.Read, "user"));
+
+                long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                SearchResult allowedIgnixa = await ignixaSearchService.SearchAsync("Patient", query, CancellationToken.None);
+                SearchResult allowedLegacy = await legacySearchService.SearchAsync("Patient", query, CancellationToken.None);
+
+                // Counter evidence: the scope-restricted search really did run through Ignixa rather than falling
+                // back. Without this the rest of the test would pass just as happily against the closed gate.
+                Assert.True(
+                    ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                    $"Expected the scoped search to run on Ignixa. before={ignixaBefore} after={ignixaSearchService.InstanceIgnixaExecutedQueryCount}");
+                Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+                Assert.Equal(new[] { patient.Id }, ResourceIdsInResultOrder(allowedIgnixa));
+                Assert.Equal(ResourceIdsInResultOrder(allowedLegacy), ResourceIdsInResultOrder(allowedIgnixa));
+
+                // Scope grants only Observation: the very same Patient search must now return nothing, because the
+                // match set is intersected with the allowed types. Legacy reaches the same answer by a different
+                // route (no scope matches the searched type, so it emits a blocking ResourceType = "none"
+                // predicate), which is exactly what makes this a differential rather than a self-consistent check.
+                accessControl.AllowedResourceActions.Clear();
+                accessControl.AllowedResourceActions.Add(new ScopeRestriction(KnownResourceTypes.Observation, DataActions.Read, "user"));
+
+                long deniedIgnixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                long deniedLegacyBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                SearchResult deniedIgnixa = await ignixaSearchService.SearchAsync("Patient", query, CancellationToken.None);
+                SearchResult deniedLegacy = await legacySearchService.SearchAsync("Patient", query, CancellationToken.None);
+
+                Assert.True(
+                    ignixaSearchService.InstanceIgnixaExecutedQueryCount > deniedIgnixaBefore,
+                    "Expected the denied search to also run on Ignixa; a fallback would prove nothing about the allow-list.");
+                Assert.Equal(deniedLegacyBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+                Assert.Empty(ResourceIdsInResultOrder(deniedIgnixa));
+                Assert.Empty(ResourceIdsInResultOrder(deniedLegacy));
+            }
+            finally
+            {
+                contextAccessor.RequestContext.Returns(originalContext);
+            }
         }
 
         private static bool ContainsMode(SearchResult results, string resourceId, SearchEntryMode mode)
