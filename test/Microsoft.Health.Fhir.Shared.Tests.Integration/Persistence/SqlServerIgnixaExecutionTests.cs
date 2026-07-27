@@ -93,6 +93,55 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             Assert.Equal(legacyIds, ignixaIds);
         }
 
+        [Theory]
+        [InlineData("gender", "female")]
+        [InlineData("_tag", "http://example.org/tag|ignixa-token-probe")]
+        public async Task GivenATokenSearch_WhenExecutedOnBothEngines_ThenIgnixaAgreesWithLegacy(string parameterName, string parameterValue)
+        {
+            // The capability checker defers every user token/composite parameter to legacy, and its doc comment
+            // asserts that Ignixa "emits incorrect SQL for token-family search parameters". Token searches are the
+            // most common FHIR search kind, so that gate decides whether this cutover is meaningful or nearly
+            // inert. This test is the differential that would substantiate the claim: it compares both engines
+            // against a real schema, which is the only thing that separates a compiler defect from a
+            // symbol-resolution defect on this side.
+            //
+            // It asserts agreement rather than a non-empty result on purpose. This fixture does not index every
+            // search parameter, so a token search can legitimately return nothing on both engines — and requiring
+            // rows would turn "the fixture has no data for this parameter" into a failure that looks like an
+            // Ignixa defect. Disagreement is the signal; row count is not.
+            //
+            // What this proves today: while the capability gate defers token parameters, *both* services fall
+            // back to legacy for these searches, so the comparison is legacy-versus-legacy and passes trivially.
+            // It is a latch rather than a live check — it gains teeth the moment that gate is narrowed, and it is
+            // written now so narrowing cannot happen without a differential guarding it. The evidence that the
+            // gate is over-broad came from disabling it and running this whole suite, which produced no new SQL
+            // failures.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            patient.Id = Guid.NewGuid().ToString();
+            patient.Gender = AdministrativeGender.Female;
+            patient.Meta = new Meta
+            {
+                Tag = new List<Coding> { new Coding("http://example.org/tag", "ignixa-token-probe") },
+            };
+            await _fixture.Mediator.UpsertResourceAsync(patient.ToResourceElement());
+
+            var tokenSearch = new List<Tuple<string, string>>
+            {
+                Tuple.Create(parameterName, parameterValue),
+            };
+
+            SearchResult legacyResults = await legacySearchService.SearchAsync("Patient", tokenSearch, CancellationToken.None);
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync("Patient", tokenSearch, CancellationToken.None);
+
+            _output.WriteLine($"{parameterName}={parameterValue} -> legacy {legacyResults.Results.Count()} rows, ignixa {ignixaResults.Results.Count()} rows");
+
+            Assert.Equal(OrderedResourceIds(legacyResults), OrderedResourceIds(ignixaResults));
+        }
+
         private static string OrderedResourceIds(SearchResult results)
         {
             return string.Join(
