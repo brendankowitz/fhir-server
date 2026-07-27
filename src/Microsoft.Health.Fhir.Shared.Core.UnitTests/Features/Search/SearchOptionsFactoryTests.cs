@@ -915,6 +915,101 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
             }
         }
 
+        // ---------------------------------------------------------------------------
+        // SMART clinical scope translation into the Ignixa allow-list
+        //
+        // These guard a security boundary. IgnixaAccessControlTranslated is what tells the SQL router it may
+        // hand a scope-restricted request to the Ignixa compiler; if it is set for a case the translation does
+        // not actually cover, the compiled plan enforces less than the legacy generator would.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public void Create_GivenClinicalScopes_TranslatesThemIntoTheIgnixaAllowList()
+        {
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
+            _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(new ScopeRestriction("Patient", DataActions.Read, "patient"));
+            _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(new ScopeRestriction("Observation", DataActions.Read, "patient"));
+
+            SearchOptions options = CreateSearchOptions(resourceType: "Patient");
+
+            // The full scope list, not the scope-and-requested intersection legacy ANDs into the match filter.
+            // Observation is kept even though this is a Patient search because the include stages need it: it is
+            // the set legacy carries on IncludeExpression.AllowedResourceTypesByScope. The match set is already
+            // restricted to Patient, so intersecting it with this list still yields exactly Patient.
+            Assert.Equal(new[] { "Patient", "Observation" }, options.IgnixaOptions.AllowedResourceTypes);
+            Assert.True(options.IgnixaAccessControlTranslated);
+        }
+
+        [Fact]
+        public void Create_GivenAWildcardScope_LeavesTheAllowListEmptyButMarksItTranslated()
+        {
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
+            _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(new ScopeRestriction(KnownResourceTypes.All, DataActions.Read, "user"));
+
+            SearchOptions options = CreateSearchOptions(resourceType: "Patient");
+
+            // "All" grants every type, which is what an absent allow-list already means to the compiler. Expanding
+            // it to the full type list would change the emitted plan for no benefit, so it stays empty -- but the
+            // translation is genuinely complete, so the router may proceed.
+            Assert.Empty(options.IgnixaOptions.AllowedResourceTypes);
+            Assert.True(options.IgnixaAccessControlTranslated);
+        }
+
+        [Fact]
+        public void Create_GivenScopesCarryingSearchParameters_DoesNotMarkThemTranslated()
+        {
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
+            _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(
+                new ScopeRestriction("Patient", DataActions.Read, "patient", new SearchParams().Add("code", "foo")));
+
+            SearchOptions options = CreateSearchOptions(resourceType: "Patient");
+
+            // A SMART v2 scope restricts which *instances* of a permitted type are visible. Forwarding only the
+            // type list would grant every Patient instead of the constrained subset, so this must stay on the
+            // legacy path even though the type half is trivially translatable.
+            Assert.False(options.IgnixaAccessControlTranslated);
+        }
+
+        [Fact]
+        public void Create_GivenNoGrantedResources_DoesNotMarkThemTranslated()
+        {
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
+
+            SearchOptions options = CreateSearchOptions(resourceType: "Patient");
+
+            // Legacy blocks the whole query when no scope grants anything. An empty allow-list means "inert" to
+            // the compiler, so translating this case would turn a total denial into a total bypass -- the single
+            // most dangerous mistranslation available here.
+            Assert.Empty(options.IgnixaOptions.AllowedResourceTypes);
+            Assert.False(options.IgnixaAccessControlTranslated);
+        }
+
+        [Fact]
+        public void Create_GivenCompartmentAccess_DoesNotMarkItTranslated()
+        {
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
+            _defaultFhirRequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+            _defaultFhirRequestContext.AccessControlContext.CompartmentId = "123";
+            _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(new ScopeRestriction("Patient", DataActions.Read, "patient"));
+
+            SearchOptions options = CreateSearchOptions(resourceType: "Patient");
+
+            // Compartment access is ANDed into the match filter only. Ignixa runs includes as separate
+            // row-producing stages, so an included resource would escape the compartment entirely.
+            Assert.False(options.IgnixaAccessControlTranslated);
+        }
+
+        [Fact]
+        public void Create_WithoutFineGrainedAccessControl_LeavesTheAllowListEmptyAndUntranslated()
+        {
+            SearchOptions options = CreateSearchOptions(resourceType: "Patient");
+
+            // Nothing to translate. The flag stays false, but the router never consults it for a request that
+            // carries no access control predicate, so ordinary searches are unaffected.
+            Assert.Empty(options.IgnixaOptions.AllowedResourceTypes);
+            Assert.False(options.IgnixaAccessControlTranslated);
+        }
+
         private SearchOptions CreateSearchOptions(
             string resourceType = DefaultResourceType,
             IReadOnlyList<Tuple<string, string>> queryParameters = null,

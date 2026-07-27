@@ -33,6 +33,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             CountOnly = other.CountOnly;
             IncludeTotal = other.IncludeTotal;
             IgnixaOptions = CloneIgnixaOptions(other.IgnixaOptions);
+            IgnixaAccessControlTranslated = other.IgnixaAccessControlTranslated;
             OnlyIds = other.OnlyIds;
             FeedRange = other.FeedRange;
             IgnoreSearchParamHash = other.IgnoreSearchParamHash;
@@ -150,6 +151,20 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         internal Ignixa.Search.Models.SearchOptions IgnixaOptions { get; set; }
 
         /// <summary>
+        /// Gets or sets a value indicating whether this request's access control was translated into
+        /// <see cref="IgnixaOptions"/> completely enough for the Ignixa compiler to enforce it on its own.
+        /// </summary>
+        /// <remarks>
+        /// This is a security gate, so it defaults to <see langword="false"/> and is set only by
+        /// <c>SearchOptionsFactory.TranslateClinicalScopesForIgnixa</c> once it has proved the translation faithful.
+        /// The Ignixa router refuses any request that carries an access control predicate without this flag, which
+        /// keeps a partially-translated control on the legacy path rather than letting Ignixa enforce a weaker
+        /// version of it. A new access control mechanism therefore fails closed by default: it will not set this
+        /// flag, so it cannot silently reach Ignixa unenforced.
+        /// </remarks>
+        internal bool IgnixaAccessControlTranslated { get; set; }
+
+        /// <summary>
         /// Gets the collection of search parameters used for filtering and querying resources.
         /// </summary>
         public IReadOnlyList<SearchParameterInfo> SearchParameters { get; internal set; } = new List<SearchParameterInfo>();
@@ -230,6 +245,15 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 EndSurrogateId = options.EndSurrogateId,
                 IncludesMaxItemCount = options.IncludesMaxItemCount,
                 IncludesContinuationToken = options.IncludesContinuationToken,
+                ResourceVersionTypes = options.ResourceVersionTypes,
+
+                // Authorization state. A clone that drops these silently widens the request: the router clones
+                // SqlSearchOptions on every row-returning search (to bump MaxItemCount for page detection), so a
+                // dropped allow-list or constraint set would mean the compiled plan enforces nothing while the
+                // caller believes it does. Fail-open, and invisible - the clone still "works". Any property added
+                // to Ignixa.Search.Models.SearchOptions must be copied here.
+                AccessConstraints = options.AccessConstraints?.ToList(),
+                AllowedResourceTypes = options.AllowedResourceTypes?.ToList(),
             };
         }
     }

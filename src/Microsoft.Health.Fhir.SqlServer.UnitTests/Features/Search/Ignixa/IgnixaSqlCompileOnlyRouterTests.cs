@@ -143,16 +143,78 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         // ---------------------------------------------------------------------------
 
         [Fact]
-        public async Task ObserveAsync_WhenAccessControlPredicateRequired_DoesNotCompile()
+        public async Task ObserveAsync_WhenAccessControlPredicateRequiredAndNotTranslated_DoesNotCompile()
         {
+            // The default. SearchOptionsFactory only sets IgnixaAccessControlTranslated once it has proved the
+            // request's access control fully expressible as an Ignixa allow-list, so anything it did not translate
+            // -- and any control it has never heard of -- reaches this gate with the flag false and stays on the
+            // legacy path, which still enforces it.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
             var router = CreateRouter(adapter, EnabledConfig());
 
             SqlSearchOptions options = CreateEligibleOptions();
 
+            Assert.False(options.IgnixaAccessControlTranslated);
+
             await router.ObserveAsync(options, accessControlPredicateRequired: true, CancellationToken.None);
 
             await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenAccessControlPredicateRequiredAndTranslated_Compiles()
+        {
+            // The scopes reached IgnixaOptions.AllowedResourceTypes, where the compiler enforces them structurally
+            // on the match set and on every include stage, so routing to Ignixa applies the same restriction the
+            // legacy generator would. Without this case the allow-list work would be unreachable.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.IgnixaOptions.AllowedResourceTypes = new[] { "Patient", "Observation" };
+            options.IgnixaAccessControlTranslated = true;
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: true, CancellationToken.None);
+
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenTranslatedButNoAccessControlPredicateRequired_Compiles()
+        {
+            // The flag only ever opens the gate; it is never itself a reason to compile. A request with no access
+            // control at all must behave exactly as before this gate existed.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
+        }
+
+        [Fact]
+        public async Task CloneSqlSearchOptions_PreservesAllowedResourceTypes()
+        {
+            // The router clones options on every row-returning search to bump MaxItemCount for page detection, and
+            // the clone -- not the original -- is what gets compiled. A clone that dropped the allow-list would
+            // compile a plan enforcing nothing while every gate above still reported the request as authorized:
+            // a fail-open bypass that leaves no trace.
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.IgnixaOptions.AllowedResourceTypes = new[] { "Patient" };
+            options.IgnixaAccessControlTranslated = true;
+
+            SqlSearchOptions clone = options.CloneSqlSearchOptions();
+
+            Assert.True(clone.IgnixaAccessControlTranslated);
+            Assert.Equal(new[] { "Patient" }, clone.IgnixaOptions.AllowedResourceTypes);
+
+            await Task.CompletedTask;
         }
 
         [Fact]

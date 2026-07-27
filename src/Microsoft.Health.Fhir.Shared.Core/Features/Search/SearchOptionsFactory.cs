@@ -424,6 +424,12 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 
             CheckFineGrainedAccessControl(searchExpressions, searchParams, requiredResourceTypes);
 
+            // Translate the same clinical scopes into the Ignixa allow-list. Runs immediately after the legacy
+            // check so both observe identical state, and deliberately re-reads AccessControlContext rather than
+            // reusing CheckFineGrainedAccessControl's locals: this must be a faithful independent translation,
+            // not a by-product of legacy expression building.
+            TranslateClinicalScopesForIgnixa(searchOptions);
+
             var validSearchParameters = new List<SearchParameterInfo>();
 
             // Deduplicate exact (name, value) query parameter pairs before parsing. Repeated identical parameters produce
@@ -741,6 +747,85 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 
                 return expression;
             });
+        }
+
+        /// <summary>
+        /// Translates the request's SMART clinical scopes into <see cref="Ignixa.Search.Models.SearchOptions.AllowedResourceTypes"/>
+        /// and records, via <see cref="SearchOptions.IgnixaAccessControlTranslated"/>, whether that translation was
+        /// complete. Only a complete translation lets the Ignixa router accept the request; anything else stays on
+        /// the legacy path, which still enforces the scopes.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The allow-list is the request's full scope resource list, not the scope-and-required intersection legacy
+        /// ANDs into the match filter. These agree: Ignixa applies the allow-list on top of a match set already
+        /// restricted to the requested types, so it computes <c>requested ∩ scopes</c>, while legacy computes
+        /// <c>requested ∩ (scopes ∩ required)</c> — and <c>requested ⊆ required</c>, so the two are the same set.
+        /// Using the full list additionally gives the include stages the allow-list legacy carries on
+        /// <see cref="IncludeExpression.AllowedResourceTypesByScope"/>, which is the same set.
+        /// </para>
+        /// <para>
+        /// Three cases are deliberately left untranslated, each because Ignixa would otherwise enforce less than
+        /// legacy. All fail closed by leaving the flag false:
+        /// </para>
+        /// <list type="number">
+        /// <item><description><b>No granted resources at all.</b> Legacy blocks every query with a
+        /// <c>ResourceType = "none"</c> predicate. An empty allow-list means "inert" to the compiler — every type
+        /// permitted — so translating this would inverte the control into a total bypass.</description></item>
+        /// <item><description><b>Scopes carrying search parameters (SMART v2).</b> These restrict which
+        /// <em>instances</em> of a permitted type are visible, which is an <c>AccessConstraint</c> rather than an
+        /// allow-list. Forwarding only the type list would grant every instance of each permitted
+        /// type.</description></item>
+        /// <item><description><b>Compartment access.</b> Legacy scopes the whole request to a compartment;
+        /// <c>AppendIgnixaCompartmentExpression</c> ANDs it into the match filter only, so include stages — which
+        /// Ignixa runs as separate row-producing queries — would return resources outside the
+        /// compartment.</description></item>
+        /// </list>
+        /// </remarks>
+        private void TranslateClinicalScopesForIgnixa(SearchOptions searchOptions)
+        {
+            IFhirRequestContext requestContext = _contextAccessor.RequestContext;
+            AccessControlContext accessControl = requestContext?.AccessControlContext;
+
+            if (searchOptions.IgnixaOptions == null || accessControl?.ApplyFineGrainedAccessControl != true)
+            {
+                // No fine-grained access control on this request, so there is nothing to translate and nothing
+                // for the router to gate on. The flag stays false; the router only consults it when the request
+                // actually carries an access control predicate.
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(accessControl.CompartmentResourceType))
+            {
+                return;
+            }
+
+            ICollection<ScopeRestriction> restrictions = accessControl.AllowedResourceActions;
+            if (restrictions == null || restrictions.Count == 0)
+            {
+                return;
+            }
+
+            if (restrictions.Any(restriction => restriction.SearchParameters?.Parameters?.Any() == true))
+            {
+                return;
+            }
+
+            if (restrictions.Any(restriction => restriction.Resource == KnownResourceTypes.All))
+            {
+                // A wildcard scope grants every type, which is what an absent allow-list already means. Leave it
+                // empty rather than expanding to the full type list so the emitted plan stays identical to an
+                // unrestricted one, and mark the translation complete: there is genuinely nothing to enforce.
+                searchOptions.IgnixaAccessControlTranslated = true;
+                return;
+            }
+
+            searchOptions.IgnixaOptions.AllowedResourceTypes = restrictions
+                .Select(restriction => restriction.Resource)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            searchOptions.IgnixaAccessControlTranslated = true;
         }
 
         private static void ValidateTotalType(TotalType totalType)

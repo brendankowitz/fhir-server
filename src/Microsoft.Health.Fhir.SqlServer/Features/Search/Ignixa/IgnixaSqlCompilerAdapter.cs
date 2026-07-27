@@ -118,6 +118,12 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             // are required, or a multi-_type search silently widens to every type. An unresolvable type name is
             // kept by the compiler as an unmatchable sentinel, so a fully-unresolvable list cannot collapse into
             // "every type".
+            //
+            // allowedResourceTypes (the SMART clinical-scope allow-list) has the same two-halves requirement:
+            // Lower's allow-list enforcement needs each permitted type's id, so the names must resolve here, and
+            // the same list is forwarded to LowerOptions.AllowedResourceTypes below so it is actually enforced.
+            // An unresolvable name is likewise kept as an unmatchable sentinel, so a typo narrows rather than
+            // widens the allow-list.
             ResolvedSymbols resolved = await Resolve.RunAsync(
                 ignixaOptions.Expression,
                 includes,
@@ -128,7 +134,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 cancellationToken,
                 compartmentDefinitionManager: null,
                 searchParameterDefinitionManager: null,
-                additionalResourceTypes: ignixaOptions.ResourceTypes);
+                additionalResourceTypes: ignixaOptions.ResourceTypes,
+                allowedResourceTypes: ignixaOptions.AllowedResourceTypes);
 
             if (resolved.Unresolved.Count > 0)
             {
@@ -178,6 +185,12 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                         // rather than the requested subset: the cross-type leaves carry no ResourceTypeId of
                         // their own, so nothing else narrows them.
                         ResourceTypes = ignixaOptions.ResourceTypes,
+
+                        // SMART clinical scopes. Without this the compiler accepts the allow-list and enforces
+                        // nothing: the match set would be ungated and, worse, an _include would return resource
+                        // types the scope never granted, because Ignixa runs includes as separate row-producing
+                        // stages rather than as a filter over the match set.
+                        AllowedResourceTypes = ignixaOptions.AllowedResourceTypes,
 
                         // Map the server's requested resource visibility onto the compiler's relaxation-only
                         // model. The router only routes Latest-inclusive combinations here, for which this

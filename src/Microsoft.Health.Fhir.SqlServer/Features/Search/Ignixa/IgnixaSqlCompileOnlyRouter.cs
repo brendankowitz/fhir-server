@@ -297,20 +297,19 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return false;
             }
 
-            if (accessControlPredicateRequired)
+            if (accessControlPredicateRequired && !searchOptions.IgnixaAccessControlTranslated)
             {
-                // SECURITY BOUNDARY - deliberately closed. Two distinct mechanisms trip this gate, and neither can be
-                // routed to Ignixa safely today:
-                //   1. Fine-grained SMART clinical scopes (AccessControlContext.ApplyFineGrainedAccessControl) are built
-                //      only as legacy server Expressions in SearchOptionsFactory.CheckFineGrainedAccessControl and added
-                //      solely to the legacy search expression tree. They are never translated into IgnixaOptions or the
-                //      compiler's AccessConstraints, so running Ignixa would apply no scope predicate at all.
-                //   2. SMART compartment access (AccessControlContext.CompartmentResourceType) is ANDed into
-                //      IgnixaOptions.Expression (the match filter) via AppendIgnixaCompartmentExpression, but is not
-                //      registered as a structural AccessConstraint. Ignixa runs _include/_revinclude as separate
-                //      row-producing stages, so a match-only predicate would leave included resources unconstrained.
-                // Opening this gate without a proven per-type AccessConstraint translation and an include-path
-                // enforcement test would be a half-wired authorization control, which is worse than none. Keep closed.
+                // SECURITY BOUNDARY. The request carries an access control predicate that
+                // SearchOptionsFactory.TranslateClinicalScopesForIgnixa did not fully translate into IgnixaOptions,
+                // so the compiler would enforce less than the legacy path does — or nothing at all. The untranslated
+                // cases are SMART v2 scopes carrying search parameters (an instance-level restriction that is an
+                // AccessConstraint, not an allow-list), compartment access (ANDed into the match filter only, so
+                // include stages would escape it), and a scope set granting no resources at all (which legacy blocks
+                // outright but an empty allow-list would render inert). Keep all of them on the legacy path.
+                //
+                // The condition is deliberately "not translated" rather than an enumeration of unsupported shapes,
+                // so a future access control mechanism that nobody teaches the translator about fails closed here
+                // instead of silently routing unenforced.
                 _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "access-control-predicate");
                 return false;
             }
