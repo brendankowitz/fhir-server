@@ -7,6 +7,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
+using Ignixa.Search.Sql.Ast;
 using Microsoft.Extensions.Logging;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.SqlServer.Registration;
@@ -61,77 +62,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return;
             }
 
-            if (searchOptions.IgnixaOptions == null)
+            if (!IsEligible(searchOptions, accessControlPredicateRequired))
             {
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "null-ignixa-options");
-                return;
-            }
-
-            if (searchOptions.ResourceVersionTypes != ResourceVersionType.Latest)
-            {
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "non-latest-version-type");
-                return;
-            }
-
-            if (searchOptions.IgnoreSearchParamHash)
-            {
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "ignore-search-param-hash");
-                return;
-            }
-
-            if (searchOptions.IsAsyncOperation)
-            {
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "async-operation");
-                return;
-            }
-
-            if (searchOptions.FeedRange != null)
-            {
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "feed-range");
-                return;
-            }
-
-            if (searchOptions.ContinuationToken != null)
-            {
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "continuation-token");
-                return;
-            }
-
-            if (searchOptions.IncludesContinuationToken != null)
-            {
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "includes-continuation-token");
-                return;
-            }
-
-            if (searchOptions.UnsupportedSearchParams?.Count > 0)
-            {
-                _logger.LogDebug(
-                    "Skipping Ignixa compile-only observation. Reason={Reason}, Count={Count}",
-                    "unsupported-search-params",
-                    searchOptions.UnsupportedSearchParams.Count);
-                return;
-            }
-
-            if (accessControlPredicateRequired)
-            {
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "access-control-predicate");
-                return;
-            }
-
-            IgnixaSearchOptions ignixaOptions = searchOptions.IgnixaOptions;
-
-            if (ignixaOptions.ResourceType == null)
-            {
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "null-resource-type");
-                return;
-            }
-
-            if (ignixaOptions.ResourceTypes != null && ignixaOptions.ResourceTypes.Count > 1)
-            {
-                _logger.LogDebug(
-                    "Skipping Ignixa compile-only observation. Reason={Reason}, ResourceTypeCount={Count}",
-                    "multi-resource-types",
-                    ignixaOptions.ResourceTypes.Count);
                 return;
             }
 
@@ -167,6 +99,156 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                     outcome.UnresolvedParameters?.Count ?? 0,
                     outcome.PlanFingerprint);
             }
+        }
+
+        /// <inheritdoc />
+        public async Task<IgnixaSqlExecutionPlan> TryCreateExecutionPlanAsync(
+            SqlSearchOptions searchOptions,
+            bool accessControlPredicateRequired,
+            CancellationToken cancellationToken)
+        {
+            EnsureArg.IsNotNull(searchOptions, nameof(searchOptions));
+
+            if (!_configuration.EnableIgnixaSqlExecution)
+            {
+                return null;
+            }
+
+            if (!IsEligible(searchOptions, accessControlPredicateRequired))
+            {
+                return null;
+            }
+
+            // The legacy generator emits TOP (MaxItemCount + 1) so the reader can detect that another page
+            // exists and mint a continuation token. Ignixa emits TOP equal to the requested count exactly, so
+            // for row-returning searches compile against a count bumped by one; count-only plans ignore TOP.
+            SqlSearchOptions compileOptions = searchOptions;
+            if (!searchOptions.CountOnly)
+            {
+                compileOptions = searchOptions.CloneSqlSearchOptions();
+                compileOptions.MaxItemCount = searchOptions.MaxItemCount + 1;
+            }
+
+            IgnixaSqlCompilationOutcome outcome = await _adapter.CompileAsync(compileOptions, cancellationToken);
+
+            if (!outcome.Compiled)
+            {
+                _logger.LogDebug(
+                    "Falling back to legacy SQL: Ignixa reported a capability gap. Stage={Stage}, Kind={Kind}",
+                    outcome.FailureStage,
+                    outcome.FailureKind);
+                return null;
+            }
+
+            if (outcome.LoweredPlan == null || outcome.EmittedSql == null)
+            {
+                throw new InvalidOperationException(
+                    "Ignixa compilation reported success but LoweredPlan or EmittedSql was null. This is a compiler invariant violation.");
+            }
+
+            QueryPlan plan = outcome.LoweredPlan.Plan;
+
+            // Materialisation guards. A custom sort projects an extra ordering column the reader does not
+            // model, and includes require the include-truncation and includes-continuation interplay that has
+            // not been validated against the emitted UNION ALL shape yet. Both fall back to legacy for now.
+            if (plan.Sort != null)
+            {
+                _logger.LogDebug("Falling back to legacy SQL: Ignixa plan carries a custom sort. Reason={Reason}", "custom-sort");
+                return null;
+            }
+
+            bool hasIncludes = (plan.Includes?.Count ?? 0) > 0;
+            if (hasIncludes)
+            {
+                _logger.LogDebug("Falling back to legacy SQL: Ignixa plan carries includes. Reason={Reason}", "includes");
+                return null;
+            }
+
+            return new IgnixaSqlExecutionPlan(outcome.EmittedSql, hasIncludes, plan.CountOnly);
+        }
+
+        /// <summary>
+        /// Evaluates the eligibility gates shared by observation and execution. Returns <see langword="true"/>
+        /// when the request may be handled by Ignixa; otherwise logs the specific skip reason and returns
+        /// <see langword="false"/>. The gate order and log messages are load-bearing and asserted by tests.
+        /// </summary>
+        private bool IsEligible(SqlSearchOptions searchOptions, bool accessControlPredicateRequired)
+        {
+            if (searchOptions.IgnixaOptions == null)
+            {
+                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "null-ignixa-options");
+                return false;
+            }
+
+            if (searchOptions.ResourceVersionTypes != ResourceVersionType.Latest)
+            {
+                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "non-latest-version-type");
+                return false;
+            }
+
+            if (searchOptions.IgnoreSearchParamHash)
+            {
+                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "ignore-search-param-hash");
+                return false;
+            }
+
+            if (searchOptions.IsAsyncOperation)
+            {
+                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "async-operation");
+                return false;
+            }
+
+            if (searchOptions.FeedRange != null)
+            {
+                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "feed-range");
+                return false;
+            }
+
+            if (searchOptions.ContinuationToken != null)
+            {
+                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "continuation-token");
+                return false;
+            }
+
+            if (searchOptions.IncludesContinuationToken != null)
+            {
+                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "includes-continuation-token");
+                return false;
+            }
+
+            if (searchOptions.UnsupportedSearchParams?.Count > 0)
+            {
+                _logger.LogDebug(
+                    "Skipping Ignixa compile-only observation. Reason={Reason}, Count={Count}",
+                    "unsupported-search-params",
+                    searchOptions.UnsupportedSearchParams.Count);
+                return false;
+            }
+
+            if (accessControlPredicateRequired)
+            {
+                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "access-control-predicate");
+                return false;
+            }
+
+            IgnixaSearchOptions ignixaOptions = searchOptions.IgnixaOptions;
+
+            if (ignixaOptions.ResourceType == null)
+            {
+                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "null-resource-type");
+                return false;
+            }
+
+            if (ignixaOptions.ResourceTypes != null && ignixaOptions.ResourceTypes.Count > 1)
+            {
+                _logger.LogDebug(
+                    "Skipping Ignixa compile-only observation. Reason={Reason}, ResourceTypeCount={Count}",
+                    "multi-resource-types",
+                    ignixaOptions.ResourceTypes.Count);
+                return false;
+            }
+
+            return true;
         }
     }
 }

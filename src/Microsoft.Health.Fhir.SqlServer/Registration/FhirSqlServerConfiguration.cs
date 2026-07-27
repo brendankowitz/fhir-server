@@ -27,6 +27,14 @@ namespace Microsoft.Health.Fhir.SqlServer.Registration
         public bool EnableIgnixaSqlCompileOnly { get; set; } = false;
 
         /// <summary>
+        /// When true, eligible searches that compile with Ignixa execute the Ignixa-emitted SQL and
+        /// materialise its rows instead of the legacy <c>SqlQueryGenerator</c> output. Ineligible or
+        /// uncompilable queries always fall back to the legacy path. Disabled by default so production
+        /// behaviour is unchanged until the cutover is deliberately switched on.
+        /// </summary>
+        public bool EnableIgnixaSqlExecution { get; set; } = false;
+
+        /// <summary>
         /// When true (together with <see cref="EnableFhirDateContainment"/>),
         /// <see cref="Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.ScalarTemporalEqualityRewriter"/>
         /// collapses an exact-day equality on allow-listed scalar date parameters (currently <c>birthdate</c>)

@@ -149,8 +149,14 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             }
 
             // Stage 3: Emit. Pure, synchronous rendering of parameterized SQL. No catch boundary: any
-            // exception here is unexpected and must propagate.
-            EmittedSql emitted = SqlBuilder.Run(lowered.Plan);
+            // exception here is unexpected and must propagate. Count-only plans ignore projection and emit a
+            // single scalar; every other plan projects the dbo.Resource columns the execution reader needs so
+            // the emitted SQL can be materialised (not merely observed).
+            QueryPlan planToEmit = lowered.Plan.CountOnly
+                ? lowered.Plan
+                : lowered.Plan with { Projection = new ProjectionSpec(IgnixaResourceReader.ProjectionColumns) };
+
+            EmittedSql emitted = SqlBuilder.Run(planToEmit);
 
             return new IgnixaSqlCompilationOutcome(
                 Compiled: true,

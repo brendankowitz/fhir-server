@@ -19,6 +19,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
 using Hl7.Fhir.Rest;
+using Ignixa.Search.Sql.Builders;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -94,8 +95,17 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
         private readonly IQueryPlanReuseChecker _queryPlanReuseChecker;
         private readonly IIgnixaSqlCompileOnlyRouter _ignixaSqlCompileOnlyRouter;
 
+        // Per-instance execution-path counters. Because the integration suite runs many searches in parallel
+        // through a shared service instance, process-global counters cannot attribute a path to a specific
+        // search. The dedicated Ignixa proof service is the only caller of its own instance, so these instance
+        // fields give a race-free measurement of which path that service took. The Ignixa counter only advances
+        // when an eligible query actually runs the Ignixa-emitted SQL rather than falling back to legacy.
+        private long _instanceIgnixaExecutedQueryCount;
+        private long _instanceLegacyExecutedQueryCount;
+
         private static readonly string[] NewLineSeparators = ["\r\n", "\n"];
         private static readonly Regex WhitespacePattern = new Regex(@"\s+", RegexOptions.Compiled);
+
         private static ResourceSearchParamStats _resourceSearchParamStats;
         private static object _locker = new object();
 
@@ -204,6 +214,18 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
 
             InitializeProcessingFlags(logger);
         }
+
+        /// <summary>
+        /// The number of row-returning or count searches this service instance has executed via the
+        /// Ignixa-emitted SQL. Test-only diagnostic that proves the Ignixa execution path was actually taken.
+        /// </summary>
+        internal long InstanceIgnixaExecutedQueryCount => Interlocked.Read(ref _instanceIgnixaExecutedQueryCount);
+
+        /// <summary>
+        /// The number of searches this service instance has executed via the legacy generator's SQL. Test-only
+        /// diagnostic that complements <see cref="InstanceIgnixaExecutedQueryCount"/>.
+        /// </summary>
+        internal long InstanceLegacyExecutedQueryCount => Interlocked.Read(ref _instanceLegacyExecutedQueryCount);
 
         internal bool StoredProcedureLayerIsEnabled { get; set; } = true;
 
@@ -592,6 +614,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                     {
                         sqlCommand.CommandTimeout = (int)_sqlServerDataStoreConfiguration.CommandTimeout.TotalSeconds;
                         var isSortValueNeeded = false;
+                        var useIgnixaExecution = false;
+                        var ignixaHasIncludes = false;
 
                         var exportTimeTravel = clonedSearchOptions.QueryHints != null && ContainsGlobalEndSurrogateId(clonedSearchOptions);
                         if (exportTimeTravel)
@@ -605,6 +629,14 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                         }
                         else
                         {
+                            IFhirRequestContext ignixaRequestContext = _requestContextAccessor.RequestContext;
+                            bool accessControlPredicateRequired =
+                                ignixaRequestContext?.AccessControlContext?.ApplyFineGrainedAccessControl == true
+                                || !string.IsNullOrWhiteSpace(ignixaRequestContext?.AccessControlContext?.CompartmentResourceType);
+
+                            // The legacy generator is always run so query-hash telemetry and the custom
+                            // stored-procedure layer keep functioning during the Ignixa cutover. Its emitted
+                            // text is used verbatim unless the Ignixa execution path claims the query below.
                             var stringBuilder = new IndentedStringBuilder(new StringBuilder());
 
                             EnableTimeAndIoMessageLogging(stringBuilder, connection);
@@ -636,12 +668,59 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                                 sqlCommand.CommandType = CommandType.StoredProcedure;
                             }
 
-                            // Command text contains no direct user input.
+                            // A custom stored procedure takes precedence over Ignixa so the legacy custom-query
+                            // optimization keeps working. Token-family predicates are still emitted incorrectly by
+                            // the current Ignixa compiler, so they also stay on the legacy path for now.
+                            IgnixaSqlExecutionPlan ignixaPlan = null;
+                            bool ignixaCustomQueryEmpty = string.IsNullOrEmpty(customQuery);
+                            bool ignixaExpressionSupported = IgnixaExpressionCapabilityChecker.IsSupported(clonedSearchOptions.Expression);
+                            if (ignixaCustomQueryEmpty && ignixaExpressionSupported)
+                            {
+                                ignixaPlan = await _ignixaSqlCompileOnlyRouter.TryCreateExecutionPlanAsync(
+                                    clonedSearchOptions,
+                                    accessControlPredicateRequired,
+                                    cancellationToken);
+                            }
+
+                            if (ignixaPlan != null)
+                            {
+                                useIgnixaExecution = true;
+                                ignixaHasIncludes = ignixaPlan.HasIncludes;
+
+                                // Ignixa emits its own parameterized SQL and does not project the named sort
+                                // column the legacy reader reads, so discard the legacy parameters/sort flag and
+                                // bind Ignixa's parameters instead.
+                                isSortValueNeeded = false;
+                                sqlCommand.CommandType = CommandType.Text;
+                                sqlCommand.Parameters.Clear();
+
+                                foreach (EmittedSqlParameter ignixaParameter in ignixaPlan.EmittedSql.Parameters)
+                                {
+                                    sqlCommand.Parameters.AddWithValue(ignixaParameter.Name, ignixaParameter.Value ?? DBNull.Value);
+                                }
+
+                                // Command text is Ignixa-emitted parameterized SQL; user values are bound as parameters above.
 #pragma warning disable CA2100 // Review SQL queries for security vulnerabilities
-                            sqlCommand.CommandText = queryText;
+                                sqlCommand.CommandText = ignixaPlan.EmittedSql.Sql;
 #pragma warning restore CA2100 // Review SQL queries for security vulnerabilities
 
-                            _logger.LogInformation($"Query.SearchParamIds={string.Join(",", queryGenerator.SearchParamIds)}");
+                                Interlocked.Increment(ref _instanceIgnixaExecutedQueryCount);
+                                _logger.LogInformation(
+                                    "SQL Search Service used the Ignixa execution path. CountOnly={CountOnly}, HasIncludes={HasIncludes}",
+                                    ignixaPlan.CountOnly,
+                                    ignixaHasIncludes);
+                            }
+                            else
+                            {
+                                Interlocked.Increment(ref _instanceLegacyExecutedQueryCount);
+
+                                // Command text contains no direct user input.
+#pragma warning disable CA2100 // Review SQL queries for security vulnerabilities
+                                sqlCommand.CommandText = queryText;
+#pragma warning restore CA2100 // Review SQL queries for security vulnerabilities
+
+                                _logger.LogInformation($"Query.SearchParamIds={string.Join(",", queryGenerator.SearchParamIds)}");
+                            }
                         }
 
                         LogSqlCommand(sqlCommand);
@@ -690,22 +769,58 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
 
                                 while (await reader.ReadAsync(cancellationToken))
                                 {
-                                    ReadWrapper(
-                                        reader,
-                                        exportTimeTravel,
-                                        out short resourceTypeId,
-                                        out string resourceId,
-                                        out int version,
-                                        out bool isDeleted,
-                                        out long resourceSurrogateId,
-                                        out string requestMethod,
-                                        out bool isMatch,
-                                        out bool isPartialEntry,
-                                        out bool isRawResourceMetaSet,
-                                        out string searchParameterHash,
-                                        out byte[] rawResourceBytes,
-                                        out bool isInvisible,
-                                        out bool isHistory);
+                                    short resourceTypeId;
+                                    string resourceId;
+                                    int version;
+                                    bool isDeleted;
+                                    long resourceSurrogateId;
+                                    string requestMethod;
+                                    bool isMatch;
+                                    bool isPartialEntry;
+                                    bool isRawResourceMetaSet;
+                                    string searchParameterHash;
+                                    byte[] rawResourceBytes;
+                                    bool isInvisible;
+                                    bool isHistory;
+
+                                    if (useIgnixaExecution)
+                                    {
+                                        IgnixaResourceReader.Read(
+                                            reader,
+                                            ignixaHasIncludes,
+                                            out resourceTypeId,
+                                            out resourceId,
+                                            out version,
+                                            out isDeleted,
+                                            out resourceSurrogateId,
+                                            out requestMethod,
+                                            out isMatch,
+                                            out isPartialEntry,
+                                            out isRawResourceMetaSet,
+                                            out searchParameterHash,
+                                            out rawResourceBytes,
+                                            out isInvisible,
+                                            out isHistory);
+                                    }
+                                    else
+                                    {
+                                        ReadWrapper(
+                                            reader,
+                                            exportTimeTravel,
+                                            out resourceTypeId,
+                                            out resourceId,
+                                            out version,
+                                            out isDeleted,
+                                            out resourceSurrogateId,
+                                            out requestMethod,
+                                            out isMatch,
+                                            out isPartialEntry,
+                                            out isRawResourceMetaSet,
+                                            out searchParameterHash,
+                                            out rawResourceBytes,
+                                            out isInvisible,
+                                            out isHistory);
+                                    }
 
                                     if (isInvisible)
                                     {

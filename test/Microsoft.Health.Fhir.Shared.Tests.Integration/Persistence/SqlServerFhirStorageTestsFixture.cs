@@ -9,6 +9,7 @@ using System.Linq;
 using System.Numerics;
 using System.Threading;
 using Azure.Identity;
+using Ignixa.Specification.Extensions;
 using Medino;
 using Microsoft.AspNetCore.Components.Forms;
 using Microsoft.Data.SqlClient;
@@ -130,6 +131,13 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         internal SchemaInformation SchemaInformation { get; private set; }
 
         internal ISqlQueryHashCalculator SqlQueryHashCalculator { get; private set; }
+
+        // A dedicated search service wired with the real Ignixa search-options adapter and a real
+        // compile-only router configured to execute the Ignixa-emitted SQL. The shared _searchService
+        // deliberately keeps the baseline (substituted) Ignixa wiring so the rest of the suite is
+        // unaffected; this parallel service exists solely to prove the Ignixa execution path runs real
+        // SQL against the live database for eligible searches.
+        internal SqlServerSearchService IgnixaSearchService { get; private set; }
 
         internal static string GetDatabaseName(string test = null)
         {
@@ -261,10 +269,11 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             var searchParameterExpressionParser = new SearchParameterExpressionParser(new ReferenceSearchValueParser(_fhirRequestContextAccessor, instanceConfiguration));
             var expressionParser = new ExpressionParser(() => searchableSearchParameterDefinitionManager, searchParameterExpressionParser);
 
-            // A substituted adapter returns null, so SearchOptions.IgnixaOptions stays null and the
-            // compile-only router skips — which is exactly today's result behaviour, since that router
-            // observes but never serves. The cutover replaces this with the real IgnixaSearchOptionsAdapter,
-            // at which point IgnixaOptions becomes load-bearing and this fixture must build one for real.
+            // Cutover step 1: the shared search service keeps the baseline (substituted) Ignixa wiring so
+            // the existing integration suite is unaffected. A dedicated IgnixaSearchService (built below) is
+            // wired with the real adapter + router to prove the Ignixa execution path.
+            IIgnixaSearchOptionsAdapter ignixaSearchOptionsAdapter = Substitute.For<IIgnixaSearchOptionsAdapter>();
+
             var searchOptionsFactory = new SearchOptionsFactory(
                 expressionParser,
                 () => searchableSearchParameterDefinitionManager,
@@ -272,7 +281,7 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
                 _fhirRequestContextAccessor,
                 sqlSortingValidator,
                 new ExpressionAccessControl(_fhirRequestContextAccessor),
-                Substitute.For<IIgnixaSearchOptionsAdapter>(),
+                ignixaSearchOptionsAdapter,
                 new IgnixaSearchTenantAccessor(_fhirRequestContextAccessor),
                 NullLogger<SearchOptionsFactory>.Instance);
 
@@ -290,6 +299,10 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             var queryPlanReuseChecker = new QueryPlanReuseChecker(SqlRetryService, _fhirSqlConfiguration, NullLogger<QueryPlanReuseChecker>.Instance);
 
             SqlQueryHashCalculator = new TestSqlHashCalculator();
+
+            // The shared service keeps a substituted router (baseline behaviour: every search stays on the
+            // legacy path), so the existing suite is unchanged.
+            var ignixaSqlCompileOnlyRouter = Substitute.For<IIgnixaSqlCompileOnlyRouter>();
 
             _searchService = new SqlServerSearchService(
                 searchOptionsFactory,
@@ -310,7 +323,56 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
                 new CompressedRawResourceConverter(),
                 SqlQueryHashCalculator,
                 queryPlanReuseChecker,
-                Substitute.For<IIgnixaSqlCompileOnlyRouter>(),
+                ignixaSqlCompileOnlyRouter,
+                NullLogger<SqlServerSearchService>.Instance);
+
+            // Parallel search service wired for real Ignixa execution. It reuses the same rewriters, model,
+            // schema and data store as the shared service, but pairs a second SearchOptionsFactory (using the
+            // real Ignixa adapter, so SearchOptions.IgnixaOptions is populated) with a real compile-only router
+            // configured to execute the emitted SQL. Eligible searches run through this service actually execute
+            // Ignixa-generated SQL against the live database.
+            var ignixaExecutionConfiguration = new FhirSqlServerConfiguration();
+            ignixaExecutionConfiguration.EnableIgnixaSqlExecution = true;
+
+            var ignixaSearchOptionsFactory = new SearchOptionsFactory(
+                expressionParser,
+                () => searchableSearchParameterDefinitionManager,
+                _options,
+                _fhirRequestContextAccessor,
+                sqlSortingValidator,
+                new ExpressionAccessControl(_fhirRequestContextAccessor),
+                CreateRealIgnixaSearchOptionsAdapter(),
+                new IgnixaSearchTenantAccessor(_fhirRequestContextAccessor),
+                NullLogger<SearchOptionsFactory>.Instance);
+
+            var ignixaExecutionRouter = new IgnixaSqlCompileOnlyRouter(
+                new IgnixaSqlCompilerAdapter(
+                    new IgnixaSqlSymbolResolver(sqlServerFhirModel),
+                    SchemaInformation,
+                    NullLogger<IgnixaSqlCompilerAdapter>.Instance),
+                ignixaExecutionConfiguration,
+                NullLogger<IgnixaSqlCompileOnlyRouter>.Instance);
+
+            IgnixaSearchService = new SqlServerSearchService(
+                ignixaSearchOptionsFactory,
+                _fhirDataStore,
+                sqlServerFhirModel,
+                sqlRootExpressionRewriter,
+                chainFlatteningRewriter,
+                sortRewriter,
+                partitionEliminationRewriter,
+                compartmentSearchRewriter,
+                smartCompartmentSearchRewriter,
+                searchParamTableExpressionQueryGeneratorFactory,
+                SqlRetryService,
+                SqlServerDataStoreConfiguration,
+                ignixaExecutionConfiguration,
+                SchemaInformation,
+                _fhirRequestContextAccessor,
+                new CompressedRawResourceConverter(),
+                SqlQueryHashCalculator,
+                queryPlanReuseChecker,
+                ignixaExecutionRouter,
                 NullLogger<SqlServerSearchService>.Instance);
 
             ISearchParameterSupportResolver searchParameterSupportResolver = Substitute.For<ISearchParameterSupportResolver>();
@@ -339,6 +401,28 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             var connectionBuilder = new SqlConnectionStringBuilder(connectionString);
             var result = new SqlConnection(connectionBuilder.ToString());
             return result;
+        }
+
+        private static IIgnixaSearchOptionsAdapter CreateRealIgnixaSearchOptionsAdapter()
+        {
+            global::Ignixa.Abstractions.IFhirSchemaProvider schemaProvider = IgnixaFhirVersionAdapter.Current.GetSchemaProvider();
+
+            var baseUriProvider = Substitute.For<global::Ignixa.Abstractions.IFhirBaseUriProvider>();
+            baseUriProvider.GetServiceBaseUris().Returns(Array.Empty<Uri>());
+            var referenceSearchValueParser = new global::Ignixa.Search.Indexing.SearchValues.ReferenceSearchValueParser(schemaProvider, baseUriProvider);
+            var searchParameterExpressionParser = new global::Ignixa.Search.Expressions.Parsers.SearchParameterExpressionParser(referenceSearchValueParser, schemaProvider);
+            var searchParameterDefinitionManager = new global::Ignixa.Search.Definition.SearchParameterDefinitionManager(
+                schemaProvider,
+                NullLogger<global::Ignixa.Search.Definition.SearchParameterDefinitionManager>.Instance);
+            var searchableSearchParameterDefinitionManager = new global::Ignixa.Search.Definition.SearchableSearchParameterDefinitionManager(searchParameterDefinitionManager);
+            global::Ignixa.Search.Definition.ISearchParameterDefinitionManager.SearchableSearchParameterDefinitionManagerResolver resolver = () => searchableSearchParameterDefinitionManager;
+            var expressionParser = new global::Ignixa.Search.Expressions.Parsers.ExpressionParser(
+                resolver,
+                searchParameterExpressionParser,
+                schemaProvider);
+            var builderFactory = new IgnixaSearchOptionsBuilderFactory(expressionParser, searchableSearchParameterDefinitionManager);
+
+            return new IgnixaSearchOptionsAdapter(builderFactory, schemaProvider);
         }
 
         object IServiceProvider.GetService(Type serviceType)

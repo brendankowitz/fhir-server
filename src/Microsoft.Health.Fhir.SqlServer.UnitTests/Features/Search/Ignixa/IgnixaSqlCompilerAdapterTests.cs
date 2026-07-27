@@ -80,6 +80,46 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
+        public async Task CompileAsync_WhenRowReturningSearchIsRequested_EmitsProjectionColumnsForTheExecutionReader()
+        {
+            // Arrange
+            var model = CreateResolvableModel();
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+            SqlSearchOptions options = CreateOptions(ignixaOptions => ignixaOptions.Expression = null);
+
+            // Act
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            // Assert: every dbo.Resource column the Ignixa execution reader materialises must appear in the
+            // emitted SQL, bracket-quoted by the emitter, so the reader's ordinals line up with the projection.
+            Assert.True(result.Compiled);
+            Assert.NotNull(result.EmittedSql);
+            foreach (string column in IgnixaResourceReader.ProjectionColumns)
+            {
+                Assert.Contains("[" + column + "]", result.EmittedSql!.Sql, StringComparison.Ordinal);
+            }
+        }
+
+        [Fact]
+        public async Task CompileAsync_WhenCountOnlySearchIsRequested_DoesNotProjectResourceColumns()
+        {
+            // Arrange
+            var model = CreateResolvableModel();
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+            SqlSearchOptions options = CreateOptions(ignixaOptions => ignixaOptions.Expression = null, countOnly: true);
+
+            // Act
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            // Assert: a count-only plan emits a single scalar and must not carry the row projection, otherwise
+            // the reader's GetInt64(0) count path would see resource columns instead of the count.
+            Assert.True(result.Compiled);
+            Assert.NotNull(result.EmittedSql);
+            Assert.Contains("COUNT_BIG", result.EmittedSql!.Sql, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("[RawResource]", result.EmittedSql.Sql, StringComparison.Ordinal);
+        }
+
+        [Fact]
         public async Task CompileAsync_WhenSearchParameterIsUnresolved_ReturnsResolveCapabilityOutcome()
         {
             // Arrange

@@ -646,6 +646,103 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         // ---------------------------------------------------------------------------
+        // TryCreateExecutionPlanAsync — execution routing (cutover step 1)
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task TryCreateExecutionPlanAsync_WhenExecutionDisabledByDefault_ReturnsNullAndDoesNotCompile()
+        {
+            // Arrange: EnableIgnixaSqlExecution defaults to false.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            var router = CreateRouter(adapter, new FhirSqlServerConfiguration());
+            SqlSearchOptions options = CreateEligibleOptions();
+
+            // Act
+            IgnixaSqlExecutionPlan plan = await router.TryCreateExecutionPlanAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            // Assert
+            Assert.Null(plan);
+            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task TryCreateExecutionPlanAsync_WhenRequestIsIneligible_ReturnsNullAndDoesNotCompile()
+        {
+            // Arrange: a continuation token makes the request ineligible.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            var router = CreateRouter(adapter, ExecutionEnabledConfig());
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.ContinuationToken = "token";
+
+            // Act
+            IgnixaSqlExecutionPlan plan = await router.TryCreateExecutionPlanAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            // Assert
+            Assert.Null(plan);
+            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task TryCreateExecutionPlanAsync_WhenCompilationReportsCapabilityGap_ReturnsNull()
+        {
+            // Arrange
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("lower", "not-supported"));
+            var router = CreateRouter(adapter, ExecutionEnabledConfig());
+            SqlSearchOptions options = CreateEligibleOptions();
+
+            // Act
+            IgnixaSqlExecutionPlan plan = await router.TryCreateExecutionPlanAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            // Assert
+            Assert.Null(plan);
+        }
+
+        [Fact]
+        public async Task TryCreateExecutionPlanAsync_WhenEligibleRowSearch_ReturnsExecutablePlanWithParameters()
+        {
+            // Arrange: a real compiler over a resolvable Patient model produces genuine emitted SQL.
+            var router = CreateRouter(CreateRealAdapter(), ExecutionEnabledConfig());
+            SqlSearchOptions options = CreateEligibleOptions();
+
+            // Act
+            IgnixaSqlExecutionPlan plan = await router.TryCreateExecutionPlanAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            // Assert
+            Assert.NotNull(plan);
+            Assert.False(plan.CountOnly);
+            Assert.False(plan.HasIncludes);
+            Assert.NotNull(plan.EmittedSql);
+            Assert.False(string.IsNullOrWhiteSpace(plan.EmittedSql.Sql));
+
+            // Every emitted parameter must carry an @-prefixed name and a bindable value, so the search service
+            // can bind them onto the SqlCommand verbatim.
+            Assert.All(plan.EmittedSql.Parameters, p =>
+            {
+                Assert.StartsWith("@", p.Name, StringComparison.Ordinal);
+                Assert.NotNull(p.Value);
+            });
+        }
+
+        [Fact]
+        public async Task TryCreateExecutionPlanAsync_WhenCountOnlySearch_ReturnsCountOnlyPlan()
+        {
+            // Arrange
+            var router = CreateRouter(CreateRealAdapter(), ExecutionEnabledConfig());
+            SqlSearchOptions options = CreateEligibleCountOnlyOptions();
+
+            // Act
+            IgnixaSqlExecutionPlan plan = await router.TryCreateExecutionPlanAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            // Assert
+            Assert.NotNull(plan);
+            Assert.True(plan.CountOnly);
+            Assert.False(plan.HasIncludes);
+            Assert.Contains("COUNT_BIG", plan.EmittedSql.Sql, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // ---------------------------------------------------------------------------
         // Helpers
         // ---------------------------------------------------------------------------
 
@@ -661,6 +758,41 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
 
         private static FhirSqlServerConfiguration EnabledConfig() =>
             new FhirSqlServerConfiguration { EnableIgnixaSqlCompileOnly = true };
+
+        private static FhirSqlServerConfiguration ExecutionEnabledConfig() =>
+            new FhirSqlServerConfiguration { EnableIgnixaSqlExecution = true };
+
+        /// <summary>
+        /// Builds a real <see cref="IgnixaSqlCompilerAdapter"/> over a resolvable Patient model, so
+        /// execution-plan tests exercise genuine emitted SQL rather than a hand-crafted outcome.
+        /// </summary>
+        private static IgnixaSqlCompilerAdapter CreateRealAdapter()
+        {
+            var model = Substitute.For<ISqlServerFhirModel>();
+            model.TryGetResourceTypeId("Patient", out Arg.Any<short>())
+                .Returns(callInfo =>
+                {
+                    callInfo[1] = (short)1;
+                    return true;
+                });
+
+            var schema = new SchemaInformation(SchemaVersionConstants.Min, SchemaVersionConstants.Max)
+            {
+                Current = SchemaVersionConstants.Max,
+            };
+
+            return new IgnixaSqlCompilerAdapter(
+                new IgnixaSqlSymbolResolver(model),
+                schema,
+                NullLogger<IgnixaSqlCompilerAdapter>.Instance);
+        }
+
+        private static SqlSearchOptions CreateEligibleCountOnlyOptions()
+        {
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.CountOnly = true;
+            return options;
+        }
 
         /// <summary>
         /// Creates a fully eligible <see cref="SqlSearchOptions"/> that passes all skip conditions.
