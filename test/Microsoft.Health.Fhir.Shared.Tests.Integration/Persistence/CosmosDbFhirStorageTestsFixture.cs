@@ -1,4 +1,4 @@
-﻿// -------------------------------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
@@ -306,7 +306,11 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             var expressionParser = new ExpressionParser(() => searchableSearchParameterDefinitionManager, searchParameterExpressionParser);
             ISortingValidator sortingValidator = Substitute.For<ISortingValidator>();
             sortingValidator.ValidateSorting(Arg.Is<IReadOnlyList<(SearchParameterInfo searchParameter, SortOrder sortOrder)>>(x => x[0].searchParameter.Name == KnownQueryParameterNames.LastUpdated), out Arg.Any<IReadOnlyList<string>>()).Returns(true);
-            var searchOptionsFactory = new SearchOptionsFactory(expressionParser, () => searchableSearchParameterDefinitionManager, options, _fhirRequestContextAccessor, sortingValidator, new ExpressionAccessControl(_fhirRequestContextAccessor), NullLogger<SearchOptionsFactory>.Instance);
+
+            // A substituted adapter returns null, so SearchOptions.IgnixaOptions stays null and nothing on the
+            // Cosmos path consumes it — matching today's behaviour. The cutover, which converts Cosmos to the
+            // Ignixa expression tree, must replace this with the real IgnixaSearchOptionsAdapter.
+            var searchOptionsFactory = new SearchOptionsFactory(expressionParser, () => searchableSearchParameterDefinitionManager, options, _fhirRequestContextAccessor, sortingValidator, new ExpressionAccessControl(_fhirRequestContextAccessor), Substitute.For<IIgnixaSearchOptionsAdapter>(), new IgnixaSearchTenantAccessor(_fhirRequestContextAccessor), NullLogger<SearchOptionsFactory>.Instance);
 
             var compartmentDefinitionManager = new CompartmentDefinitionManager(ModelInfoProvider.Instance);
             await compartmentDefinitionManager.StartAsync(CancellationToken.None);

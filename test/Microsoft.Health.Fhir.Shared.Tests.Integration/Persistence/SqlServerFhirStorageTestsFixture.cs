@@ -261,6 +261,10 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             var searchParameterExpressionParser = new SearchParameterExpressionParser(new ReferenceSearchValueParser(_fhirRequestContextAccessor, instanceConfiguration));
             var expressionParser = new ExpressionParser(() => searchableSearchParameterDefinitionManager, searchParameterExpressionParser);
 
+            // A substituted adapter returns null, so SearchOptions.IgnixaOptions stays null and the
+            // compile-only router skips — which is exactly today's result behaviour, since that router
+            // observes but never serves. The cutover replaces this with the real IgnixaSearchOptionsAdapter,
+            // at which point IgnixaOptions becomes load-bearing and this fixture must build one for real.
             var searchOptionsFactory = new SearchOptionsFactory(
                 expressionParser,
                 () => searchableSearchParameterDefinitionManager,
@@ -268,6 +272,8 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
                 _fhirRequestContextAccessor,
                 sqlSortingValidator,
                 new ExpressionAccessControl(_fhirRequestContextAccessor),
+                Substitute.For<IIgnixaSearchOptionsAdapter>(),
+                new IgnixaSearchTenantAccessor(_fhirRequestContextAccessor),
                 NullLogger<SearchOptionsFactory>.Instance);
 
             var searchParamTableExpressionQueryGeneratorFactory = new SearchParamTableExpressionQueryGeneratorFactory(searchParameterToSearchValueTypeMap);
