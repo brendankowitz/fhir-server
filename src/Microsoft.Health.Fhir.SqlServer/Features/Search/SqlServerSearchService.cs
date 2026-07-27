@@ -669,14 +669,10 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                             }
 
                             // A custom stored procedure takes precedence over Ignixa so the legacy custom-query
-                            // optimization keeps working. Token and composite predicates are also deferred to
-                            // legacy for now -- see IgnixaExpressionCapabilityChecker, whose remarks record that
-                            // the defect originally claimed for them is not substantiated and that narrowing this
-                            // gate is its own verified step.
+                            // optimization keeps working.
                             IgnixaSqlExecutionPlan ignixaPlan = null;
                             bool ignixaCustomQueryEmpty = string.IsNullOrEmpty(customQuery);
-                            bool ignixaExpressionSupported = IgnixaExpressionCapabilityChecker.IsSupported(clonedSearchOptions.Expression);
-                            if (ignixaCustomQueryEmpty && ignixaExpressionSupported)
+                            if (ignixaCustomQueryEmpty)
                             {
                                 ignixaPlan = await _ignixaSqlCompileOnlyRouter.TryCreateExecutionPlanAsync(
                                     clonedSearchOptions,
