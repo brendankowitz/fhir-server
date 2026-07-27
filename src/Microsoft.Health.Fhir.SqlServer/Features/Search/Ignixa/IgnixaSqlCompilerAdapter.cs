@@ -76,6 +76,12 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
             IgnixaSearchOptions ignixaOptions = searchOptions.IgnixaOptions;
 
+            // A null/empty resource type means a multi-type or system-level search (GET / or GET /?_type=...),
+            // a supported case rather than a caller error. Normalize it to null ONCE here so Resolve.RunAsync,
+            // Lower.Run, and the SystemLevelSearch flag all observe the exact same value; an empty string would
+            // read as system-level to one stage and as a literal (unmatchable) resource type to the others.
+            string resourceType = string.IsNullOrEmpty(ignixaOptions.ResourceType) ? null : ignixaOptions.ResourceType;
+
             IReadOnlyList<SortExpression> requestedSort = ignixaOptions.Sort ?? EmptySort;
 
             // Count-only requests never carry includes/revincludes into either Resolve or Lower.
@@ -94,15 +100,23 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 sortPhase = missingValuesPhase ? SortPhase.MissingPrimary : SortPhase.Valued;
             }
 
-            // Stage 1: Resolve. This is the only stage that performs I/O (symbol lookups).
+            // Stage 1: Resolve. This is the only stage that performs I/O (symbol lookups). A multi-_type caller
+            // resolves the type names before compiling and passes them via additionalResourceTypes rather than in
+            // the expression tree; the same list is forwarded to LowerOptions.ResourceTypes below and both halves
+            // are required, or a multi-_type search silently widens to every type. An unresolvable type name is
+            // kept by the compiler as an unmatchable sentinel, so a fully-unresolvable list cannot collapse into
+            // "every type".
             ResolvedSymbols resolved = await Resolve.RunAsync(
                 ignixaOptions.Expression,
                 includes,
                 revIncludes,
                 requestedSort,
                 _resolver,
-                ignixaOptions.ResourceType,
-                cancellationToken);
+                resourceType,
+                cancellationToken,
+                compartmentDefinitionManager: null,
+                searchParameterDefinitionManager: null,
+                additionalResourceTypes: ignixaOptions.ResourceTypes);
 
             if (resolved.Unresolved.Count > 0)
             {
@@ -118,7 +132,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 lowered = Lower.Run(
                     ignixaOptions.Expression,
                     resolved.Symbols,
-                    ignixaOptions.ResourceType,
+                    resourceType,
                     includes,
                     revIncludes,
                     ignixaOptions.IncludesMaxItemCount ?? searchOptions.IncludeCount,
@@ -129,6 +143,12 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                     {
                         CountOnly = searchOptions.CountOnly,
                         Top = searchOptions.MaxItemCount,
+                        SystemLevelSearch = resourceType is null,
+
+                        // Without this forwarding a multi-_type search silently returns EVERY resource type
+                        // rather than the requested subset: the cross-type leaves carry no ResourceTypeId of
+                        // their own, so nothing else narrows them.
+                        ResourceTypes = ignixaOptions.ResourceTypes,
                     });
             }
             catch (NotSupportedException ex)

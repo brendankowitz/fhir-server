@@ -11,7 +11,6 @@ using Ignixa.Search.Sql.Ast;
 using Microsoft.Extensions.Logging;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.SqlServer.Registration;
-using IgnixaSearchOptions = Ignixa.Search.Models.SearchOptions;
 
 namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 {
@@ -285,23 +284,6 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             if (accessControlPredicateRequired)
             {
                 _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "access-control-predicate");
-                return false;
-            }
-
-            IgnixaSearchOptions ignixaOptions = searchOptions.IgnixaOptions;
-
-            if (ignixaOptions.ResourceType == null)
-            {
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "null-resource-type");
-                return false;
-            }
-
-            if (ignixaOptions.ResourceTypes != null && ignixaOptions.ResourceTypes.Count > 1)
-            {
-                _logger.LogDebug(
-                    "Skipping Ignixa compile-only observation. Reason={Reason}, ResourceTypeCount={Count}",
-                    "multi-resource-types",
-                    ignixaOptions.ResourceTypes.Count);
                 return false;
             }
 

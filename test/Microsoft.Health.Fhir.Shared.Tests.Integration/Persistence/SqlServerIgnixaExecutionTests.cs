@@ -529,6 +529,85 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             Assert.Equal(legacyModes, ignixaModes);
         }
 
+        [Fact]
+        public async Task GivenAMultiTypeSystemSearch_WhenExecutedOnBothEngines_ThenIgnixaTakesThePathAndAgreesWithLegacy()
+        {
+            // Step 1 of the cutover opens the null-resource-type and multi-resource-types gates. A system-level
+            // "_type=Patient,Observation" search has no single target type, so it exercises both the
+            // SystemLevelSearch flag (resourceType is null) and the LowerOptions.ResourceTypes forwarding that
+            // narrows the base set to exactly the requested subset. Without that forwarding the compiler would
+            // silently widen to every resource type, which this differential against legacy would catch.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var multiTypeSearch = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_type", "Patient,Observation"),
+                Tuple.Create("_count", "1000"),
+            };
+
+            long ignixaBefore = 0;
+            long legacyInstanceBefore = 0;
+            string patientId = null;
+            string observationId = null;
+            SearchResult ignixaResults = null;
+            SearchResult legacyResults = null;
+
+            // The shared dbo.Resource table can be truncated by a concurrently running test class between the
+            // seed and the reads. Retry the seed + both searches a few times so a concurrent truncation does not
+            // turn a correct implementation into a flake.
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+                patient.Id = Guid.NewGuid().ToString();
+                await _fixture.Mediator.UpsertResourceAsync(patient.ToResourceElement());
+                patientId = patient.Id;
+
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept { Text = $"IgnixaMultiType_{Guid.NewGuid()}" },
+                };
+                await _fixture.Mediator.UpsertResourceAsync(observation.ToResourceElement());
+                observationId = observation.Id;
+
+                ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                // A system-level search: no target resource type, the types come only from _type.
+                ignixaResults = await ignixaSearchService.SearchAsync(null, multiTypeSearch, CancellationToken.None);
+                legacyResults = await legacySearchService.SearchAsync(null, multiTypeSearch, CancellationToken.None);
+
+                bool ignixaHasBoth = ContainsMode(ignixaResults, patientId, SearchEntryMode.Match) &&
+                    ContainsMode(ignixaResults, observationId, SearchEntryMode.Match);
+                bool legacyHasBoth = ContainsMode(legacyResults, patientId, SearchEntryMode.Match) &&
+                    ContainsMode(legacyResults, observationId, SearchEntryMode.Match);
+                if (ignixaHasBoth && legacyHasBoth)
+                {
+                    break;
+                }
+            }
+
+            long ignixaAfter = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceAfter = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            // The Ignixa execution path ran for a multi-type system search, not a silent legacy fallback.
+            Assert.True(
+                ignixaAfter > ignixaBefore,
+                $"Expected the Ignixa multi-type path to run. before={ignixaBefore} after={ignixaAfter}");
+            Assert.Equal(legacyInstanceBefore, legacyInstanceAfter);
+
+            // Both seeded resources (one of each requested type) came back on the Ignixa path.
+            Assert.True(ContainsMode(ignixaResults, patientId, SearchEntryMode.Match), "Seeded Patient missing from Ignixa results.");
+            Assert.True(ContainsMode(ignixaResults, observationId, SearchEntryMode.Match), "Seeded Observation missing from Ignixa results.");
+
+            // Differential correctness: the exact same set of ids in the same order as the trusted legacy path,
+            // proving the ResourceTypes subset was applied and no extra type leaked in.
+            Assert.Equal(OrderedResourceIds(legacyResults), OrderedResourceIds(ignixaResults));
+        }
+
         private static bool ContainsMode(SearchResult results, string resourceId, SearchEntryMode mode)
         {
             return results.Results.Any(r =>

@@ -220,9 +220,13 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
-        public async Task ObserveAsync_WhenIgnixaOptionsResourceTypeNull_DoesNotCompile()
+        public async Task ObserveAsync_WhenIgnixaOptionsResourceTypeNull_IsEligibleAndCompiles()
         {
+            // A null resource type is a system-level search (GET /), which the compiler supports via
+            // LowerOptions.SystemLevelSearch. The gate that used to reject it is now open.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
             var router = CreateRouter(adapter, EnabledConfig());
 
             SqlSearchOptions options = CreateEligibleOptions();
@@ -230,13 +234,17 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
 
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
 
-            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
         }
 
         [Fact]
-        public async Task ObserveAsync_WhenIgnixaOptionsResourceTypesHasMultipleTypes_DoesNotCompile()
+        public async Task ObserveAsync_WhenIgnixaOptionsResourceTypesHasMultipleTypes_IsEligibleAndCompiles()
         {
+            // A multi-_type search is supported by the compiler via LowerOptions.ResourceTypes; the gate that
+            // used to reject more than one type is now open.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
             var router = CreateRouter(adapter, EnabledConfig());
 
             SqlSearchOptions options = CreateEligibleOptions();
@@ -244,7 +252,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
 
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
 
-            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
         }
 
         // ---------------------------------------------------------------------------
