@@ -148,14 +148,40 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
             QueryPlan plan = outcome.LoweredPlan.Plan;
 
-            // Materialisation guard for includes. Includes require the include-truncation and
-            // includes-continuation interplay that has not been validated against the emitted UNION ALL shape
-            // yet, so a plan carrying includes still falls back to legacy for now.
+            // Materialisation guard for includes, now narrowed to two sub-cases.
+            //
+            // Plain _include/_revinclude stages materialise correctly through the shared SearchResult
+            // assembly and are allowed onto the Ignixa path: the emitted UNION ALL projects
+            // (T1, Sid1, IsMatch, IsPartial, [SortValueN], projection); the outer ORDER BY IsMatch DESC reads
+            // every match row before any included row, so SearchImpl mints the continuation token only from the
+            // last match row and never from an included row; and each include stage sets IsPartial via
+            // COUNT_BIG(*) OVER() > Limit, which SearchImpl surfaces as the same partial-result signal legacy
+            // raises. IgnixaResourceReader reads IsMatch/IsPartial at ordinals 2/3 when HasIncludes is set.
+            //
+            // Two sub-cases remain guarded because their emitted semantics have not been validated against the
+            // legacy generator in this pass:
+            //   * Wildcard includes (ReferenceSearchParamId == null, e.g. "_include=*") lower to a
+            //     reference-parameter-less join whose row set has not been compared to legacy.
+            //   * :iterate includes (Iterate == true) resolve through a single topological pass in Lower rather
+            //     than legacy's fixed-point iteration, so the produced closure can diverge.
+            // A plan that carries any such stage falls back to legacy.
             bool hasIncludes = (plan.Includes?.Count ?? 0) > 0;
             if (hasIncludes)
             {
-                _logger.LogDebug("Falling back to legacy SQL: Ignixa plan carries includes. Reason={Reason}", "includes");
-                return null;
+                foreach (IncludeStage stage in plan.Includes)
+                {
+                    if (stage.Iterate)
+                    {
+                        _logger.LogDebug("Falling back to legacy SQL: Ignixa plan carries an iterate include. Reason={Reason}", "include-iterate");
+                        return null;
+                    }
+
+                    if (stage.ReferenceSearchParamId == null)
+                    {
+                        _logger.LogDebug("Falling back to legacy SQL: Ignixa plan carries a wildcard include. Reason={Reason}", "include-wildcard");
+                        return null;
+                    }
+                }
             }
 
             // Materialisation guard for the sort phases legacy handles specially. When the sort parameter is

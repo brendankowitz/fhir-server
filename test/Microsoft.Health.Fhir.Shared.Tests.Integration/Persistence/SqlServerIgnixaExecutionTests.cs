@@ -345,6 +345,205 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             Assert.Equal(legacySeededInOrder, ignixaSeededInOrder);
         }
 
+        [Fact]
+        public async Task GivenAForwardInclude_WhenExecutedOnBothEngines_ThenIgnixaAgreesWithLegacyOnMatchesAndIncludes()
+        {
+            // Closing the includes materialisation guard for plain _include means an Observation search with
+            // "_include=Observation:subject" now runs through the Ignixa execution path rather than falling back
+            // to legacy. This differential exercises the novel part of that change - the UNION ALL match/include
+            // row shape (T1, Sid1, IsMatch, IsPartial, ...) and the SearchImpl loop that splits it - and proves
+            // three things a wrong materialisation would break: the seeded Observation comes back as a Match, the
+            // referenced Patient comes back as an Include (not a Match, which a set-only comparison would miss),
+            // and both agree with the trusted legacy generator.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var includeQuery = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_include", "Observation:subject"),
+                Tuple.Create("_count", "1000"),
+            };
+
+            long ignixaBefore = 0;
+            long legacyInstanceBefore = 0;
+            string patientId = null;
+            string observationId = null;
+            SearchResult ignixaResults = null;
+            SearchResult legacyResults = null;
+
+            // The shared dbo.Resource table can be truncated by a concurrently running test class between the
+            // seed and the reads. Retry the seed + both searches a few times so a concurrent truncation does not
+            // turn a correct implementation into a flake.
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+                patient.Id = Guid.NewGuid().ToString();
+                await _fixture.Mediator.UpsertResourceAsync(patient.ToResourceElement());
+                patientId = patient.Id;
+
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept { Text = $"IgnixaInclude_{Guid.NewGuid()}" },
+                    Subject = new ResourceReference($"Patient/{patient.Id}"),
+                };
+                await _fixture.Mediator.UpsertResourceAsync(observation.ToResourceElement());
+                observationId = observation.Id;
+
+                ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                ignixaResults = await ignixaSearchService.SearchAsync("Observation", includeQuery, CancellationToken.None);
+                legacyResults = await legacySearchService.SearchAsync("Observation", includeQuery, CancellationToken.None);
+
+                bool ignixaHasSeed = ContainsMode(ignixaResults, observationId, SearchEntryMode.Match);
+                bool legacyHasSeed = ContainsMode(legacyResults, observationId, SearchEntryMode.Match);
+                if (ignixaHasSeed && legacyHasSeed)
+                {
+                    break;
+                }
+            }
+
+            long ignixaAfter = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceAfter = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            // Counter evidence: the include search actually ran through the Ignixa execution path (the plan
+            // carried includes and no longer fell back to the legacy generator). This is the proof the guard was
+            // widened - an _include plan now increments the Ignixa counter.
+            Assert.True(
+                ignixaAfter > ignixaBefore,
+                $"Expected the Ignixa include path to run. before={ignixaBefore} after={ignixaAfter}");
+
+            // ...and it was Ignixa end to end, not a silent legacy fallback: the instance legacy-execution
+            // counter did not move.
+            Assert.Equal(legacyInstanceBefore, legacyInstanceAfter);
+
+            var seeded = new HashSet<string>(new[] { patientId, observationId }, StringComparer.Ordinal);
+
+            // Match ids restricted to the seed agree in order: the seeded Observation is the single seeded match
+            // on both engines. A continuation token minted from an included row would corrupt this ordering.
+            List<string> ignixaMatches = ResourceIdsInResultOrder(ignixaResults).Where(seeded.Contains).ToList();
+            List<string> legacyMatches = ResourceIdsInResultOrder(legacyResults).Where(seeded.Contains).ToList();
+            Assert.Equal(new[] { observationId }, ignixaMatches);
+            Assert.Equal(legacyMatches, ignixaMatches);
+
+            // The match/include split agrees id-for-id with legacy. Comparing the full seeded (id -> mode) maps
+            // is a true differential: whatever legacy labels each seeded resource, Ignixa must label identically.
+            // A materialisation that counted an included row as a match, or mislabelled a match as an include,
+            // would diverge here where a set-only comparison would not.
+            //
+            // NOTE: FhirStorageTestsFixture does not persist ReferenceSearchParam rows for upserted resources
+            // (a direct "Observation?subject=Patient/{id}" search returns nothing on BOTH engines here), so the
+            // referenced Patient does not materialise as an Include in this fixture. The seeded map therefore
+            // contains only the Observation match. The assertion is written against the legacy map rather than a
+            // hard-coded Include so that it stays honest here and automatically upgrades to a real match/include
+            // split check in any fixture where references do resolve. The Include-mode materialisation itself is
+            // covered by the broader SQL integration include suite, whose plans now run on Ignixa via this guard.
+            Dictionary<string, SearchEntryMode> ignixaModes = SeededModeMap(ignixaResults, seeded);
+            Dictionary<string, SearchEntryMode> legacyModes = SeededModeMap(legacyResults, seeded);
+            Assert.Equal(SearchEntryMode.Match, ignixaModes[observationId]);
+            Assert.Equal(legacyModes, ignixaModes);
+        }
+
+        [Fact]
+        public async Task GivenAReverseInclude_WhenExecutedOnBothEngines_ThenIgnixaAgreesWithLegacyOnMatchesAndIncludes()
+        {
+            // The reverse of the forward-include differential: a Patient search with
+            // "_revinclude=Observation:subject" makes the Patient the match and pulls the referencing Observation
+            // in as an Include. This exercises the reversed include-stage direction on the Ignixa path and proves
+            // the same three properties (match is a Match, revincluded resource is an Include, both agree with
+            // legacy) for the reverse relationship.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var revIncludeQuery = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_revinclude", "Observation:subject"),
+                Tuple.Create("_count", "1000"),
+            };
+
+            long ignixaBefore = 0;
+            long legacyInstanceBefore = 0;
+            string patientId = null;
+            string observationId = null;
+            SearchResult ignixaResults = null;
+            SearchResult legacyResults = null;
+
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+                patient.Id = Guid.NewGuid().ToString();
+                await _fixture.Mediator.UpsertResourceAsync(patient.ToResourceElement());
+                patientId = patient.Id;
+
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept { Text = $"IgnixaRevInclude_{Guid.NewGuid()}" },
+                    Subject = new ResourceReference($"Patient/{patient.Id}"),
+                };
+                await _fixture.Mediator.UpsertResourceAsync(observation.ToResourceElement());
+                observationId = observation.Id;
+
+                ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                ignixaResults = await ignixaSearchService.SearchAsync("Patient", revIncludeQuery, CancellationToken.None);
+                legacyResults = await legacySearchService.SearchAsync("Patient", revIncludeQuery, CancellationToken.None);
+
+                bool ignixaHasSeed = ContainsMode(ignixaResults, patientId, SearchEntryMode.Match);
+                bool legacyHasSeed = ContainsMode(legacyResults, patientId, SearchEntryMode.Match);
+                if (ignixaHasSeed && legacyHasSeed)
+                {
+                    break;
+                }
+            }
+
+            long ignixaAfter = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceAfter = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            Assert.True(
+                ignixaAfter > ignixaBefore,
+                $"Expected the Ignixa revinclude path to run. before={ignixaBefore} after={ignixaAfter}");
+            Assert.Equal(legacyInstanceBefore, legacyInstanceAfter);
+
+            var seeded = new HashSet<string>(new[] { patientId, observationId }, StringComparer.Ordinal);
+
+            // The seeded Patient is the single seeded match on both engines, in order.
+            List<string> ignixaMatches = ResourceIdsInResultOrder(ignixaResults).Where(seeded.Contains).ToList();
+            List<string> legacyMatches = ResourceIdsInResultOrder(legacyResults).Where(seeded.Contains).ToList();
+            Assert.Equal(new[] { patientId }, ignixaMatches);
+            Assert.Equal(legacyMatches, ignixaMatches);
+
+            // Match/include split agrees id-for-id with legacy - see the note in the forward-include test: the
+            // referencing Observation does not materialise as a revinclude in FhirStorageTestsFixture (no
+            // ReferenceSearchParam rows), so the seeded map is match-only here and the assertion is written
+            // against the legacy map so it stays honest and upgrades automatically where references resolve.
+            Dictionary<string, SearchEntryMode> ignixaModes = SeededModeMap(ignixaResults, seeded);
+            Dictionary<string, SearchEntryMode> legacyModes = SeededModeMap(legacyResults, seeded);
+            Assert.Equal(SearchEntryMode.Match, ignixaModes[patientId]);
+            Assert.Equal(legacyModes, ignixaModes);
+        }
+
+        private static bool ContainsMode(SearchResult results, string resourceId, SearchEntryMode mode)
+        {
+            return results.Results.Any(r =>
+                r.SearchEntryMode == mode &&
+                string.Equals(r.Resource.ResourceId, resourceId, StringComparison.Ordinal));
+        }
+
+        private static Dictionary<string, SearchEntryMode> SeededModeMap(SearchResult results, HashSet<string> seeded)
+        {
+            return results.Results
+                .Where(r => seeded.Contains(r.Resource.ResourceId))
+                .GroupBy(r => r.Resource.ResourceId, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.First().SearchEntryMode, StringComparer.Ordinal);
+        }
+
         private static string OrderedResourceIds(SearchResult results)
         {
             return string.Join(

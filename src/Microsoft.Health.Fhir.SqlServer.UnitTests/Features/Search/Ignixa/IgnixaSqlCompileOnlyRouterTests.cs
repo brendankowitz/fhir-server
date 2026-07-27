@@ -9,6 +9,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Ignixa.Search.Sql.Ast;
 using Ignixa.Search.Sql.Symbols;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -743,6 +744,74 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         // ---------------------------------------------------------------------------
+        // Includes materialisation guard (narrowed): plain _include/_revinclude execute on
+        // Ignixa; wildcard and :iterate includes fall back to legacy.
+        // ---------------------------------------------------------------------------
+
+        [Fact]
+        public async Task TryCreateExecutionPlanAsync_WhenPlainIncludeSearch_ReturnsExecutablePlanCarryingIncludes()
+        {
+            // Arrange: a real compiler over an Observation-resolvable model produces a genuine plan whose
+            // single include stage is a plain forward Observation.subject -> Patient include (non-iterate,
+            // reference param id resolved). The narrowed guard must let this onto the Ignixa path.
+            var router = CreateRouter(CreateObservationRealAdapter(), ExecutionEnabledConfig());
+            SqlSearchOptions options = CreateEligibleIncludeOptions();
+
+            // Act
+            IgnixaSqlExecutionPlan plan = await router.TryCreateExecutionPlanAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            // Assert: the plan is returned and flagged as carrying includes, so the reader materialises the
+            // (T1, Sid1, IsMatch, IsPartial, ...) row shape.
+            Assert.NotNull(plan);
+            Assert.True(plan.HasIncludes);
+            Assert.False(plan.CountOnly);
+            Assert.NotNull(plan.EmittedSql);
+            Assert.False(string.IsNullOrWhiteSpace(plan.EmittedSql.Sql));
+        }
+
+        [Fact]
+        public async Task TryCreateExecutionPlanAsync_WhenIterateInclude_FallsBackToLegacy()
+        {
+            // Arrange: start from a genuine compiled plain include, then flip its single stage to Iterate=true.
+            // Ignixa resolves :iterate as a single topological pass rather than legacy's fixed-point iteration,
+            // so the router must decline and fall back to legacy.
+            IgnixaSqlCompilationOutcome mutated = MutateSingleIncludeStage(
+                await CompilePlainIncludeOutcomeAsync(),
+                stage => stage with { Iterate = true });
+
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>()).Returns(mutated);
+            var router = CreateRouter(adapter, ExecutionEnabledConfig());
+
+            // Act
+            IgnixaSqlExecutionPlan plan = await router.TryCreateExecutionPlanAsync(CreateEligibleIncludeOptions(), accessControlPredicateRequired: false, CancellationToken.None);
+
+            // Assert
+            Assert.Null(plan);
+        }
+
+        [Fact]
+        public async Task TryCreateExecutionPlanAsync_WhenWildcardInclude_FallsBackToLegacy()
+        {
+            // Arrange: start from a genuine compiled plain include, then flip its single stage to a wildcard
+            // (ReferenceSearchParamId == null). A wildcard include lowers to a reference-parameter-less join
+            // whose row set has not been validated against legacy, so the router must decline.
+            IgnixaSqlCompilationOutcome mutated = MutateSingleIncludeStage(
+                await CompilePlainIncludeOutcomeAsync(),
+                stage => stage with { ReferenceSearchParamId = null });
+
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>()).Returns(mutated);
+            var router = CreateRouter(adapter, ExecutionEnabledConfig());
+
+            // Act
+            IgnixaSqlExecutionPlan plan = await router.TryCreateExecutionPlanAsync(CreateEligibleIncludeOptions(), accessControlPredicateRequired: false, CancellationToken.None);
+
+            // Assert
+            Assert.Null(plan);
+        }
+
+        // ---------------------------------------------------------------------------
         // Helpers
         // ---------------------------------------------------------------------------
 
@@ -834,6 +903,122 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
                 IgnixaCommit: "abc123",
                 SchemaVersion: 72,
                 PlanFingerprint: string.Empty);
+        }
+
+        /// <summary>
+        /// Builds a real <see cref="IgnixaSqlCompilerAdapter"/> over a model that resolves Patient (id=1),
+        /// Observation (id=2), and the Observation-subject search parameter (id=3), so include tests exercise
+        /// genuine emitted include SQL rather than a hand-crafted outcome.
+        /// </summary>
+        private static IgnixaSqlCompilerAdapter CreateObservationRealAdapter()
+        {
+            var model = Substitute.For<ISqlServerFhirModel>();
+            model.TryGetResourceTypeId("Patient", out Arg.Any<short>())
+                .Returns(callInfo =>
+                {
+                    callInfo[1] = (short)1;
+                    return true;
+                });
+            model.TryGetResourceTypeId("Observation", out Arg.Any<short>())
+                .Returns(callInfo =>
+                {
+                    callInfo[1] = (short)2;
+                    return true;
+                });
+            model.TryGetSearchParamId(
+                new Uri("http://hl7.org/fhir/SearchParameter/Observation-subject"),
+                out Arg.Any<short>())
+                .Returns(callInfo =>
+                {
+                    callInfo[1] = (short)3;
+                    return true;
+                });
+
+            var schema = new SchemaInformation(SchemaVersionConstants.Min, SchemaVersionConstants.Max)
+            {
+                Current = SchemaVersionConstants.Max,
+            };
+
+            return new IgnixaSqlCompilerAdapter(
+                new IgnixaSqlSymbolResolver(model),
+                schema,
+                NullLogger<IgnixaSqlCompilerAdapter>.Instance);
+        }
+
+        /// <summary>
+        /// A fully eligible row search on Observation carrying a single plain forward
+        /// Observation.subject -> Patient include.
+        /// </summary>
+        private static SqlSearchOptions CreateEligibleIncludeOptions()
+        {
+            var reference = new IgnixaSearchParameterInfo(
+                "subject",
+                "subject",
+                global::Ignixa.Specification.ValueSets.Normative.SearchParamType.Reference,
+                new Uri("http://hl7.org/fhir/SearchParameter/Observation-subject"),
+                components: null,
+                expression: null,
+                targetResourceTypes: new[] { "Patient" },
+                baseResourceTypes: new[] { "Observation" },
+                description: null);
+
+            var include = new global::Ignixa.Search.Expressions.IncludeExpression(
+                new[] { "Observation" },
+                reference,
+                "Observation",
+                "Patient",
+                new[] { "Patient" },
+                wildCard: false,
+                reversed: false,
+                iterate: false);
+
+            var baseOptions = new SearchOptions
+            {
+                MaxItemCount = 10,
+            };
+
+            return new SqlSearchOptions(baseOptions)
+            {
+                IgnixaOptions = new IgnixaSearchOptions
+                {
+                    ResourceType = "Observation",
+                    ResourceTypes = new List<string> { "Observation" },
+                    MaxItemCount = 10,
+                    Expression = null,
+                    Include = new[] { include },
+                    IncludesMaxItemCount = 100,
+                },
+            };
+        }
+
+        /// <summary>
+        /// Compiles the plain include options through a real adapter and returns the genuine, successful
+        /// outcome (with real emitted SQL) so guard tests can mutate the single stage without inventing a plan.
+        /// </summary>
+        private static async Task<IgnixaSqlCompilationOutcome> CompilePlainIncludeOutcomeAsync()
+        {
+            IgnixaSqlCompilerAdapter adapter = CreateObservationRealAdapter();
+            IgnixaSqlCompilationOutcome outcome = await adapter.CompileAsync(CreateEligibleIncludeOptions(), CancellationToken.None);
+            Assert.True(outcome.Compiled, $"Expected plain include to compile; stage={outcome.FailureStage}, kind={outcome.FailureKind}");
+            return outcome;
+        }
+
+        /// <summary>
+        /// Returns a copy of <paramref name="outcome"/> whose single include stage has been replaced by
+        /// <paramref name="mutate"/>. Reuses the genuine emitted SQL so the router sees a valid compiled outcome
+        /// that differs only in the include stage shape under test.
+        /// </summary>
+        private static IgnixaSqlCompilationOutcome MutateSingleIncludeStage(
+            IgnixaSqlCompilationOutcome outcome,
+            Func<IncludeStage, IncludeStage> mutate)
+        {
+            QueryPlan plan = outcome.LoweredPlan.Plan;
+            IReadOnlyList<IncludeStage> stages = plan.Includes;
+            Assert.NotNull(stages);
+            Assert.Single(stages);
+
+            QueryPlan mutatedPlan = plan with { Includes = new[] { mutate(stages[0]) } };
+            return outcome with { LoweredPlan = outcome.LoweredPlan with { Plan = mutatedPlan } };
         }
 
         // ---------------------------------------------------------------------------

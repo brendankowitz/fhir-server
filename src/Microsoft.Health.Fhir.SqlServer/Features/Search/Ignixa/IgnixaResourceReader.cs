@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using EnsureThat;
 using Microsoft.Data.SqlClient;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema.Model;
@@ -23,9 +24,6 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
     /// </summary>
     internal static class IgnixaResourceReader
     {
-        private static readonly BitColumn IsMatchColumn = new BitColumn("IsMatch");
-        private static readonly BitColumn IsPartialColumn = new BitColumn("IsPartial");
-
         /// <summary>
         /// The ordered list of <c>dbo.Resource</c> columns Ignixa must project so that a row carries every
         /// field <c>ReadWrapper</c> produces except <c>ResourceTypeId</c> (supplied by <c>T1</c>) and
@@ -109,8 +107,13 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             int prefixColumns;
             if (hasIncludes)
             {
-                isMatch = reader.Read(IsMatchColumn, 2);
-                isPartialEntry = reader.Read(IsPartialColumn, 3);
+                // Ignixa unions the match arm (IsPartial = CAST(0 AS bit)) with each include arm, whose
+                // IsPartial is CASE WHEN COUNT_BIG(*) OVER() > Limit THEN 1 ELSE 0 END — an int. SQL Server's
+                // UNION ALL data-type precedence promotes the combined IsPartial column to int, so it must be
+                // read as a 0/1 flag rather than a bit. IsMatch stays a bit in every arm, but both are read the
+                // same tolerant way so that a flag's SQL static type is not silently load-bearing here.
+                isMatch = ReadBooleanFlag(reader, 2);
+                isPartialEntry = ReadBooleanFlag(reader, 3);
                 prefixColumns = 4;
             }
             else
@@ -144,6 +147,19 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             rawResourceBytes = reader.GetSqlBytes(projectionBase + 6).Value;
             isInvisible = rawResourceBytes.Length == 1 && rawResourceBytes[0] == 0xF;
             isHistory = false;
+        }
+
+        /// <summary>
+        /// Reads a 0/1 boolean flag column tolerant of its emitted SQL type. Ignixa's UNION ALL can surface
+        /// <c>IsPartial</c> as <c>int</c> (bit match arm unioned with an int include-arm CASE), so a plain
+        /// <see cref="SqlDataReader.GetBoolean(int)"/> would throw <see cref="InvalidCastException"/>. Reading
+        /// the raw value and coercing keeps the reader correct regardless of whether the column resolves to
+        /// <c>bit</c> or <c>int</c>.
+        /// </summary>
+        private static bool ReadBooleanFlag(SqlDataReader reader, int ordinal)
+        {
+            object value = reader.GetValue(ordinal);
+            return value is not DBNull && Convert.ToBoolean(value, CultureInfo.InvariantCulture);
         }
     }
 }
