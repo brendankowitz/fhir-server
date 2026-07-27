@@ -10,16 +10,24 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Hl7.Fhir.Model;
+using Hl7.Fhir.Serialization;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Primitives;
 using Microsoft.Health.Core.Features.Context;
+using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Context;
+using Microsoft.Health.Fhir.Core.Features.Definition;
+using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.Core.Features.Search.Converters;
+using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
 using Microsoft.Health.Fhir.Core.Features.Security;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer.Features.Search;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Fhir.Tests.Common.FixtureParameters;
+using Microsoft.Health.Fhir.Tests.Common.Mocks;
 using Microsoft.Health.Fhir.ValueSets;
 using Microsoft.Health.Test.Utilities;
 using NSubstitute;
@@ -34,6 +42,9 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
     [Trait(Traits.Category, Categories.DataSourceValidation)]
     public class SqlServerIgnixaExecutionTests : IClassFixture<FhirStorageTestsFixture>
     {
+        private static readonly SemaphoreSlim _searchIndexerLock = new(1, 1);
+        private static ISearchIndexer _searchIndexer;
+
         private readonly FhirStorageTestsFixture _fixture;
         private readonly ITestOutputHelper _output;
 
@@ -952,6 +963,200 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             {
                 contextAccessor.RequestContext.Returns(originalContext);
             }
+        }
+
+        [Fact]
+        public async Task GivenAForwardIncludeOverIndexedReferences_WhenExecutedOnBothEngines_ThenIgnixaMaterialisesTheSameIncludedRowsAsLegacy()
+        {
+            // The include differential that is NOT vacuous. Unlike the mediator-seeded include tests in this file,
+            // this one writes real dbo.ReferenceSearchParam rows (see UpsertWithSearchIndicesAsync), so the
+            // referenced Patient genuinely materialises as an Include entry. Deleting the Ignixa include emitter
+            // would fail this test, which is the property the mediator-seeded variants cannot claim.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            patient.Id = Guid.NewGuid().ToString();
+            string patientId = await UpsertWithSearchIndicesAsync(patient);
+
+            var observation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept { Text = $"IgnixaIndexedInclude_{Guid.NewGuid()}" },
+                Subject = new ResourceReference($"Patient/{patientId}"),
+            };
+            string observationId = await UpsertWithSearchIndicesAsync(observation);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", observationId),
+                Tuple.Create("_include", "Observation:subject"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+            SearchResult legacyResults = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the include search to run on Ignixa.");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            // The reference index really did get written - without this guard the rest of the test would pass
+            // vacuously again if seeding silently regressed, which is exactly the failure mode being fixed here.
+            Assert.True(
+                ContainsMode(legacyResults, patientId, SearchEntryMode.Include),
+                "Legacy did not return the referenced Patient as an Include; the reference index was not seeded, so this test would be vacuous.");
+
+            Assert.True(ContainsMode(ignixaResults, observationId, SearchEntryMode.Match));
+            Assert.True(ContainsMode(ignixaResults, patientId, SearchEntryMode.Include));
+
+            var seeded = new HashSet<string>(new[] { patientId, observationId }, StringComparer.Ordinal);
+            Assert.Equal(SeededModeMap(legacyResults, seeded), SeededModeMap(ignixaResults, seeded));
+        }
+
+        [Fact]
+        public async Task GivenAReverseIncludeOverIndexedReferences_WhenExecutedOnBothEngines_ThenIgnixaMaterialisesTheSameIncludedRowsAsLegacy()
+        {
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            patient.Id = Guid.NewGuid().ToString();
+            string patientId = await UpsertWithSearchIndicesAsync(patient);
+
+            var observation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept { Text = $"IgnixaIndexedRevInclude_{Guid.NewGuid()}" },
+                Subject = new ResourceReference($"Patient/{patientId}"),
+            };
+            string observationId = await UpsertWithSearchIndicesAsync(observation);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", patientId),
+                Tuple.Create("_revinclude", "Observation:subject"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync("Patient", query, CancellationToken.None);
+            SearchResult legacyResults = await legacySearchService.SearchAsync("Patient", query, CancellationToken.None);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the revinclude search to run on Ignixa.");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            Assert.True(
+                ContainsMode(legacyResults, observationId, SearchEntryMode.Include),
+                "Legacy did not return the referencing Observation as an Include; the reference index was not seeded, so this test would be vacuous.");
+
+            Assert.True(ContainsMode(ignixaResults, patientId, SearchEntryMode.Match));
+            Assert.True(ContainsMode(ignixaResults, observationId, SearchEntryMode.Include));
+
+            var seeded = new HashSet<string>(new[] { patientId, observationId }, StringComparer.Ordinal);
+            Assert.Equal(SeededModeMap(legacyResults, seeded), SeededModeMap(ignixaResults, seeded));
+        }
+
+        /// <summary>
+        /// Upserts a resource with real search indices extracted by a real <see cref="TypedElementSearchIndexer"/>.
+        /// </summary>
+        /// <remarks>
+        /// <see cref="FhirStorageTestsFixture"/> resolves <see cref="ISearchIndexer"/> from the storage fixture and,
+        /// because the SQL fixture does not supply one, falls back to a substitute that only ever produces a
+        /// SearchParameter "url" index. Resources upserted through the mediator therefore land in dbo.Resource with
+        /// no dbo.ReferenceSearchParam rows at all, which makes every _include and _revinclude return zero included
+        /// rows on BOTH engines - so an include differential written against mediator-seeded data agrees vacuously
+        /// and would keep agreeing if the Ignixa include emitter were removed entirely.
+        ///
+        /// Seeding through this path instead writes the reference index rows, so include assertions are real. It is
+        /// deliberately scoped to this file rather than fixed by registering a real indexer on the shared fixture:
+        /// that would silently change the indexed data under every other SQL integration test in the assembly.
+        /// </remarks>
+        private async Task<string> UpsertWithSearchIndicesAsync(Resource resource)
+        {
+            ISearchIndexer indexer = await GetSearchIndexerAsync();
+
+            resource.Id ??= Guid.NewGuid().ToString();
+            resource.Meta ??= new Meta();
+            resource.Meta.LastUpdated = DateTimeOffset.UtcNow;
+
+            ResourceElement resourceElement = resource.ToResourceElement();
+            var rawResource = new RawResource(resource.ToJson(), FhirResourceFormat.Json, isMetaSet: false);
+            var wrapper = new ResourceWrapper(
+                resourceElement,
+                rawResource,
+                new ResourceRequest("PUT"),
+                deleted: false,
+                indexer.Extract(resourceElement),
+                Substitute.For<CompartmentIndices>(),
+                new List<KeyValuePair<string, string>>(),
+                _fixture.SearchParameterDefinitionManager.GetSearchParameterHashForResourceType(resource.TypeName));
+
+            await _fixture.DataStore.UpsertAsync(
+                new ResourceWrapperOperation(wrapper, true, true, null, false, false, bundleResourceContext: null),
+                CancellationToken.None);
+
+            return resource.Id;
+        }
+
+        /// <summary>
+        /// Builds the real search indexer once per process. Construction reflects over every
+        /// <see cref="ITypedElementToSearchValueConverter"/> and starts a <see cref="CodeSystemResolver"/>, which is
+        /// slow enough to matter if repeated per test, and the result is immutable, so it is cached.
+        /// </summary>
+        private async Task<ISearchIndexer> GetSearchIndexerAsync()
+        {
+            if (_searchIndexer != null)
+            {
+                return _searchIndexer;
+            }
+
+            await _searchIndexerLock.WaitAsync();
+            try
+            {
+                if (_searchIndexer == null)
+                {
+                    var types = typeof(ITypedElementToSearchValueConverter)
+                        .Assembly
+                        .GetTypes()
+                        .Where(x => typeof(ITypedElementToSearchValueConverter).IsAssignableFrom(x) && !x.IsAbstract && !x.IsInterface);
+
+                    var referenceSearchValueParser = new ReferenceSearchValueParser(
+                        new Microsoft.Health.Fhir.Core.Features.Context.FhirRequestContextAccessor(),
+                        new FhirServerInstanceConfiguration());
+                    var codeSystemResolver = new CodeSystemResolver(ModelInfoProvider.Instance);
+                    await codeSystemResolver.StartAsync(CancellationToken.None);
+
+                    var converters = new List<ITypedElementToSearchValueConverter>();
+                    foreach (Type type in types.Where(t => t.Name != nameof(FhirTypedElementToSearchValueConverterManager.ExtensionConverter)))
+                    {
+                        converters.Add((ITypedElementToSearchValueConverter)Mock.TypeWithArguments(type, referenceSearchValueParser, codeSystemResolver));
+                    }
+
+                    _searchIndexer = new TypedElementSearchIndexer(
+                        _fixture.SupportedSearchParameterDefinitionManager,
+                        new FhirTypedElementToSearchValueConverterManager(converters),
+                        Substitute.For<IReferenceToElementResolver>(),
+                        ModelInfoProvider.Instance,
+                        NullLogger<TypedElementSearchIndexer>.Instance);
+                }
+            }
+            finally
+            {
+                _searchIndexerLock.Release();
+            }
+
+            return _searchIndexer;
         }
 
         private static bool ContainsMode(SearchResult results, string resourceId, SearchEntryMode mode)
