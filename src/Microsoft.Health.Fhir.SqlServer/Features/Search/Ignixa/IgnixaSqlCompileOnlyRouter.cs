@@ -247,12 +247,20 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
             if (searchOptions.IsAsyncOperation)
             {
+                // Async operations (export/bulk) take the client _count verbatim as MaxItemCount and fold the
+                // surrogate-id predicate into the legacy parameter hash (see ResourceSurrogateIdParameterQueryGenerator).
+                // These are legacy plan-shaping and job-resumption concerns, not a compiler capability, and are not
+                // exercised by the differential suite. Keep async operations on the legacy path until that agreement
+                // can be proven.
                 _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "async-operation");
                 return false;
             }
 
             if (searchOptions.FeedRange != null)
             {
+                // FeedRange is a Cosmos physical-partition token consumed only by FhirCosmosSearchService; the SQL
+                // search service never reads it and GetFeedRanges is unimplemented for SQL, so this gate is inert on
+                // the SQL path. It is not a surrogate-id range, so it cannot be mapped to the compiler's SurrogateRange.
                 _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "feed-range");
                 return false;
             }
@@ -271,6 +279,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
             if (searchOptions.IncludesContinuationToken != null)
             {
+                // The $includes sub-operation is a dedicated second-phase paging protocol (IsIncludesOperation path,
+                // IncludesOperationRewriter, and the match surrogate-range windowing that mints IncludesContinuationToken)
+                // entangled with the legacy include machinery this change must not modify. Wiring the compiler's
+                // IncludesOnly capability would require Ignixa to reproduce that entire protocol and prove page-for-page
+                // agreement, which is out of scope here.
                 _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "includes-continuation-token");
                 return false;
             }
@@ -286,6 +299,18 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
             if (accessControlPredicateRequired)
             {
+                // SECURITY BOUNDARY - deliberately closed. Two distinct mechanisms trip this gate, and neither can be
+                // routed to Ignixa safely today:
+                //   1. Fine-grained SMART clinical scopes (AccessControlContext.ApplyFineGrainedAccessControl) are built
+                //      only as legacy server Expressions in SearchOptionsFactory.CheckFineGrainedAccessControl and added
+                //      solely to the legacy search expression tree. They are never translated into IgnixaOptions or the
+                //      compiler's AccessConstraints, so running Ignixa would apply no scope predicate at all.
+                //   2. SMART compartment access (AccessControlContext.CompartmentResourceType) is ANDed into
+                //      IgnixaOptions.Expression (the match filter) via AppendIgnixaCompartmentExpression, but is not
+                //      registered as a structural AccessConstraint. Ignixa runs _include/_revinclude as separate
+                //      row-producing stages, so a match-only predicate would leave included resources unconstrained.
+                // Opening this gate without a proven per-type AccessConstraint translation and an include-path
+                // enforcement test would be a half-wired authorization control, which is worse than none. Keep closed.
                 _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "access-control-predicate");
                 return false;
             }
