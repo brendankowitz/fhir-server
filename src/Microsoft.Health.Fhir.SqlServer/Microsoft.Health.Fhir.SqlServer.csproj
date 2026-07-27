@@ -27,6 +27,22 @@
     <PackageReference Include="System.Drawing.Common" />
   </ItemGroup>
 
+  <!--
+    Stamp the resolved Ignixa package versions into the assembly so IgnixaSqlCompilerAdapter can report
+    the versions it actually compiled against. Hardcoding them in C# let them drift silently: the
+    telemetry claimed 0.6.32 long after the branch moved to 0.6.101.
+  -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>IgnixaSearchPackageVersion</_Parameter1>
+      <_Parameter2>$(IgnixaSearchPackageVersion)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>IgnixaSearchSqlPackageVersion</_Parameter1>
+      <_Parameter2>$(IgnixaSearchSqlPackageVersion)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
   <ItemGroup>
     <EmbeddedResource Include="Features\Schema\Migrations\$(LatestSchemaVersion).sql">
       <InputToImmutableSqlGenerator>true</InputToImmutableSqlGenerator>

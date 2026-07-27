@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -24,7 +25,7 @@ using ResourceVersionType = Microsoft.Health.Fhir.Core.Features.Search.ResourceV
 namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 {
     /// <summary>
-    /// Compile-only adapter that invokes the coordinated Ignixa 0.6.32 / 0.6.32-alpha SQL compiler stages
+    /// Compile-only adapter that invokes the coordinated Ignixa SQL compiler stages
     /// (<see cref="Resolve"/>, <see cref="Lower"/>, <see cref="SqlBuilder"/>) against a <see cref="SqlSearchOptions"/>
     /// request and returns an in-memory compilation artifact.
     /// </summary>
@@ -35,9 +36,19 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
     /// </remarks>
     internal sealed class IgnixaSqlCompilerAdapter : IIgnixaSqlCompilerAdapter
     {
-        private const string SearchPackageVersionValue = "0.6.32";
-        private const string SearchSqlPackageVersionValue = "0.6.32-alpha";
-        private const string IgnixaCommitValue = "0566dcb3e436a05afcdbcd581df702c79280693f";
+        private const string UnknownVersion = "unknown";
+
+        /// <summary>
+        /// The Ignixa package versions and commit this assembly compiled against, discovered at runtime
+        /// rather than hardcoded. The versions come from assembly metadata stamped by the SqlServer project
+        /// from the resolved <c>Directory.Packages.props</c> values; the commit comes from the Ignixa
+        /// assembly's own informational version (<c>1.0.0+&lt;sha&gt;</c>). Hardcoded constants silently drifted
+        /// from the packages actually referenced, so this metadata reported a version and a commit that were
+        /// never the ones the emitted SQL came from.
+        /// </summary>
+        private static readonly string SearchPackageVersionValue = ReadStampedVersion("IgnixaSearchPackageVersion");
+        private static readonly string SearchSqlPackageVersionValue = ReadStampedVersion("IgnixaSearchSqlPackageVersion");
+        private static readonly string IgnixaCommitValue = ReadIgnixaCommit();
 
         private static readonly IReadOnlyList<IncludeExpression> EmptyIncludes = Array.Empty<IncludeExpression>();
         private static readonly IReadOnlyList<SortExpression> EmptySort = Array.Empty<SortExpression>();
@@ -284,6 +295,48 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 IgnixaCommit: IgnixaCommitValue,
                 SchemaVersion: _schemaInformation.Current,
                 PlanFingerprint: string.Empty);
+        }
+
+        /// <summary>
+        /// Reads a package version stamped into this assembly by the SqlServer project from the resolved
+        /// <c>Directory.Packages.props</c> value. Returns <c>"unknown"</c> rather than throwing when the
+        /// stamp is absent: this metadata is diagnostic, so a missing stamp must never fail a search.
+        /// </summary>
+        private static string ReadStampedVersion(string key)
+        {
+            foreach (AssemblyMetadataAttribute attribute in typeof(IgnixaSqlCompilerAdapter).Assembly
+                .GetCustomAttributes<AssemblyMetadataAttribute>())
+            {
+                if (string.Equals(attribute.Key, key, StringComparison.Ordinal)
+                    && !string.IsNullOrWhiteSpace(attribute.Value))
+                {
+                    return attribute.Value;
+                }
+            }
+
+            return UnknownVersion;
+        }
+
+        /// <summary>
+        /// Reads the Ignixa source commit from the compiler assembly's informational version, which SourceLink
+        /// renders as <c>&lt;version&gt;+&lt;sha&gt;</c>. Taking it from the assembly that actually emitted the SQL
+        /// means the recorded commit cannot disagree with the binary in the process, which is the whole point
+        /// of recording it.
+        /// </summary>
+        private static string ReadIgnixaCommit()
+        {
+            string informationalVersion = typeof(SqlBuilder).Assembly
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+
+            if (string.IsNullOrWhiteSpace(informationalVersion))
+            {
+                return UnknownVersion;
+            }
+
+            int separator = informationalVersion.IndexOf('+', StringComparison.Ordinal);
+            return separator >= 0 && separator < informationalVersion.Length - 1
+                ? informationalVersion[(separator + 1)..]
+                : UnknownVersion;
         }
 
         /// <summary>

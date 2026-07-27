@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -73,9 +74,20 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             Assert.Empty(result.UnresolvedParameters);
             Assert.NotEmpty(result.PlanFingerprint);
             Assert.Matches(Sha256HexPattern, result.PlanFingerprint);
-            Assert.Equal("0.6.32", result.SearchPackageVersion);
-            Assert.Equal("0.6.32-alpha", result.SearchSqlPackageVersion);
-            Assert.Equal("0566dcb3e436a05afcdbcd581df702c79280693f", result.IgnixaCommit);
+
+            // The version metadata is discovered from the build rather than hardcoded, so assert the
+            // invariant that cannot drift: the stamps resolved to something real, and the recorded commit
+            // is the one baked into the Ignixa assembly that actually emitted this SQL. Asserting literals
+            // here is what let the previous constants claim 0.6.32 long after the branch moved to 0.6.101.
+            Assert.NotEqual("unknown", result.SearchPackageVersion);
+            Assert.NotEqual("unknown", result.SearchSqlPackageVersion);
+
+            string ignixaInformationalVersion = typeof(global::Ignixa.Search.Sql.Builders.SqlBuilder).Assembly
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()!
+                .InformationalVersion;
+            string expectedCommit = ignixaInformationalVersion[(ignixaInformationalVersion.IndexOf('+', StringComparison.Ordinal) + 1)..];
+            Assert.Equal(expectedCommit, result.IgnixaCommit);
+
             Assert.Equal(SchemaVersionConstants.Max, result.SchemaVersion);
         }
 
