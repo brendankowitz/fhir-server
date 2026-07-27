@@ -198,9 +198,15 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
-        public async Task ObserveAsync_WhenIgnoreSearchParamHashSet_DoesNotCompile()
+        public async Task ObserveAsync_WhenIgnoreSearchParamHashSet_IsEligibleAndCompiles()
         {
+            // IgnoreSearchParamHash is read only by SearchForReindexInternalAsync, a separate search entry point
+            // that never invokes this router. On the main search path that does invoke the router the flag is
+            // inert, so legacy and Ignixa produce identical rows regardless of it. The gate is therefore removed
+            // and such a request is eligible for the Ignixa path.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
             var router = CreateRouter(adapter, EnabledConfig());
 
             SqlSearchOptions options = CreateEligibleOptions();
@@ -208,7 +214,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
 
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
 
-            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
         }
 
         [Fact]

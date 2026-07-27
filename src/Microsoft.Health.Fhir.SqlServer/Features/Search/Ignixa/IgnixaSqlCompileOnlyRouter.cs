@@ -245,12 +245,6 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return false;
             }
 
-            if (searchOptions.IgnoreSearchParamHash)
-            {
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "ignore-search-param-hash");
-                return false;
-            }
-
             if (searchOptions.IsAsyncOperation)
             {
                 _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "async-operation");

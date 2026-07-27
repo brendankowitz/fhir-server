@@ -685,6 +685,62 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             Assert.Equal(legacyVersions, ignixaVersions);
         }
 
+        [Fact]
+        public async Task GivenAnIgnoreSearchParamHashSearch_WhenExecutedOnBothEngines_ThenIgnixaTakesThePathAndAgreesWithLegacy()
+        {
+            // Step 3 removes the ignore-search-param-hash gate. The flag is consumed only by the reindex-only
+            // SearchForReindexInternalAsync entry point, never by the main search path that invokes this router,
+            // so on the router path it is inert and both engines must return identical rows. Passing the flag on
+            // a normal Patient search exercises exactly that: the request reaches the router and is now eligible.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var hashSearch = new List<Tuple<string, string>>
+            {
+                Tuple.Create(Core.Features.KnownQueryParameterNames.IgnoreSearchParamHash, "true"),
+                Tuple.Create("_count", "1000"),
+            };
+
+            long ignixaBefore = 0;
+            long legacyInstanceBefore = 0;
+            string patientId = null;
+            SearchResult ignixaResults = null;
+            SearchResult legacyResults = null;
+
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+                patient.Id = Guid.NewGuid().ToString();
+                await _fixture.Mediator.UpsertResourceAsync(patient.ToResourceElement());
+                patientId = patient.Id;
+
+                ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                ignixaResults = await ignixaSearchService.SearchAsync("Patient", hashSearch, CancellationToken.None);
+                legacyResults = await legacySearchService.SearchAsync("Patient", hashSearch, CancellationToken.None);
+
+                if (ignixaResults.Results.Any(r => string.Equals(r.Resource.ResourceId, patientId, StringComparison.Ordinal)) &&
+                    legacyResults.Results.Any(r => string.Equals(r.Resource.ResourceId, patientId, StringComparison.Ordinal)))
+                {
+                    break;
+                }
+            }
+
+            long ignixaAfter = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceAfter = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            // The Ignixa execution path ran for an ignore-search-param-hash search, not a silent legacy fallback.
+            Assert.True(
+                ignixaAfter > ignixaBefore,
+                $"Expected the Ignixa ignore-search-param-hash path to run. before={ignixaBefore} after={ignixaAfter}");
+            Assert.Equal(legacyInstanceBefore, legacyInstanceAfter);
+
+            // The inert flag left the row set unchanged: same ids in the same order as the trusted legacy path.
+            Assert.Equal(OrderedResourceIds(legacyResults), OrderedResourceIds(ignixaResults));
+        }
+
         private static bool ContainsMode(SearchResult results, string resourceId, SearchEntryMode mode)
         {
             return results.Results.Any(r =>
