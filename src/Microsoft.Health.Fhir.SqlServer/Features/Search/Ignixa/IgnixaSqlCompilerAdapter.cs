@@ -19,6 +19,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Health.SqlServer.Features.Schema;
 using IgnixaSearchOptions = Ignixa.Search.Models.SearchOptions;
 using IgnixaSearchParameterInfo = Ignixa.Search.Models.SearchParameterInfo;
+using ResourceVersionType = Microsoft.Health.Fhir.Core.Features.Search.ResourceVersionType;
 
 namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 {
@@ -149,6 +150,12 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                         // rather than the requested subset: the cross-type leaves carry no ResourceTypeId of
                         // their own, so nothing else narrows them.
                         ResourceTypes = ignixaOptions.ResourceTypes,
+
+                        // Map the server's requested resource visibility onto the compiler's relaxation-only
+                        // model. The router only routes Latest-inclusive combinations here, for which this
+                        // mapping is exact; History-only / SoftDeleted-only (which legacy renders as IsHistory=1
+                        // / IsDeleted=1, a filter ResourceVisibility cannot express) stay on the legacy path.
+                        Visibility = ToVisibility(searchOptions.ResourceVersionTypes),
                     });
             }
             catch (NotSupportedException ex)
@@ -260,6 +267,27 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 IgnixaCommit: IgnixaCommitValue,
                 SchemaVersion: _schemaInformation.Current,
                 PlanFingerprint: string.Empty);
+        }
+
+        /// <summary>
+        /// Maps the FHIR Server's <see cref="ResourceVersionType"/> onto the SQL compiler's relaxation-only
+        /// <see cref="ResourceVisibility"/>. <see cref="ResourceVersionType.Latest"/> alone returns
+        /// <see langword="null"/> rather than an explicit <see cref="ResourceVisibility.Current"/> — both leave
+        /// the plan's effective visibility at Current, so null is the smaller diff. This mapping is faithful to
+        /// the legacy generator only for Latest-inclusive combinations; the router keeps History-only and
+        /// SoftDeleted-only requests (which legacy renders as an exact IsHistory=1 / IsDeleted=1 filter that a
+        /// relaxation-only model cannot express) on the legacy path.
+        /// </summary>
+        private static ResourceVisibility ToVisibility(ResourceVersionType versionTypes)
+        {
+            if (versionTypes == ResourceVersionType.Latest)
+            {
+                return null;
+            }
+
+            return new ResourceVisibility(
+                IncludeHistory: versionTypes.HasFlag(ResourceVersionType.History),
+                IncludeDeleted: versionTypes.HasFlag(ResourceVersionType.SoftDeleted));
         }
 
         /// <summary>

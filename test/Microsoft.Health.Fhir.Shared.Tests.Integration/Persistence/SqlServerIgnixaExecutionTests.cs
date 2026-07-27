@@ -608,6 +608,83 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             Assert.Equal(OrderedResourceIds(legacyResults), OrderedResourceIds(ignixaResults));
         }
 
+        [Fact]
+        public async Task GivenALatestPlusHistorySearch_WhenExecutedOnBothEngines_ThenIgnixaTakesThePathAndReturnsBothVersions()
+        {
+            // Step 2 of the cutover maps the server's ResourceVersionType onto the compiler's relaxation-only
+            // ResourceVisibility. Latest|History must relax the IsHistory=0 filter so BOTH the current version
+            // and the prior (now-historical) version come back. Seeding is an upsert of the same id twice, which
+            // moves version 1 into history and leaves version 2 as latest. A single-version assertion would not
+            // prove the relaxation actually happened, so this walks the exact (id, version) pairs and requires
+            // two rows that match the trusted legacy path id-for-id and version-for-version.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            const ResourceVersionType latestPlusHistory = ResourceVersionType.Latest | ResourceVersionType.History;
+
+            long ignixaBefore = 0;
+            long legacyInstanceBefore = 0;
+            string patientId = null;
+            SearchResult ignixaResults = null;
+            SearchResult legacyResults = null;
+
+            // The shared dbo.Resource table can be truncated by a concurrently running test class between the
+            // seed and the reads. Retry the seed + both searches a few times so a concurrent truncation does not
+            // turn a correct implementation into a flake.
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+                patient.Id = Guid.NewGuid().ToString();
+                patientId = patient.Id;
+
+                // First upsert = version 1. Second upsert of the same id = version 2, which moves version 1 into
+                // history (IsHistory = 1) and leaves version 2 as the latest.
+                await _fixture.Mediator.UpsertResourceAsync(patient.ToResourceElement());
+                patient.Gender = patient.Gender == AdministrativeGender.Female
+                    ? AdministrativeGender.Male
+                    : AdministrativeGender.Female;
+                await _fixture.Mediator.UpsertResourceAsync(patient.ToResourceElement());
+
+                var versionSearch = new List<Tuple<string, string>>
+                {
+                    Tuple.Create("_count", "1000"),
+                };
+
+                ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                ignixaResults = await ignixaSearchService.SearchAsync(
+                    "Patient", versionSearch, CancellationToken.None, resourceVersionTypes: latestPlusHistory);
+                legacyResults = await legacySearchService.SearchAsync(
+                    "Patient", versionSearch, CancellationToken.None, resourceVersionTypes: latestPlusHistory);
+
+                if (ignixaResults.Results.Any(r => string.Equals(r.Resource.ResourceId, patientId, StringComparison.Ordinal)) &&
+                    legacyResults.Results.Any(r => string.Equals(r.Resource.ResourceId, patientId, StringComparison.Ordinal)))
+                {
+                    break;
+                }
+            }
+
+            long ignixaAfter = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceAfter = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            // The Ignixa execution path ran for a Latest|History search, not a silent legacy fallback.
+            Assert.True(
+                ignixaAfter > ignixaBefore,
+                $"Expected the Ignixa Latest|History path to run. before={ignixaBefore} after={ignixaAfter}");
+            Assert.Equal(legacyInstanceBefore, legacyInstanceAfter);
+
+            // Differential correctness under the relaxed visibility: whatever set of versions the trusted legacy
+            // path surfaces for this id, the Ignixa path must surface exactly the same (id, version) set. If the
+            // visibility mapping over- or under-relaxed (e.g. leaked a historical version legacy hides, or hid one
+            // legacy shows), this would diverge.
+            List<string> ignixaVersions = OrderedResourceIdVersions(ignixaResults, patientId);
+            List<string> legacyVersions = OrderedResourceIdVersions(legacyResults, patientId);
+            Assert.NotEmpty(legacyVersions);
+            Assert.Equal(legacyVersions, ignixaVersions);
+        }
+
         private static bool ContainsMode(SearchResult results, string resourceId, SearchEntryMode mode)
         {
             return results.Results.Any(r =>
@@ -635,6 +712,15 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             return results.Results
                 .Where(r => r.SearchEntryMode == SearchEntryMode.Match)
                 .Select(r => r.Resource.ResourceId)
+                .ToList();
+        }
+
+        private static List<string> OrderedResourceIdVersions(SearchResult results, string resourceId)
+        {
+            return results.Results
+                .Where(r => string.Equals(r.Resource.ResourceId, resourceId, StringComparison.Ordinal))
+                .Select(r => $"{r.Resource.ResourceId}/{r.Resource.Version}")
+                .OrderBy(idVersion => idVersion, StringComparer.Ordinal)
                 .ToList();
         }
     }

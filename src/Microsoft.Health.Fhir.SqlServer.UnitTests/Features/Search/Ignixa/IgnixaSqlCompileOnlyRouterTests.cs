@@ -66,22 +66,40 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         // ---------------------------------------------------------------------------
 
         /// <summary>
-        /// Raw <see cref="ResourceVersionType"/> integer values that are NOT exclusively
-        /// <see cref="ResourceVersionType.Latest"/> (= 1). The router must skip all of them.
+        /// Raw <see cref="ResourceVersionType"/> integer values that do NOT include
+        /// <see cref="ResourceVersionType.Latest"/> (= 1). Legacy renders these as an exact IsHistory=1 /
+        /// IsDeleted=1 filter that the compiler's relaxation-only visibility model cannot express, so the
+        /// router must skip all of them.
         /// <list type="bullet">
         ///   <item>2  = History</item>
         ///   <item>4  = SoftDeleted</item>
-        ///   <item>3  = Latest | History</item>
-        ///   <item>5  = Latest | SoftDeleted</item>
-        ///   <item>7  = Latest | History | SoftDeleted</item>
+        ///   <item>6  = History | SoftDeleted</item>
         /// </list>
         /// </summary>
-        public static IEnumerable<object[]> GetNonLatestOnlyVersionTypes()
+        public static IEnumerable<object[]> GetNonLatestVersionTypes()
         {
             return new[]
             {
                 new object[] { 2 }, // ResourceVersionType.History
                 new object[] { 4 }, // ResourceVersionType.SoftDeleted
+                new object[] { 6 }, // History | SoftDeleted
+            };
+        }
+
+        /// <summary>
+        /// Raw <see cref="ResourceVersionType"/> integer values that include
+        /// <see cref="ResourceVersionType.Latest"/> (= 1). These map faithfully onto the compiler's
+        /// <see cref="Ignixa.Search.Sql.Ast.ResourceVisibility"/>, so the router routes them to Ignixa.
+        /// <list type="bullet">
+        ///   <item>3  = Latest | History</item>
+        ///   <item>5  = Latest | SoftDeleted</item>
+        ///   <item>7  = Latest | History | SoftDeleted</item>
+        /// </list>
+        /// </summary>
+        public static IEnumerable<object[]> GetLatestInclusiveVersionTypes()
+        {
+            return new[]
+            {
                 new object[] { 3 }, // Latest | History
                 new object[] { 5 }, // Latest | SoftDeleted
                 new object[] { 7 }, // Latest | History | SoftDeleted
@@ -89,8 +107,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Theory]
-        [MemberData(nameof(GetNonLatestOnlyVersionTypes))]
-        public async Task ObserveAsync_WhenResourceVersionTypeIsNotLatestOnly_DoesNotCompile(int rawVersionType)
+        [MemberData(nameof(GetNonLatestVersionTypes))]
+        public async Task ObserveAsync_WhenResourceVersionTypeExcludesLatest_DoesNotCompile(int rawVersionType)
         {
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
             var router = CreateRouter(adapter, EnabledConfig());
@@ -101,6 +119,23 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
 
             await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+        }
+
+        [Theory]
+        [MemberData(nameof(GetLatestInclusiveVersionTypes))]
+        public async Task ObserveAsync_WhenResourceVersionTypeIncludesLatest_IsEligibleAndCompiles(int rawVersionType)
+        {
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.ResourceVersionTypes = (ResourceVersionType)rawVersionType;
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
         }
 
         // ---------------------------------------------------------------------------

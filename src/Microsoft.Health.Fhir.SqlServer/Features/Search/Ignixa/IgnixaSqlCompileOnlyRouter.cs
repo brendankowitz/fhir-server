@@ -236,8 +236,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return false;
             }
 
-            if (searchOptions.ResourceVersionTypes != ResourceVersionType.Latest)
+            if (!searchOptions.ResourceVersionTypes.HasFlag(ResourceVersionType.Latest))
             {
+                // History-only and SoftDeleted-only requests render in legacy as an exact IsHistory=1 /
+                // IsDeleted=1 filter, which the compiler's relaxation-only ResourceVisibility cannot express.
+                // Only Latest-inclusive combinations map faithfully, so keep the rest on the legacy path.
                 _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "non-latest-version-type");
                 return false;
             }
