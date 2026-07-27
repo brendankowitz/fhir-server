@@ -634,51 +634,17 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                                 ignixaRequestContext?.AccessControlContext?.ApplyFineGrainedAccessControl == true
                                 || !string.IsNullOrWhiteSpace(ignixaRequestContext?.AccessControlContext?.CompartmentResourceType);
 
-                            // The legacy generator is always run so query-hash telemetry and the custom
-                            // stored-procedure layer keep functioning during the Ignixa cutover. Its emitted
-                            // text is used verbatim unless the Ignixa execution path claims the query below.
-                            var stringBuilder = new IndentedStringBuilder(new StringBuilder());
+                            // Ignixa is tried first. The legacy generator only runs when Ignixa declines the
+                            // query, so an adopted search no longer pays to build SQL twice -- which also means
+                            // deleting the legacy generator later is a matter of removing the fallback rather
+                            // than untangling a per-query dependency on it.
+                            IgnixaSqlExecutionPlan ignixaPlan = await _ignixaSqlCompileOnlyRouter.TryCreateExecutionPlanAsync(
+                                clonedSearchOptions,
+                                accessControlPredicateRequired,
+                                cancellationToken);
 
-                            EnableTimeAndIoMessageLogging(stringBuilder, connection);
-
-                            var queryGenerator = new SqlQueryGenerator(
-                                stringBuilder,
-                                new HashingSqlQueryParameterManager(new SqlQueryParameterManager(sqlCommand.Parameters)),
-                                _model,
-                                _schemaInformation,
-                                _queryGeneratorFactory,
-                                reuseQueryPlans && _queryPlanReuseChecker.CanReuseQueryPlan(clonedSearchOptions),
-                                sqlSearchOptions.IsAsyncOperation,
-                                sqlException);
-
-                            expression.AcceptVisitor(queryGenerator, clonedSearchOptions);
-                            isSortValueNeeded = queryGenerator.IsSortValueNeeded(clonedSearchOptions);
-
-                            SqlCommandSimplifier.RemoveRedundantParameters(stringBuilder, sqlCommand.Parameters, _logger);
-
-                            var queryText = stringBuilder.ToString();
-                            var queryHash = _queryHashCalculator.CalculateHash(queryText);
-                            _logger.LogInformation("SQL Search Service query hash: {QueryHash}", queryHash);
-                            var customQuery = CustomQueries.CheckQueryHash(connection, queryHash, _logger);
-
-                            if (!string.IsNullOrEmpty(customQuery))
-                            {
-                                _logger.LogInformation("SQL Search Service, custom Query identified by hash {QueryHash}, {CustomQuery}", queryHash, customQuery);
-                                queryText = customQuery;
-                                sqlCommand.CommandType = CommandType.StoredProcedure;
-                            }
-
-                            // A custom stored procedure takes precedence over Ignixa so the legacy custom-query
-                            // optimization keeps working.
-                            IgnixaSqlExecutionPlan ignixaPlan = null;
-                            bool ignixaCustomQueryEmpty = string.IsNullOrEmpty(customQuery);
-                            if (ignixaCustomQueryEmpty)
-                            {
-                                ignixaPlan = await _ignixaSqlCompileOnlyRouter.TryCreateExecutionPlanAsync(
-                                    clonedSearchOptions,
-                                    accessControlPredicateRequired,
-                                    cancellationToken);
-                            }
+                            string queryText;
+                            string customQuery;
 
                             if (ignixaPlan != null)
                             {
@@ -686,21 +652,14 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                                 ignixaHasIncludes = ignixaPlan.HasIncludes;
 
                                 // Ignixa emits its own parameterized SQL and does not project the named sort
-                                // column the legacy reader reads, so discard the legacy parameters/sort flag and
-                                // bind Ignixa's parameters instead.
+                                // column the legacy reader reads, so no legacy parameters or sort flag apply.
                                 isSortValueNeeded = false;
-                                sqlCommand.CommandType = CommandType.Text;
-                                sqlCommand.Parameters.Clear();
+                                queryText = ignixaPlan.EmittedSql.Sql;
 
                                 foreach (EmittedSqlParameter ignixaParameter in ignixaPlan.EmittedSql.Parameters)
                                 {
                                     sqlCommand.Parameters.AddWithValue(ignixaParameter.Name, ignixaParameter.Value ?? DBNull.Value);
                                 }
-
-                                // Command text is Ignixa-emitted parameterized SQL; user values are bound as parameters above.
-#pragma warning disable CA2100 // Review SQL queries for security vulnerabilities
-                                sqlCommand.CommandText = ignixaPlan.EmittedSql.Sql;
-#pragma warning restore CA2100 // Review SQL queries for security vulnerabilities
 
                                 Interlocked.Increment(ref _instanceIgnixaExecutedQueryCount);
                                 _logger.LogInformation(
@@ -712,13 +671,50 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                             {
                                 Interlocked.Increment(ref _instanceLegacyExecutedQueryCount);
 
-                                // Command text contains no direct user input.
-#pragma warning disable CA2100 // Review SQL queries for security vulnerabilities
-                                sqlCommand.CommandText = queryText;
-#pragma warning restore CA2100 // Review SQL queries for security vulnerabilities
+                                var stringBuilder = new IndentedStringBuilder(new StringBuilder());
 
+                                EnableTimeAndIoMessageLogging(stringBuilder, connection);
+
+                                var queryGenerator = new SqlQueryGenerator(
+                                    stringBuilder,
+                                    new HashingSqlQueryParameterManager(new SqlQueryParameterManager(sqlCommand.Parameters)),
+                                    _model,
+                                    _schemaInformation,
+                                    _queryGeneratorFactory,
+                                    reuseQueryPlans && _queryPlanReuseChecker.CanReuseQueryPlan(clonedSearchOptions),
+                                    sqlSearchOptions.IsAsyncOperation,
+                                    sqlException);
+
+                                expression.AcceptVisitor(queryGenerator, clonedSearchOptions);
+                                isSortValueNeeded = queryGenerator.IsSortValueNeeded(clonedSearchOptions);
+
+                                SqlCommandSimplifier.RemoveRedundantParameters(stringBuilder, sqlCommand.Parameters, _logger);
+
+                                queryText = stringBuilder.ToString();
                                 _logger.LogInformation($"Query.SearchParamIds={string.Join(",", queryGenerator.SearchParamIds)}");
                             }
+
+                            // The custom stored-procedure escape hatch keys off a hash of whatever SQL was just
+                            // built, so it now follows the engine that built it. An operator's CustomQuery_<hash>
+                            // sproc registered against legacy text will not match Ignixa text for the same
+                            // search; re-registering against the new hash is the documented migration, and is
+                            // unavoidable because the feature identifies a query by the exact SQL it replaces.
+                            var queryHash = _queryHashCalculator.CalculateHash(queryText);
+                            _logger.LogInformation("SQL Search Service query hash: {QueryHash}", queryHash);
+                            customQuery = CustomQueries.CheckQueryHash(connection, queryHash, _logger);
+
+                            if (!string.IsNullOrEmpty(customQuery))
+                            {
+                                _logger.LogInformation("SQL Search Service, custom Query identified by hash {QueryHash}, {CustomQuery}", queryHash, customQuery);
+                                queryText = customQuery;
+                                sqlCommand.CommandType = CommandType.StoredProcedure;
+                            }
+
+                            // Command text is either Ignixa-emitted parameterized SQL, legacy-generated SQL with
+                            // no direct user input, or a stored-procedure name from sys.objects.
+#pragma warning disable CA2100 // Review SQL queries for security vulnerabilities
+                            sqlCommand.CommandText = queryText;
+#pragma warning restore CA2100 // Review SQL queries for security vulnerabilities
                         }
 
                         LogSqlCommand(sqlCommand);
