@@ -934,11 +934,13 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
-        public async Task TryCreateExecutionPlanAsync_WhenIterateInclude_FallsBackToLegacy()
+        public async Task TryCreateExecutionPlanAsync_WhenIterateInclude_ProducesAnIncludeCarryingPlan()
         {
             // Arrange: start from a genuine compiled plain include, then flip its single stage to Iterate=true.
-            // Ignixa resolves :iterate as a single topological pass rather than legacy's fixed-point iteration,
-            // so the router must decline and fall back to legacy.
+            // Ignixa resolves :iterate as a single topological pass rather than legacy's fixed-point iteration.
+            // The router used to decline for that reason; the closure the two produce is now proven equal by the
+            // iterate-include differential in SqlServerIgnixaExecutionTests, so the stage is accepted and must
+            // still be flagged as carrying includes for the reader's row shape.
             IgnixaSqlCompilationOutcome mutated = MutateSingleIncludeStage(
                 await CompilePlainIncludeOutcomeAsync(),
                 stage => stage with { Iterate = true });
@@ -951,15 +953,17 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             IgnixaSqlExecutionPlan plan = await router.TryCreateExecutionPlanAsync(CreateEligibleIncludeOptions(), accessControlPredicateRequired: false, CancellationToken.None);
 
             // Assert
-            Assert.Null(plan);
+            Assert.NotNull(plan);
+            Assert.True(plan.HasIncludes);
         }
 
         [Fact]
-        public async Task TryCreateExecutionPlanAsync_WhenWildcardInclude_FallsBackToLegacy()
+        public async Task TryCreateExecutionPlanAsync_WhenWildcardInclude_ProducesAnIncludeCarryingPlan()
         {
             // Arrange: start from a genuine compiled plain include, then flip its single stage to a wildcard
-            // (ReferenceSearchParamId == null). A wildcard include lowers to a reference-parameter-less join
-            // whose row set has not been validated against legacy, so the router must decline.
+            // (ReferenceSearchParamId == null), which lowers to a reference-parameter-less join. Previously
+            // declined as unvalidated; the wildcard-include differential in SqlServerIgnixaExecutionTests now
+            // compares that row set against legacy, so the router accepts it.
             IgnixaSqlCompilationOutcome mutated = MutateSingleIncludeStage(
                 await CompilePlainIncludeOutcomeAsync(),
                 stage => stage with { ReferenceSearchParamId = null });
@@ -972,7 +976,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             IgnixaSqlExecutionPlan plan = await router.TryCreateExecutionPlanAsync(CreateEligibleIncludeOptions(), accessControlPredicateRequired: false, CancellationToken.None);
 
             // Assert
-            Assert.Null(plan);
+            Assert.NotNull(plan);
+            Assert.True(plan.HasIncludes);
         }
 
         // ---------------------------------------------------------------------------

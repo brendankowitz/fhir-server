@@ -157,31 +157,13 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             // COUNT_BIG(*) OVER() > Limit, which SearchImpl surfaces as the same partial-result signal legacy
             // raises. IgnixaResourceReader reads IsMatch/IsPartial at ordinals 2/3 when HasIncludes is set.
             //
-            // Two sub-cases remain guarded because their emitted semantics have not been validated against the
-            // legacy generator in this pass:
-            //   * Wildcard includes (ReferenceSearchParamId == null, e.g. "_include=*") lower to a
-            //     reference-parameter-less join whose row set has not been compared to legacy.
-            //   * :iterate includes (Iterate == true) resolve through a single topological pass in Lower rather
-            //     than legacy's fixed-point iteration, so the produced closure can diverge.
-            // A plan that carries any such stage falls back to legacy.
+            // Plain, wildcard, and :iterate include stages are all allowed onto the Ignixa path. Wildcard
+            // ("_include=*") lowers to a reference-parameter-less join and :iterate resolves its closure in a
+            // single topological pass in Lower rather than legacy's fixed-point iteration; both were previously
+            // guarded because that emitted row set had not been compared to legacy. It now is - see the
+            // wildcard-include and iterate-include differentials in SqlServerIgnixaExecutionTests, which seed real
+            // dbo.ReferenceSearchParam rows and assert the full seeded (id -> match/include) map matches legacy.
             bool hasIncludes = (plan.Includes?.Count ?? 0) > 0;
-            if (hasIncludes)
-            {
-                foreach (IncludeStage stage in plan.Includes)
-                {
-                    if (stage.Iterate)
-                    {
-                        _logger.LogDebug("Falling back to legacy SQL: Ignixa plan carries an iterate include. Reason={Reason}", "include-iterate");
-                        return null;
-                    }
-
-                    if (stage.ReferenceSearchParamId == null)
-                    {
-                        _logger.LogDebug("Falling back to legacy SQL: Ignixa plan carries a wildcard include. Reason={Reason}", "include-wildcard");
-                        return null;
-                    }
-                }
-            }
 
             // Materialisation guard for the sort phases legacy handles specially. When the sort parameter is
             // also a filter (IsSortWithFilter) legacy skips the missing-values phase and searches valued rows

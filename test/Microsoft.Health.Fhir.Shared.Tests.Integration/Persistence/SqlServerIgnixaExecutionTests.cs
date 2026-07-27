@@ -1067,6 +1067,115 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             Assert.Equal(SeededModeMap(legacyResults, seeded), SeededModeMap(ignixaResults, seeded));
         }
 
+        [Fact]
+        public async Task GivenAWildcardInclude_WhenExecutedOnBothEngines_ThenIgnixaMaterialisesTheSameIncludedRowsAsLegacy()
+        {
+            // "_include=*" lowers to a reference-parameter-less join in Ignixa. The row set that produces had never
+            // been compared against legacy, which is why the router refused it; this is that comparison.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var organization = new Organization { Id = Guid.NewGuid().ToString(), Name = $"IgnixaWildcard_{Guid.NewGuid()}" };
+            string organizationId = await UpsertWithSearchIndicesAsync(organization);
+
+            var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            patient.Id = Guid.NewGuid().ToString();
+            patient.ManagingOrganization = new ResourceReference($"Organization/{organizationId}");
+            string patientId = await UpsertWithSearchIndicesAsync(patient);
+
+            var observation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept { Text = $"IgnixaWildcardInclude_{Guid.NewGuid()}" },
+                Subject = new ResourceReference($"Patient/{patientId}"),
+            };
+            string observationId = await UpsertWithSearchIndicesAsync(observation);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", observationId),
+                Tuple.Create("_include", "*"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+            SearchResult legacyResults = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the wildcard include search to run on Ignixa.");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            Assert.True(
+                ContainsMode(legacyResults, patientId, SearchEntryMode.Include),
+                "Legacy did not return the referenced Patient as an Include; the reference index was not seeded, so this test would be vacuous.");
+
+            var seeded = new HashSet<string>(new[] { organizationId, patientId, observationId }, StringComparer.Ordinal);
+            Assert.Equal(SeededModeMap(legacyResults, seeded), SeededModeMap(ignixaResults, seeded));
+        }
+
+        [Fact]
+        public async Task GivenAnIterateInclude_WhenExecutedOnBothEngines_ThenIgnixaMaterialisesTheSameClosureAsLegacy()
+        {
+            // ":iterate" is where Ignixa and legacy differ structurally: legacy runs a fixed-point iteration,
+            // Ignixa resolves the closure in a single topological pass in Lower. The two only agree if the closure
+            // they compute is the same, so the seed is a genuine two-hop chain
+            // (Observation -> Patient -> Organization) and the assertion is on the full seeded mode map: a missing
+            // second hop, or an Organization mislabelled as a match, both fail here.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var organization = new Organization { Id = Guid.NewGuid().ToString(), Name = $"IgnixaIterate_{Guid.NewGuid()}" };
+            string organizationId = await UpsertWithSearchIndicesAsync(organization);
+
+            var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            patient.Id = Guid.NewGuid().ToString();
+            patient.ManagingOrganization = new ResourceReference($"Organization/{organizationId}");
+            string patientId = await UpsertWithSearchIndicesAsync(patient);
+
+            var observation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept { Text = $"IgnixaIterateInclude_{Guid.NewGuid()}" },
+                Subject = new ResourceReference($"Patient/{patientId}"),
+            };
+            string observationId = await UpsertWithSearchIndicesAsync(observation);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", observationId),
+                Tuple.Create("_include", "Observation:subject"),
+                Tuple.Create("_include:iterate", "Patient:organization"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+            SearchResult legacyResults = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the iterate include search to run on Ignixa.");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            // The second hop is the whole point of the test - if legacy itself does not reach the Organization
+            // there is no closure to compare and the mode-map assertion below would be satisfied by an
+            // implementation that never iterates at all.
+            Assert.True(
+                ContainsMode(legacyResults, organizationId, SearchEntryMode.Include),
+                "Legacy did not reach the Organization through :iterate; this test would not be testing iteration.");
+
+            var seeded = new HashSet<string>(new[] { organizationId, patientId, observationId }, StringComparer.Ordinal);
+            Assert.Equal(SeededModeMap(legacyResults, seeded), SeededModeMap(ignixaResults, seeded));
+        }
+
         /// <summary>
         /// Upserts a resource with real search indices extracted by a real <see cref="TypedElementSearchIndexer"/>.
         /// </summary>
