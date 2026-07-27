@@ -126,6 +126,23 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return CapabilityFailure("resolve", "unresolved-symbol", resolved.Unresolved);
             }
 
+            // Keyset pagination. A continuation token that reaches Ignixa was ANDed into the legacy
+            // expression tree only, never into ignixaOptions.Expression (which SearchOptionsFactory built
+            // before that AND-in), so without an explicit PageSpec the Ignixa plan would re-return page one.
+            // The token is translated into a PageSpec here so the compiler emits the same forward keyset seek
+            // the legacy path applies. Only the default surrogate-id keyset (no custom _sort, composite
+            // (ResourceTypeId, ResourceSurrogateId) boundary, no carried sort value) is wired; anything else
+            // yields a capability failure and stays on the legacy path.
+            PageSpec page = null;
+            if (!string.IsNullOrWhiteSpace(searchOptions.ContinuationToken))
+            {
+                IgnixaSqlCompilationOutcome pageFailure = TryBuildSurrogateKeysetPage(searchOptions, requestedSort, out page);
+                if (pageFailure != null)
+                {
+                    return pageFailure;
+                }
+            }
+
             LoweredPlan lowered;
             try
             {
@@ -139,7 +156,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                     ignixaOptions.IncludesMaxItemCount ?? searchOptions.IncludeCount,
                     requestedSort,
                     sortPhase,
-                    page: null,
+                    page: page,
                     new LowerOptions
                     {
                         CountOnly = searchOptions.CountOnly,
@@ -267,6 +284,64 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 IgnixaCommit: IgnixaCommitValue,
                 SchemaVersion: _schemaInformation.Current,
                 PlanFingerprint: string.Empty);
+        }
+
+        /// <summary>
+        /// Translates the FHIR Server continuation token into the compiler's keyset <see cref="PageSpec"/>,
+        /// but only for the default surrogate-id order this pass wires: no custom <c>_sort</c>, and a token
+        /// carrying a composite (ResourceTypeId, ResourceSurrogateId) boundary with no captured sort value.
+        /// Returns <see langword="null"/> and sets <paramref name="page"/> on success; otherwise returns a
+        /// capability failure and leaves <paramref name="page"/> null so the caller falls back to legacy.
+        /// </summary>
+        /// <remarks>
+        /// The boundary carries no per-key sort values (empty <see cref="PageSpec.Boundary"/>), so the
+        /// emitter's ISNULL/sentinel substitution never applies here; it is required only for custom-sort
+        /// keys, which this method deliberately refuses. The (ResourceTypeId, ResourceSurrogateId) pair renders
+        /// as bound parameters and drives the forward tuple seek <c>(m.T1, m.Sid1) &gt; (@type, @sid)</c>, the
+        /// exact composite the legacy path applies as a GreaterThan on the partitioned primary key.
+        /// </remarks>
+        private IgnixaSqlCompilationOutcome TryBuildSurrogateKeysetPage(
+            SqlSearchOptions searchOptions,
+            IReadOnlyList<SortExpression> requestedSort,
+            out PageSpec page)
+        {
+            page = null;
+
+            // A user _sort — including _lastUpdated or _type — drives a keyed boundary whose per-key value
+            // would need Emit's ISNULL/sentinel substitution to compare equal to a live column. This pass does
+            // not reproduce that, so any custom sort stays on the legacy path.
+            if (requestedSort.Count > 0)
+            {
+                return CapabilityFailure("page", "continuation-token-custom-sort", EmptyUnresolvedParameters);
+            }
+
+            ContinuationToken token = ContinuationToken.FromString(searchOptions.ContinuationToken);
+            if (token == null)
+            {
+                return CapabilityFailure("page", "continuation-token-unparseable", EmptyUnresolvedParameters);
+            }
+
+            // A carried sort value means the token was minted for a custom sort; the surrogate-only keyset
+            // cannot honour it, and the router should not have routed it here.
+            if (!string.IsNullOrEmpty(token.SortValue))
+            {
+                return CapabilityFailure("page", "continuation-token-sort-value", EmptyUnresolvedParameters);
+            }
+
+            // The composite seek needs a ResourceTypeId boundary. A token without one (legacy tokens, or a
+            // pre-PartitionedTables schema) is handled by the legacy path as a bare ResourceSurrogateId
+            // comparison, which this composite PageSpec does not reproduce.
+            if (token.ResourceTypeId == null)
+            {
+                return CapabilityFailure("page", "continuation-token-no-type", EmptyUnresolvedParameters);
+            }
+
+            page = new PageSpec(
+                Array.Empty<SqlParameterRef>(),
+                new SqlParameterRef(token.ResourceTypeId.Value),
+                new SqlParameterRef(token.ResourceSurrogateId));
+
+            return null;
         }
 
         /// <summary>

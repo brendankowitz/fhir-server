@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -739,6 +740,126 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
 
             // The inert flag left the row set unchanged: same ids in the same order as the trusted legacy path.
             Assert.Equal(OrderedResourceIds(legacyResults), OrderedResourceIds(ignixaResults));
+        }
+
+        [Fact]
+        public async Task GivenAMatchAllSearch_WhenPagedAcrossBoundaries_ThenIgnixaKeysetPagingAgreesWithLegacy()
+        {
+            // Step 4 wires the continuation token into the Ignixa plan as a keyset PageSpec. Without it the Ignixa
+            // plan would ignore the token and re-return page one - and a single-page assertion could never see
+            // that. This walks several small pages on both engines and compares the *concatenated* match
+            // sequence, which is the only shape that catches a repeated page (a duplicate id) or a skipped page
+            // (a missing id).
+            //
+            // Ascending surrogate-id order makes the *front* of a match-all result stable under concurrent
+            // inserts by other test classes: new rows always take higher surrogate ids and append at the end, so
+            // the first few pages do not move. Seeding more rows than the walk reads keeps the walk inside that
+            // stable prefix. Concurrent truncation wipes the prefix instead; that is the one hazard, so the whole
+            // seed + walk + compare is retried, exactly like the other tests in this class.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            const int pageSize = 2;
+            const int maxPages = 4;
+
+            long ignixaBefore = 0;
+            long legacyInstanceBefore = 0;
+            long ignixaAfter = 0;
+            long legacyInstanceAfter = 0;
+            List<string> ignixaWalk = null;
+            List<string> legacyWalk = null;
+            int ignixaPages = 0;
+
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                // Seed more patients than the walk reads (pageSize * maxPages = 8) so the walk never reaches the
+                // end of the table and stays entirely inside the concurrency-stable prefix.
+                for (int i = 0; i < 10; i++)
+                {
+                    var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+                    patient.Id = Guid.NewGuid().ToString();
+                    await _fixture.Mediator.UpsertResourceAsync(patient.ToResourceElement());
+                }
+
+                ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                (ignixaWalk, ignixaPages) = await WalkMatchAllPagesAsync(ignixaSearchService, pageSize, maxPages, CancellationToken.None);
+
+                ignixaAfter = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                legacyInstanceAfter = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                (legacyWalk, _) = await WalkMatchAllPagesAsync(legacySearchService, pageSize, maxPages, CancellationToken.None);
+
+                // A clean run walked at least two pages and both engines returned the same front sequence. If a
+                // concurrent truncation disturbed the prefix between the two walks, retry.
+                if (ignixaPages >= 2 && ignixaWalk.SequenceEqual(legacyWalk, StringComparer.Ordinal))
+                {
+                    break;
+                }
+            }
+
+            _output.WriteLine($"ignixaPages={ignixaPages} ignixa=[{string.Join(",", ignixaWalk)}]");
+            _output.WriteLine($"legacy=[{string.Join(",", legacyWalk)}]");
+
+            // Multi-page: the walk actually crossed at least one page boundary, so the continuation token was
+            // exercised rather than a single page trivially matching.
+            Assert.True(ignixaPages >= 2, $"Expected the Ignixa walk to span at least two pages, got {ignixaPages}.");
+
+            // Counter evidence: every Ignixa page ran the Ignixa execution path - the first page (no token) and
+            // each subsequent page (surrogate-keyset continuation token). A silent legacy fallback on any page
+            // would leave the Ignixa counter short of the page count and move the legacy counter instead.
+            Assert.Equal(ignixaPages, ignixaAfter - ignixaBefore);
+            Assert.Equal(legacyInstanceBefore, legacyInstanceAfter);
+
+            // No duplicate: no id appears twice across the paged walk, so no page was repeated - the exact
+            // failure a token that resets to page one would produce.
+            Assert.Equal(ignixaWalk.Count, ignixaWalk.Distinct(StringComparer.Ordinal).Count());
+
+            // No gap and correct order: the concatenated Ignixa page sequence equals the trusted legacy walk over
+            // the same window, so nothing was skipped and the keyset boundary landed exactly where legacy's did.
+            Assert.Equal(legacyWalk, ignixaWalk);
+        }
+
+        private static async Task<(List<string> Ids, int Pages)> WalkMatchAllPagesAsync(
+            ISearchService service,
+            int pageSize,
+            int maxPages,
+            CancellationToken cancellationToken)
+        {
+            var ids = new List<string>();
+            string continuation = null;
+            int pages = 0;
+
+            while (pages < maxPages)
+            {
+                var query = new List<Tuple<string, string>>
+                {
+                    Tuple.Create("_count", pageSize.ToString(CultureInfo.InvariantCulture)),
+                };
+
+                if (continuation != null)
+                {
+                    // Feed the previous page's token back the way the REST layer does: re-encoded under the "ct"
+                    // query parameter, which SearchOptionsFactory decodes back into SqlSearchOptions.ContinuationToken.
+                    query.Add(Tuple.Create(
+                        Core.Features.KnownQueryParameterNames.ContinuationToken,
+                        ContinuationTokenEncoder.Encode(continuation)));
+                }
+
+                SearchResult page = await service.SearchAsync("Patient", query, cancellationToken);
+                pages++;
+                ids.AddRange(ResourceIdsInResultOrder(page));
+
+                continuation = page.ContinuationToken;
+                if (string.IsNullOrEmpty(continuation))
+                {
+                    break;
+                }
+            }
+
+            return (ids, pages);
         }
 
         private static bool ContainsMode(SearchResult results, string resourceId, SearchEntryMode mode)

@@ -143,6 +143,51 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
+        public async Task CompileAsync_WhenSurrogateKeysetContinuationTokenSet_EmitsForwardSeekAndBindsBoundary()
+        {
+            // Arrange: a default-order continuation token (no custom _sort) decodes to a composite
+            // (ResourceTypeId=1 Patient, ResourceSurrogateId=5000) boundary with no sort value.
+            var model = CreateResolvableModel();
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+            SqlSearchOptions options = CreateOptions(ignixaOptions => ignixaOptions.Expression = null);
+            options.ContinuationToken = "[1,5000]";
+
+            // Act
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            // Assert: the plan emits the forward composite keyset seek (T1, Sid1) > (@type, @sid) -- the exact
+            // shape the legacy path applies as a GreaterThan on the partitioned primary key. Without this the
+            // Ignixa plan would ignore the token and re-return page one.
+            Assert.True(result.Compiled);
+            Assert.NotNull(result.EmittedSql);
+            Assert.Contains("Sid1 >", result.EmittedSql!.Sql, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("T1 >", result.EmittedSql.Sql, StringComparison.OrdinalIgnoreCase);
+
+            // The boundary renders as bound parameters (never inlined), carrying the decoded type and surrogate id.
+            Assert.Contains(result.EmittedSql.Parameters, p => p.Value is short s && s == 1);
+            Assert.Contains(result.EmittedSql.Parameters, p => p.Value is long l && l == 5000L);
+        }
+
+        [Fact]
+        public async Task CompileAsync_WhenCustomSortContinuationTokenSet_ReturnsPageCapabilityFailure()
+        {
+            // Arrange: a token that carries a sort value was minted for a custom sort. The surrogate-only keyset
+            // cannot honour it, so the adapter declines rather than silently paging on the wrong boundary.
+            var model = CreateResolvableModel();
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+            SqlSearchOptions options = CreateOptions(ignixaOptions => ignixaOptions.Expression = null);
+            options.ContinuationToken = "[\"2021-01-01T00:00:00.0000000\",1,5000]";
+
+            // Act
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            // Assert
+            Assert.False(result.Compiled);
+            Assert.Equal("page", result.FailureStage);
+            Assert.Equal("continuation-token-sort-value", result.FailureKind);
+        }
+
+        [Fact]
         public async Task CompileAsync_WhenCountOnlySearchIsRequested_DoesNotProjectResourceColumns()
         {
             // Arrange

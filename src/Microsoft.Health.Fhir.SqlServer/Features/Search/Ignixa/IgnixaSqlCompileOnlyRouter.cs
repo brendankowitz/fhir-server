@@ -257,8 +257,14 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return false;
             }
 
-            if (searchOptions.ContinuationToken != null)
+            if (searchOptions.ContinuationToken != null && !IsSurrogateKeysetContinuation(searchOptions))
             {
+                // Keyset pagination is wired only for the default surrogate-id order: a row-returning search
+                // with no custom _sort whose token carries a composite (ResourceTypeId, ResourceSurrogateId)
+                // boundary and no captured sort value. That subset maps to a PageSpec whose forward tuple seek
+                // matches the legacy GreaterThan on the partitioned primary key. Custom-sort tokens, count-only
+                // tokens, and legacy type-less tokens still render a boundary this pass does not reproduce, so
+                // they stay on the legacy path.
                 _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "continuation-token");
                 return false;
             }
@@ -285,6 +291,35 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Returns <see langword="true"/> when a continuation token can be honoured by the Ignixa keyset
+        /// <see cref="PageSpec"/> this pass wires: a row-returning search with no custom <c>_sort</c>, whose
+        /// token parses and carries a composite (ResourceTypeId, ResourceSurrogateId) boundary with no captured
+        /// sort value. This is the exact subset <see cref="IgnixaSqlCompilerAdapter"/> builds a PageSpec for, so
+        /// the router and the adapter agree on which tokens route to Ignixa and which fall back to legacy.
+        /// </summary>
+        private static bool IsSurrogateKeysetContinuation(SqlSearchOptions searchOptions)
+        {
+            // Count-only requests never AND the token into the legacy tree and do not paginate rows; keep any
+            // count-only + token request on the legacy path.
+            if (searchOptions.CountOnly)
+            {
+                return false;
+            }
+
+            // A custom _sort (including _lastUpdated/_type reaching Ignixa) drives a keyed boundary the
+            // surrogate-only PageSpec cannot express.
+            if ((searchOptions.IgnixaOptions?.Sort?.Count ?? 0) > 0)
+            {
+                return false;
+            }
+
+            ContinuationToken token = ContinuationToken.FromString(searchOptions.ContinuationToken);
+            return token != null
+                && token.ResourceTypeId != null
+                && string.IsNullOrEmpty(token.SortValue);
         }
     }
 }

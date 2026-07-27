@@ -170,13 +170,66 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
-        public async Task ObserveAsync_WhenContinuationTokenSet_DoesNotCompile()
+        public async Task ObserveAsync_WhenContinuationTokenIsUnparseable_DoesNotCompile()
         {
+            // An opaque/unparseable token has no (ResourceTypeId, ResourceSurrogateId) boundary to translate
+            // into a PageSpec, so it stays on the legacy path.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
             var router = CreateRouter(adapter, EnabledConfig());
 
             SqlSearchOptions options = CreateEligibleOptions();
             options.ContinuationToken = "some-continuation-token";
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenSurrogateKeysetContinuationTokenSet_IsEligibleAndCompiles()
+        {
+            // A default-order continuation token (no custom _sort) carries a composite
+            // (ResourceTypeId, ResourceSurrogateId) boundary and no sort value. The compiler reproduces the
+            // legacy forward keyset seek via PageSpec, so the request is eligible for the Ignixa path.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.ContinuationToken = "[3,5000]";
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenCustomSortContinuationTokenSet_DoesNotCompile()
+        {
+            // A token that carries a sort value was minted for a custom _sort. The surrogate-only PageSpec
+            // cannot express that keyed boundary, so it must stay on the legacy path.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.ContinuationToken = "[\"2021-01-01T00:00:00.0000000\",3,5000]";
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenTypelessContinuationTokenSet_DoesNotCompile()
+        {
+            // A bare surrogate-id token (no ResourceTypeId) is handled by legacy as a ResourceSurrogateId-only
+            // comparison, which the composite (T1, Sid1) PageSpec does not reproduce, so it stays on legacy.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.ContinuationToken = "5000";
 
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
 
