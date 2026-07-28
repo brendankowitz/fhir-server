@@ -2271,6 +2271,79 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             Assert.Equal(SeededModeMap(legacyResults, seeded), SeededModeMap(ignixaResults, seeded));
         }
 
+        [Fact]
+        public async Task GivenTwoIncludeStagesAndAnIncludeBudgetOfOne_WhenExecutedOnBothEngines_ThenIgnixaTruncatesToTheSameIncludedRowAsLegacy()
+        {
+            // Legacy limits includes GLOBALLY: IncludeUnionAllExpression unions every include CTE and
+            // IncludeLimitExpression then applies a single "SELECT DISTINCT TOP (@includeCount + 1) ... ORDER BY
+            // T1 ASC, Sid1 ASC" across the union (SqlQueryGenerator.HandleTableKindIncludeLimit). Ignixa limits
+            // PER STAGE: each incN CTE carries its own "TOP (Limit + 1)" and the stages are then UNION ALL'd
+            // (SqlBuilder.EmitIncludeStage / EmitIncludeLimitStage / BuildUnionArms).
+            //
+            // With one budget and two stages the two engines therefore keep different rows: legacy keeps the
+            // single globally lowest (ResourceTypeId, ResourceSurrogateId) across both stages, while Ignixa
+            // produces one row per stage and SqlServerSearchService's overflow guard then trims by arrival order,
+            // which is stage order. This pins that they agree.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            patient.Id = Guid.NewGuid().ToString();
+            string patientId = await UpsertWithSearchIndicesAsync(patient);
+
+            var practitioner = new Practitioner { Id = Guid.NewGuid().ToString() };
+            string practitionerId = await UpsertWithSearchIndicesAsync(practitioner);
+
+            var observation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept { Text = $"IgnixaIncludeBudget_{Guid.NewGuid()}" },
+                Subject = new ResourceReference($"Patient/{patientId}"),
+                Performer = new List<ResourceReference> { new ResourceReference($"Practitioner/{practitionerId}") },
+            };
+            string observationId = await UpsertWithSearchIndicesAsync(observation);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", observationId),
+                Tuple.Create("_include", "Observation:subject"),
+                Tuple.Create("_include", "Observation:performer"),
+                Tuple.Create("_includesCount", "1"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+            string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+            SearchResult legacyResults = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                $"Expected the budgeted include search to run on Ignixa. Router log: {routerLog}");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            // Both references really were indexed, so the budget genuinely has two candidates to choose between.
+            // The budgeted search itself cannot show this - it returns one include by construction - so the
+            // unbudgeted search is what proves the test is not vacuous.
+            var unbudgetedQuery = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", observationId),
+                Tuple.Create("_include", "Observation:subject"),
+                Tuple.Create("_include", "Observation:performer"),
+            };
+            SearchResult unbudgeted = await legacySearchService.SearchAsync("Observation", unbudgetedQuery, CancellationToken.None);
+            Assert.True(
+                ContainsMode(unbudgeted, patientId, SearchEntryMode.Include)
+                    && ContainsMode(unbudgeted, practitionerId, SearchEntryMode.Include),
+                "Legacy did not return both referenced resources without a budget, so the budgeted comparison would be vacuous.");
+
+            var seeded = new HashSet<string>(new[] { patientId, practitionerId, observationId }, StringComparer.Ordinal);
+            Assert.Equal(SeededModeMap(legacyResults, seeded), SeededModeMap(ignixaResults, seeded));
+        }
+
         [Theory]
         [InlineData("date")]
         [InlineData("-date")]
