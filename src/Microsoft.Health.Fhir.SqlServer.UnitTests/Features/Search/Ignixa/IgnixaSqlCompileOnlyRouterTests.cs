@@ -464,6 +464,23 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
+        public async Task ObserveAsync_WhenIgnixaSortDisagreesWithLegacy_DoesNotCompile()
+        {
+            // The storage layer's sorting validator discards the whole sort when SQL cannot honour it, while
+            // Ignixa binds and applies its own. Routing such a request would return the same rows in a different
+            // order - and on a paged search, a different window of rows entirely.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.IgnixaSortAgreesWithLegacy = false;
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
         public async Task ObserveAsync_WhenSmartCompartmentSearch_DoesNotCompile()
         {
             // SECURITY BOUNDARY. A SMART compartment definition expands membership through
@@ -1186,6 +1203,10 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             var baseOptions = new SearchOptions
             {
                 MaxItemCount = 10,
+
+                // SearchOptionsFactory is the only production writer of this flag, and it is what makes an
+                // unsorted request eligible; a hand-built options object has to opt in the same way.
+                IgnixaSortAgreesWithLegacy = true,
             };
 
             // ResourceVersionTypes defaults to Latest — eligible.
@@ -1309,6 +1330,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             var baseOptions = new SearchOptions
             {
                 MaxItemCount = 10,
+                IgnixaSortAgreesWithLegacy = true,
             };
 
             return new SqlSearchOptions(baseOptions)

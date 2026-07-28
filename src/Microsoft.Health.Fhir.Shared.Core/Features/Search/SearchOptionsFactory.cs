@@ -26,6 +26,8 @@ using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers;
 using Microsoft.Health.Fhir.Core.Models;
 using Expression = Microsoft.Health.Fhir.Core.Features.Search.Expressions.Expression;
+using IgnixaSortExpression = Ignixa.Search.Expressions.SortExpression;
+using IgnixaSortOrder = Ignixa.Search.Expressions.SortOrder;
 
 namespace Microsoft.Health.Fhir.Core.Features.Search
 {
@@ -678,6 +680,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 searchOptions.Sort = Array.Empty<(SearchParameterInfo searchParameterInfo, SortOrder sortOrder)>();
             }
 
+            searchOptions.IgnixaSortAgreesWithLegacy = IgnixaSortMatches(searchOptions);
+
             searchOptions.ResourceVersionTypes = resourceVersionTypes;
 
             // Processing of parameters is finished. If any of the parameters are unsupported warning is put into the bundle or exception is thrown,
@@ -932,6 +936,52 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 .ToList();
 
             searchOptions.IgnixaAccessControlTranslated = true;
+        }
+
+        /// <summary>
+        /// Returns <see langword="true"/> when the sort Ignixa parsed is the sort the legacy path will apply,
+        /// key for key and direction for direction.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The two lists are produced independently. <c>IgnixaOptions.Sort</c> comes from Ignixa's own binder,
+        /// which sorts by anything it can order; <c>SearchOptions.Sort</c> is what survived
+        /// <c>ISortingValidator</c>, which for SQL discards the <em>entire</em> sort - reporting it on the bundle
+        /// instead - whenever the storage layer cannot honour it, as for a token or reference sort or any
+        /// multi-key shape other than <c>(_type, _lastUpdated)</c>.
+        /// </para>
+        /// <para>
+        /// The comparison has to happen here rather than in the router, because
+        /// <c>SqlServerSearchService</c> expands a single <c>_type</c> or <c>_lastUpdated</c> key - and an
+        /// absent sort - into its two-column form before the router sees the options, at which point the two
+        /// lists are no longer comparable.
+        /// </para>
+        /// </remarks>
+        private static bool IgnixaSortMatches(SearchOptions searchOptions)
+        {
+            IReadOnlyList<IgnixaSortExpression> ignixaSort = searchOptions.IgnixaOptions?.Sort;
+            IReadOnlyList<(SearchParameterInfo SearchParameterInfo, SortOrder SortOrder)> legacySort = searchOptions.Sort;
+
+            int ignixaCount = ignixaSort?.Count ?? 0;
+            int legacyCount = legacySort?.Count ?? 0;
+
+            if (ignixaCount != legacyCount)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < ignixaCount; i++)
+            {
+                bool ignixaAscending = ignixaSort[i].SortOrder == IgnixaSortOrder.Ascending;
+
+                if (!string.Equals(ignixaSort[i].Parameter.Code, legacySort[i].SearchParameterInfo?.Code, StringComparison.Ordinal) ||
+                    ignixaAscending != (legacySort[i].SortOrder == SortOrder.Ascending))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         /// <summary>

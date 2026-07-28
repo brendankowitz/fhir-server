@@ -35,6 +35,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             IgnixaOptions = CloneIgnixaOptions(other.IgnixaOptions);
             IgnixaAccessControlTranslated = other.IgnixaAccessControlTranslated;
             IgnixaUnsupportedParamsAgreeWithLegacy = other.IgnixaUnsupportedParamsAgreeWithLegacy;
+            IgnixaSortAgreesWithLegacy = other.IgnixaSortAgreesWithLegacy;
             IgnixaSmartCompartmentSearch = other.IgnixaSmartCompartmentSearch;
             IgnixaSmartCompartmentTranslated = other.IgnixaSmartCompartmentTranslated;
             OnlyIds = other.OnlyIds;
@@ -180,6 +181,18 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         /// <c>SearchOptionsFactory</c> is treated as unverified rather than agreeing.
         /// </remarks>
         internal bool IgnixaUnsupportedParamsAgreeWithLegacy { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the sort Ignixa parsed is the sort the legacy path will apply.
+        /// </summary>
+        /// <remarks>
+        /// Set by <c>SearchOptionsFactory</c>, which is the only place both the un-expanded legacy sort and the
+        /// Ignixa sort exist side by side: the SQL search service rewrites <see cref="Sort"/> into its
+        /// two-column form before the router runs. False means the storage layer's sorting validator discarded a
+        /// sort Ignixa would have applied, so routing the request would silently reorder - and on a paged search
+        /// re-window - the result.
+        /// </remarks>
+        internal bool IgnixaSortAgreesWithLegacy { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether this request uses the SMART compartment definition rather than

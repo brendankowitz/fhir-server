@@ -31,6 +31,9 @@ using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Xunit;
 using static Microsoft.Health.Fhir.Core.UnitTests.Features.Search.SearchExpressionTestHelper;
+using IgnixaSearchParameterInfo = Ignixa.Search.Models.SearchParameterInfo;
+using IgnixaSortExpression = Ignixa.Search.Expressions.SortExpression;
+using IgnixaSortOrder = Ignixa.Search.Expressions.SortOrder;
 using SortOrder = Microsoft.Health.Fhir.Core.Features.Search.SortOrder;
 
 namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
@@ -44,6 +47,15 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
     {
         private const string DefaultResourceType = "Patient";
         private const string ContinuationTokenParamName = "ct";
+
+        /// <summary>An ascending Ignixa _lastUpdated sort key, the counterpart of the legacy sort "_sort=_lastUpdated" produces.</summary>
+        private static readonly IgnixaSortExpression LastUpdatedSortAscending = new IgnixaSortExpression(
+            new IgnixaSearchParameterInfo(
+                SearchParameterNames.LastUpdated,
+                SearchParameterNames.LastUpdated,
+                global::Ignixa.Specification.ValueSets.Normative.SearchParamType.Date,
+                new Uri("http://hl7.org/fhir/SearchParameter/Resource-lastUpdated")),
+            IgnixaSortOrder.Ascending);
 
         private readonly IExpressionParser _expressionParser = Substitute.For<IExpressionParser>();
         private readonly SearchOptionsFactory _factory;
@@ -986,6 +998,64 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
 
             Assert.Contains(options.UnsupportedSearchParams, p => p.Item1 == "_text");
             Assert.False(options.IgnixaUnsupportedParamsAgreeWithLegacy);
+        }
+
+        [Fact]
+        public void Create_GivenASortBothEnginesParseIdentically_MarksTheSortsAsAgreeing()
+        {
+            // The SQL sorting validator is the authority over the legacy sort, and a sort it rejects leaves
+            // SearchOptions.Sort empty while Ignixa still binds its own. Nothing downstream compares the two,
+            // so without this flag a sort Ignixa can express but SQL discards would silently reorder results
+            // - and, once paged, re-window them. This is the agreeing case: both engines hold the same key.
+            _sortingValidator.ValidateSorting(default, out Arg.Any<IReadOnlyList<string>>()).ReturnsForAnyArgs(true);
+            _ignixaAdapter.Build(Arg.Any<string>(), Arg.Any<IReadOnlyList<Tuple<string, string>>>(), Arg.Any<int?>())
+                .Returns(new global::Ignixa.Search.Models.SearchOptions { Sort = new List<IgnixaSortExpression> { LastUpdatedSortAscending } });
+
+            SearchOptions options = CreateSearchOptions(
+                resourceType: "Patient",
+                queryParameters: new[] { Tuple.Create(KnownQueryParameterNames.Sort, SearchParameterNames.LastUpdated) });
+
+            Assert.Single(options.Sort);
+            Assert.True(options.IgnixaSortAgreesWithLegacy);
+        }
+
+        [Fact]
+        public void Create_GivenASortOnlyIgnixaAccepts_DoesNotMarkTheSortsAsAgreeing()
+        {
+            // The validator rejects the sort, so legacy searches unsorted (in surrogate order) while Ignixa
+            // would order by _lastUpdated. Same rows, different order and different page boundaries, so the
+            // request must stay on the legacy path.
+            _sortingValidator.ValidateSorting(default, out Arg.Any<IReadOnlyList<string>>()).ReturnsForAnyArgs(x =>
+            {
+                x[1] = new[] { "unsupported sort" };
+                return false;
+            });
+            _ignixaAdapter.Build(Arg.Any<string>(), Arg.Any<IReadOnlyList<Tuple<string, string>>>(), Arg.Any<int?>())
+                .Returns(new global::Ignixa.Search.Models.SearchOptions { Sort = new List<IgnixaSortExpression> { LastUpdatedSortAscending } });
+
+            SearchOptions options = CreateSearchOptions(
+                resourceType: "Patient",
+                queryParameters: new[] { Tuple.Create(KnownQueryParameterNames.Sort, SearchParameterNames.LastUpdated) });
+
+            Assert.Empty(options.Sort);
+            Assert.False(options.IgnixaSortAgreesWithLegacy);
+        }
+
+        [Fact]
+        public void Create_GivenTheSameSortKeyInOppositeDirections_DoesNotMarkTheSortsAsAgreeing()
+        {
+            // Direction is half of a sort key: agreeing on the parameter but not the order still produces a
+            // reversed page, so the comparison has to cover both rather than matching codes alone.
+            _sortingValidator.ValidateSorting(default, out Arg.Any<IReadOnlyList<string>>()).ReturnsForAnyArgs(true);
+            _ignixaAdapter.Build(Arg.Any<string>(), Arg.Any<IReadOnlyList<Tuple<string, string>>>(), Arg.Any<int?>())
+                .Returns(new global::Ignixa.Search.Models.SearchOptions { Sort = new List<IgnixaSortExpression> { LastUpdatedSortAscending } });
+
+            SearchOptions options = CreateSearchOptions(
+                resourceType: "Patient",
+                queryParameters: new[] { Tuple.Create(KnownQueryParameterNames.Sort, "-" + SearchParameterNames.LastUpdated) });
+
+            Assert.Equal(SortOrder.Descending, Assert.Single(options.Sort).sortOrder);
+            Assert.False(options.IgnixaSortAgreesWithLegacy);
         }
 
         [Fact]

@@ -4,13 +4,17 @@
 // -------------------------------------------------------------------------------------------------
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
 using Ignixa.Search.Sql.Ast;
+using Ignixa.Search.Sql.Lowering;
 using Microsoft.Extensions.Logging;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.SqlServer.Registration;
+using IgnixaSortExpression = Ignixa.Search.Expressions.SortExpression;
 
 namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 {
@@ -227,14 +231,27 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return false;
             }
 
+            if (!searchOptions.IgnixaSortAgreesWithLegacy)
+            {
+                // Ignixa binds _sort itself, while SearchOptionsFactory runs the same parameter past the storage
+                // layer's sorting validator, which discards the whole sort when SQL cannot honour it - a token or
+                // reference sort, or any multi-key shape other than (_type, _lastUpdated). When that happens
+                // legacy returns rows in surrogate order and Ignixa would return them sorted, so the two engines
+                // would disagree on ordering, and on a paged search on which rows appear at all. The comparison
+                // itself lives in SearchOptionsFactory because SqlServerSearchService has already rewritten
+                // SearchOptions.Sort into its two-column form by the time the router runs.
+                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "sort-disagreement");
+                return false;
+            }
+
             if (searchOptions.ContinuationToken != null && !IsKeysetContinuation(searchOptions, out string keysetSkipReason))
             {
                 // Keyset pagination is wired for the default surrogate-id order and for a single-key custom
-                // _sort, in both sort phases. What remains unwired is a token with no ResourceTypeId slot on a
-                // multi-type search - there is no single constant type to substitute for the boundary the token
-                // omitted, and legacy tie-breaks such a search on Sid1 alone where Ignixa orders (T1, Sid1) - a
-                // multi-key sort, whose second boundary value the token never captured, and count-only requests,
-                // which never AND the token into the legacy tree at all.
+                // _sort, in both sort phases, and count-only pages route because neither engine paginates them.
+                // What remains unwired is a token with no ResourceTypeId slot on a multi-type search - there is
+                // no single constant type to substitute for the boundary the token omitted, and legacy tie-breaks
+                // such a search on Sid1 alone where Ignixa orders (T1, Sid1) - and a multi-key sort, whose second
+                // boundary value the token never captured.
                 _logger.LogDebug(
                     "Skipping Ignixa compile-only observation. Reason={Reason}, Detail={Detail}",
                     "continuation-token",
@@ -306,17 +323,21 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
         {
             skipReason = null;
 
-            // Count-only requests never AND the token into the legacy tree and do not paginate rows; keep any
-            // count-only + token request on the legacy path.
+            // A count-only request does not paginate: legacy gates its entire continuation-token block on
+            // !CountOnly, so the token is neither seeked past nor validated, and the adapter drops it for the
+            // same reason. Nothing below can disagree, including an unparseable token, which legacy also
+            // tolerates here where it would reject it on a row-returning page.
             if (searchOptions.CountOnly)
             {
-                skipReason = "count-only";
-                return false;
+                return true;
             }
 
-            // The token carries exactly one SortValue, so a multi-key sort has no boundary value for its
-            // second key and its seek predicate cannot be reconstructed.
-            if ((searchOptions.IgnixaOptions?.Sort?.Count ?? 0) > 1)
+            // A multi-key sort's second boundary value is not in the token - but that only matters when a key
+            // needs one. The SQL sorting validator admits exactly one multi-key shape, (_type, _lastUpdated),
+            // and both of those are resource columns whose boundary *is* the token's (ResourceTypeId,
+            // ResourceSurrogateId) identity pair. So the constraint is on sort-value keys, not on key count.
+            IReadOnlyList<IgnixaSortExpression> sort = searchOptions.IgnixaOptions?.Sort;
+            if (sort != null && sort.Count > 1 && sort.Any(s => !ResourceColumnLoweringRule.IsResourceColumnCode(s.Parameter.Code)))
             {
                 skipReason = "multi-key-sort";
                 return false;

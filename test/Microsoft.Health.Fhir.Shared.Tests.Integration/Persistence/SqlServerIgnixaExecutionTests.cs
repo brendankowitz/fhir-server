@@ -1332,6 +1332,267 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             }
         }
 
+        [Theory]
+        [InlineData("_lastUpdated")]
+        [InlineData("-_lastUpdated")]
+        public async Task GivenALastUpdatedSort_WhenPagedAcrossBoundaries_ThenIgnixaKeysetPagingAgreesWithLegacy(string sortExpression)
+        {
+            // _lastUpdated is a resource-column sort key, so the compiler's seek predicate wants one boundary
+            // value for it - and the continuation token carries that value as the surrogate id. Paging is the
+            // only shape that exercises the pairing; a single page would pass with no boundary at all.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            string tag = Guid.NewGuid().ToString("N");
+
+            for (int i = 0; i < 6; i++)
+            {
+                var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+                patient.Id = Guid.NewGuid().ToString();
+                patient.Gender = AdministrativeGender.Male;
+                patient.Meta = new Meta { Tag = new List<Coding> { new Coding("http://example.org/ignixa-lusort", tag) } };
+                await UpsertWithSearchIndicesAsync(patient);
+            }
+
+            async Task<(List<string> Ids, int Pages)> WalkAsync(ISearchService service)
+            {
+                var ids = new List<string>();
+                string continuation = null;
+                int pages = 0;
+
+                while (pages < 5)
+                {
+                    var query = new List<Tuple<string, string>>
+                    {
+                        Tuple.Create("_tag", $"http://example.org/ignixa-lusort|{tag}"),
+
+                        // A lone token search is intercepted by the dbo.GetResourcesByTokens stored-procedure
+                        // fast path in SearchImpl, which runs before the router and so never reaches either
+                        // engine. The second filter keeps every page on the compiled query path.
+                        Tuple.Create("gender", "male"),
+                        Tuple.Create("_sort", sortExpression),
+                        Tuple.Create("_count", "2"),
+                    };
+
+                    if (continuation != null)
+                    {
+                        query.Add(Tuple.Create(
+                            Core.Features.KnownQueryParameterNames.ContinuationToken,
+                            ContinuationTokenEncoder.Encode(continuation)));
+                    }
+
+                    SearchResult page = await service.SearchAsync("Patient", query, CancellationToken.None);
+                    pages++;
+                    ids.AddRange(ResourceIdsInResultOrder(page));
+
+                    continuation = page.ContinuationToken;
+                    if (string.IsNullOrEmpty(continuation))
+                    {
+                        break;
+                    }
+                }
+
+                return (ids, pages);
+            }
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+            fixture.IgnixaRouterLog.Clear();
+
+            (List<string> ignixaWalk, int ignixaPages) = await WalkAsync(ignixaSearchService);
+            string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+
+            long ignixaAfter = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceAfter = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            (List<string> legacyWalk, _) = await WalkAsync(legacySearchService);
+
+            Assert.True(ignixaPages >= 2, $"Expected the walk to span at least two pages, got {ignixaPages}.");
+            Assert.True(
+                ignixaAfter - ignixaBefore == ignixaPages,
+                $"Expected every one of the {ignixaPages} pages to run on Ignixa, saw {ignixaAfter - ignixaBefore}. Router log: {routerLog}");
+            Assert.Equal(legacyInstanceBefore, legacyInstanceAfter);
+
+            Assert.Equal(6, legacyWalk.Count);
+            Assert.Equal(ignixaWalk.Count, ignixaWalk.Distinct(StringComparer.Ordinal).Count());
+            Assert.Equal(legacyWalk, ignixaWalk);
+        }
+
+        [Fact]
+        public async Task GivenATypeAndLastUpdatedSort_WhenPagedAcrossBoundaries_ThenIgnixaKeysetPagingAgreesWithLegacy()
+        {
+            // (_type, _lastUpdated) is the one multi-key sort the SQL sorting validator admits, and both of its
+            // keys are resource columns whose keyset boundary is exactly the (ResourceTypeId, ResourceSurrogateId)
+            // pair the continuation token already carries. Refusing it purely on key count kept a shape on the
+            // legacy path whose boundary was fully reconstructable, so this walks it across page boundaries on
+            // both engines and compares the concatenated sequence - the only shape that catches a repeated or a
+            // skipped page.
+            //
+            // Legacy does not terminate on this shape. SqlServerSearchService's sorted "second phase" block
+            // is skipped only when Sort[0] is _lastUpdated, so a _type primary key enters it, finds rows the
+            // "missing sort value" segment would supposedly still owe (there are none - ResourceTypeId is
+            // non-nullable and never missing), and mints the SortSentinelValueForCt token, which restarts the
+            // walk from the top. That is a legacy defect of the same family as its documented habit of
+            // dropping _id in the sorted missing-values phase, so this test compares the two engines over the
+            // resources legacy serves before it restarts, and separately pins the restart so that fixing it
+            // upstream surfaces here rather than silently changing the comparison's meaning.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            string tag = Guid.NewGuid().ToString("N");
+
+            for (int i = 0; i < 3; i++)
+            {
+                var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+                patient.Id = Guid.NewGuid().ToString();
+                patient.Meta = new Meta { Tag = new List<Coding> { new Coding("http://example.org/ignixa-multisort", tag) } };
+                await UpsertWithSearchIndicesAsync(patient);
+
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept { Text = $"IgnixaMultiSort_{tag}" },
+                    Meta = new Meta { Tag = new List<Coding> { new Coding("http://example.org/ignixa-multisort", tag) } },
+                };
+                await UpsertWithSearchIndicesAsync(observation);
+            }
+
+            async Task<(List<string> Ids, int Pages)> WalkAsync(ISearchService service)
+            {
+                var ids = new List<string>();
+                string continuation = null;
+                int pages = 0;
+
+                while (pages < 5)
+                {
+                    var query = new List<Tuple<string, string>>
+                    {
+                        Tuple.Create("_type", "Patient,Observation"),
+                        Tuple.Create("_tag", $"http://example.org/ignixa-multisort|{tag}"),
+                        Tuple.Create("_sort", "_type,_lastUpdated"),
+                        Tuple.Create("_count", "2"),
+                    };
+
+                    if (continuation != null)
+                    {
+                        query.Add(Tuple.Create(
+                            Core.Features.KnownQueryParameterNames.ContinuationToken,
+                            ContinuationTokenEncoder.Encode(continuation)));
+                    }
+
+                    SearchResult page = await service.SearchAsync(null, query, CancellationToken.None);
+                    pages++;
+                    ids.AddRange(ResourceIdsInResultOrder(page));
+
+                    continuation = page.ContinuationToken;
+                    if (string.IsNullOrEmpty(continuation))
+                    {
+                        break;
+                    }
+                }
+
+                return (ids, pages);
+            }
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+            fixture.IgnixaRouterLog.Clear();
+
+            (List<string> ignixaWalk, int ignixaPages) = await WalkAsync(ignixaSearchService);
+            string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+
+            long ignixaAfter = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceAfter = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            (List<string> legacyWalk, int legacyPages) = await WalkAsync(legacySearchService);
+
+            Assert.True(ignixaPages >= 2, $"Expected the walk to span at least two pages, got {ignixaPages}.");
+            Assert.True(
+                ignixaAfter - ignixaBefore == ignixaPages,
+                $"Expected every one of the {ignixaPages} pages to run on Ignixa, saw {ignixaAfter - ignixaBefore}. Router log: {routerLog}");
+            Assert.Equal(legacyInstanceBefore, legacyInstanceAfter);
+
+            // Ignixa serves each of the six seeded resources exactly once and then stops.
+            Assert.Equal(3, ignixaPages);
+            Assert.Equal(6, ignixaWalk.Count);
+            Assert.Equal(ignixaWalk.Count, ignixaWalk.Distinct(StringComparer.Ordinal).Count());
+
+            // Legacy serves the same six in the same order first, so the engines agree on the result set and
+            // its ordering...
+            Assert.Equal(ignixaWalk, legacyWalk.Take(6).ToList());
+
+            // ...and then restarts rather than stopping, which is the defect described above. Pinning it keeps
+            // the Take(6) above honest: if legacy ever terminates correctly, legacyPages drops to 3 and this
+            // assertion fails rather than the comparison quietly weakening.
+            Assert.Equal(5, legacyPages);
+            Assert.Equal(ignixaWalk.Take(4).ToList(), legacyWalk.Skip(6).ToList());
+        }
+
+        [Fact]
+        public async Task GivenACountOnlyRequestCarryingAContinuationToken_WhenExecutedOnBothEngines_ThenBothIgnoreTheToken()
+        {
+            // Legacy gates its whole continuation-token block on !CountOnly, so a count-only request counts the
+            // entire result set and never seeks past the boundary. That is reachable rather than theoretical:
+            // _total=accurate on any page after the first flips CountOnly on the same options object, token and
+            // all. The token must therefore be *ignored*, not honoured - a count that shrank page by page would
+            // be the bug.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var ids = new List<string>();
+            for (int i = 0; i < 5; i++)
+            {
+                var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+                patient.Id = Guid.NewGuid().ToString();
+                await _fixture.Mediator.UpsertResourceAsync(patient.ToResourceElement());
+                ids.Add(patient.Id);
+            }
+
+            string idFilter = string.Join(",", ids);
+
+            // Page one, to mint a real token rather than a synthesised one.
+            SearchResult firstPage = await legacySearchService.SearchAsync(
+                "Patient",
+                new List<Tuple<string, string>>
+                {
+                    Tuple.Create("_id", idFilter),
+                    Tuple.Create("_count", "2"),
+                },
+                CancellationToken.None);
+
+            Assert.False(string.IsNullOrEmpty(firstPage.ContinuationToken), "Expected page one to mint a continuation token.");
+
+            var countQuery = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", idFilter),
+                Tuple.Create("_summary", "count"),
+                Tuple.Create(
+                    Core.Features.KnownQueryParameterNames.ContinuationToken,
+                    ContinuationTokenEncoder.Encode(firstPage.ContinuationToken)),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+            fixture.IgnixaRouterLog.Clear();
+
+            SearchResult ignixaCount = await ignixaSearchService.SearchAsync("Patient", countQuery, CancellationToken.None);
+            string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+            SearchResult legacyCount = await legacySearchService.SearchAsync("Patient", countQuery, CancellationToken.None);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the count-only page-two request to run on Ignixa. Router log: " + routerLog);
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            // Anti-vacuity: the count covers all five seeded rows, not the three that remain after the boundary.
+            Assert.Equal(5, legacyCount.TotalCount);
+            Assert.Equal(legacyCount.TotalCount, ignixaCount.TotalCount);
+        }
+
         [Fact]
         public async Task GivenAWildcardScopeCarryingSearchParameters_WhenExecutedOnBothEngines_ThenIgnixaAppliesItLikeLegacy()
         {

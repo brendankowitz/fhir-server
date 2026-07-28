@@ -18,6 +18,7 @@ using Ignixa.Search.Sql.Builders;
 using Ignixa.Search.Sql.Lowering;
 using Ignixa.Search.Sql.Symbols;
 using Microsoft.Extensions.Logging;
+using Microsoft.Health.Fhir.Core.Features;
 using Microsoft.Health.SqlServer.Features.Schema;
 using IgnixaSearchOptions = Ignixa.Search.Models.SearchOptions;
 using IgnixaSearchParameterInfo = Ignixa.Search.Models.SearchParameterInfo;
@@ -127,7 +128,12 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             //     legacy again only ever runs the valued phase.
             // Deriving the phase from direction alone would emit MissingPrimary for an ascending first page in
             // both cases and silently return the complement of the correct rows.
-            ContinuationToken continuation = string.IsNullOrWhiteSpace(searchOptions.ContinuationToken)
+            // A count-only request never paginates. SqlServerSearchService gates its whole continuation-token
+            // block on !CountOnly, so legacy neither seeks past the boundary nor validates the token - it counts
+            // the entire result set. This is reachable rather than theoretical: _total=accurate on any page after
+            // the first flips CountOnly on the same options object, token and all, to compute the total. Dropping
+            // the token here is therefore agreement with legacy, not a shortcut around it.
+            ContinuationToken continuation = string.IsNullOrWhiteSpace(searchOptions.ContinuationToken) || searchOptions.CountOnly
                 ? null
                 : ContinuationToken.FromString(searchOptions.ContinuationToken);
 
@@ -240,7 +246,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                     return pageFailure;
                 }
             }
-            else if (continuation == null && !string.IsNullOrWhiteSpace(searchOptions.ContinuationToken))
+            else if (continuation == null && !searchOptions.CountOnly && !string.IsNullOrWhiteSpace(searchOptions.ContinuationToken))
             {
                 // The token was present but did not parse. Legacy tolerates this shape; Ignixa must not
                 // silently drop the boundary and re-serve page one.
@@ -461,8 +467,12 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
         /// mis-seek, so this method must never guess.
         /// </para>
         /// <para>
-        /// Only a single-key sort is wired, because the FHIR Server continuation token carries exactly one
-        /// <c>SortValue</c>; a two-key sort would need a second boundary value the token never captured.
+        /// The token carries exactly one <c>SortValue</c>, so at most one key may be a search-parameter sort
+        /// key, and it must be the first. The three resource-column sort keys are different: their sort
+        /// values are columns the token already identifies, so <c>_lastUpdated</c> reconstructs its boundary
+        /// from <c>ResourceSurrogateId</c> and <c>_type</c> from <c>ResourceTypeId</c> - which is what makes
+        /// <c>(_type, _lastUpdated)</c>, the only multi-key sort the SQL sorting validator admits, pageable.
+        /// <c>_id</c> is the exception among them: the token captures no <c>ResourceId</c>, so it is refused.
         /// </para>
         /// <para>
         /// In the valued phase the primary key's value expression is the raw column (Emit skips the
@@ -494,38 +504,81 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
             SqlParameterRef[] boundary = Array.Empty<SqlParameterRef>();
 
-            if (requestedSort.Count > 0 && !ResourceColumnLoweringRule.IsResourceColumnCode(requestedSort[0].Parameter.Code))
+            // The seek predicate needs exactly one boundary value per *active* sort key, in the same order
+            // Emit renders them. The missing-primary phase drops the primary key (every row in that segment
+            // has no value for it), so its active keys start at index 1; the valued phase uses all of them.
+            int firstActiveKey = sortPhase == SortPhase.MissingPrimary ? 1 : 0;
+            var boundaryValues = new List<SqlParameterRef>();
+
+            for (int i = firstActiveKey; i < requestedSort.Count; i++)
             {
-                if (requestedSort.Count > 1)
+                string code = requestedSort[i].Parameter.Code;
+
+                // The two resource-column sort keys need no value from the token beyond the identity pair it
+                // already carries, because their sort values *are* that pair: _lastUpdated orders by
+                // ResourceSurrogateId and _type by ResourceTypeId. That is precisely why (_type, _lastUpdated) -
+                // the only multi-key sort the SQL sorting validator admits - is keyset-pageable at all.
+                if (code == KnownQueryParameterNames.LastUpdated)
                 {
+                    boundaryValues.Add(new SqlParameterRef(token.ResourceSurrogateId));
+                    continue;
+                }
+
+                if (code == KnownQueryParameterNames.Type)
+                {
+                    boundaryValues.Add(new SqlParameterRef(boundaryResourceTypeId.Value));
+                    continue;
+                }
+
+                // _id is the third sortable resource column, but unlike the other two the continuation token
+                // captures no ResourceId, so there is no boundary value to reconstruct.
+                if (code == KnownQueryParameterNames.Id)
+                {
+                    return CapabilityFailure("page", "continuation-token-id-sort", EmptyUnresolvedParameters);
+                }
+
+                if (i > 0)
+                {
+                    // A search-parameter sort key's boundary comes from the token's single SortValue slot, so
+                    // only the first key can have one; a second such key has no reconstructable seek predicate.
                     return CapabilityFailure("page", "continuation-token-multi-key-sort", EmptyUnresolvedParameters);
                 }
 
-                if (sortPhase == SortPhase.Valued)
+                if (string.IsNullOrEmpty(token.SortValue))
                 {
-                    if (string.IsNullOrEmpty(token.SortValue))
-                    {
-                        // The valued phase needs a boundary value for its one active key. A token minted by the
-                        // missing segment carries none, so honouring it here would seek from an empty boundary
-                        // and re-serve the valued segment from the top.
-                        return CapabilityFailure("page", "continuation-token-missing-sort-value", EmptyUnresolvedParameters);
-                    }
+                    // The valued phase needs a boundary value for its one active key. A token minted by the
+                    // missing segment carries none, so honouring it here would seek from an empty boundary
+                    // and re-serve the valued segment from the top.
+                    return CapabilityFailure("page", "continuation-token-missing-sort-value", EmptyUnresolvedParameters);
+                }
 
-                    if (!TryTypeSortValue(requestedSort[0], token.SortValue, out object typedSortValue))
-                    {
-                        return CapabilityFailure("page", "continuation-token-sort-value-type", EmptyUnresolvedParameters);
-                    }
+                if (!TryTypeSortValue(requestedSort[i], token.SortValue, out object typedSortValue))
+                {
+                    return CapabilityFailure("page", "continuation-token-sort-value-type", EmptyUnresolvedParameters);
+                }
 
-                    boundary = new[] { new SqlParameterRef(typedSortValue) };
+                boundaryValues.Add(new SqlParameterRef(typedSortValue));
+            }
+
+            bool hasSearchParameterSortKey = false;
+            for (int i = 0; i < requestedSort.Count; i++)
+            {
+                if (!ResourceColumnLoweringRule.IsResourceColumnCode(requestedSort[i].Parameter.Code))
+                {
+                    hasSearchParameterSortKey = true;
+                    break;
                 }
             }
-            else if (!string.IsNullOrEmpty(token.SortValue))
+
+            if (!hasSearchParameterSortKey && !string.IsNullOrEmpty(token.SortValue))
             {
-                // No custom sort, yet the token carries a sort value: it was minted for a different query
-                // shape than the one being compiled, and the surrogate-only keyset cannot honour it.
+                // No search-parameter sort key, yet the token carries a sort value: it was minted for a
+                // different query shape than the one being compiled, and a keyset built only from the
+                // identity pair cannot honour it.
                 return CapabilityFailure("page", "continuation-token-sort-value", EmptyUnresolvedParameters);
             }
 
+            boundary = boundaryValues.ToArray();
             page = new PageSpec(
                 boundary,
                 new SqlParameterRef(boundaryResourceTypeId.Value),
