@@ -266,9 +266,10 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
             if (searchOptions.IgnixaSmartCompartmentSearch && !searchOptions.IgnixaSmartCompartmentTranslated)
             {
-                // SECURITY BOUNDARY. Part of the SMART membership rule has no Ignixa spelling yet - currently only
-                // the device restriction, whose two extra legs replace plain Device in the universal list. A union
-                // missing a leg admits a different set than legacy does, so the request stays on the legacy path.
+                // SECURITY BOUNDARY. Part of the SMART membership rule has no Ignixa spelling for this request.
+                // The union expands to up to five legs (compartment membership, the user's own resource, universal
+                // types, orphan devices, this patient's devices) and a union missing a leg admits a different set
+                // than legacy does, so anything the translator could not express keeps the legacy path.
                 _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "smart-compartment-definition");
                 return false;
             }
@@ -277,11 +278,10 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             {
                 // SECURITY BOUNDARY. The request carries an access control predicate that
                 // SearchOptionsFactory.TranslateClinicalScopesForIgnixa did not fully translate into IgnixaOptions,
-                // so the compiler would enforce less than the legacy path does — or nothing at all. The untranslated
-                // cases are compartment access (ANDed into the match filter only, so include stages would escape it)
-                // and a wildcard (_type = "all") scope carrying search parameters, which legacy applies to every
-                // requested type by mutating the search itself and which therefore has no per-type AccessConstraint
-                // spelling. Keep both on the legacy path.
+                // so the compiler would enforce less than the legacy path does — or nothing at all. The remaining
+                // untranslated case is a wildcard (_type = "all") scope carrying search parameters, which legacy
+                // applies to every requested type by mutating the search itself and which therefore has no per-type
+                // AccessConstraint spelling. Keep it on the legacy path.
                 //
                 // The condition is deliberately "not translated" rather than an enumeration of unsupported shapes,
                 // so a future access control mechanism that nobody teaches the translator about fails closed here
