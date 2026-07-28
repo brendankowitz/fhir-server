@@ -1333,6 +1333,109 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenAWildcardScopeCarryingSearchParameters_WhenExecutedOnBothEngines_ThenIgnixaAppliesItLikeLegacy()
+        {
+            // A `*` scope's search parameters are not a per-type restriction and have no AccessConstraint
+            // spelling. Legacy does not treat them as one either - it folds them into the request's own
+            // SearchParams - so the Ignixa side folds them into the request's own Ignixa parameters.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            string marker = Guid.NewGuid().ToString("N");
+
+            async Task<string> SeedAsync(ObservationStatus status)
+            {
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = status,
+                    Code = new CodeableConcept { Text = $"IgnixaWildcardScope_{marker}" },
+                };
+                await UpsertWithSearchIndicesAsync(observation);
+                return observation.Id;
+            }
+
+            string finalOne = await SeedAsync(ObservationStatus.Final);
+            string finalTwo = await SeedAsync(ObservationStatus.Final);
+            string preliminary = await SeedAsync(ObservationStatus.Preliminary);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", string.Join(",", new[] { finalOne, finalTwo, preliminary })),
+            };
+
+            RequestContextAccessor<IFhirRequestContext> contextAccessor = fixture.FhirRequestContextAccessor;
+            IFhirRequestContext originalContext = contextAccessor.RequestContext;
+
+            var accessControl = new AccessControlContext
+            {
+                ApplyFineGrainedAccessControl = true,
+                ApplyFineGrainedAccessControlWithSearchParameters = true,
+            };
+
+            var scopedContext = Substitute.For<IFhirRequestContext>();
+            scopedContext.AccessControlContext.Returns(accessControl);
+            scopedContext.CorrelationId.Returns(Guid.NewGuid().ToString());
+            scopedContext.RouteName.Returns("routeName");
+            scopedContext.RequestHeaders.Returns(new Dictionary<string, StringValues>());
+            scopedContext.ResponseHeaders.Returns(new Dictionary<string, StringValues>());
+            contextAccessor.RequestContext.Returns(scopedContext);
+
+            try
+            {
+                var finalOnlyScope = new Hl7.Fhir.Rest.SearchParams();
+                finalOnlyScope.Add("status", "final");
+                accessControl.AllowedResourceActions.Add(
+                    new ScopeRestriction(KnownResourceTypes.All, DataActions.Read, "user", finalOnlyScope));
+
+                long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+                fixture.IgnixaRouterLog.Clear();
+
+                SearchResult constrainedIgnixa = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+                string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+                SearchResult constrainedLegacy = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+                Assert.True(
+                    ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                    "Expected the wildcard-scope search to run on Ignixa. Router log: " + routerLog);
+                Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+                List<string> legacyMatches = ResourceIdsInResultOrder(constrainedLegacy);
+
+                Assert.Equal(
+                    new[] { finalOne, finalTwo }.OrderBy(id => id, StringComparer.Ordinal),
+                    legacyMatches.OrderBy(id => id, StringComparer.Ordinal));
+                Assert.DoesNotContain(preliminary, legacyMatches);
+                Assert.Equal(legacyMatches, ResourceIdsInResultOrder(constrainedIgnixa));
+
+                // The complement, so a constraint that happened to select the first two rows cannot pass.
+                accessControl.AllowedResourceActions.Clear();
+                var preliminaryOnlyScope = new Hl7.Fhir.Rest.SearchParams();
+                preliminaryOnlyScope.Add("status", "preliminary");
+                accessControl.AllowedResourceActions.Add(
+                    new ScopeRestriction(KnownResourceTypes.All, DataActions.Read, "user", preliminaryOnlyScope));
+
+                long complementIgnixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+
+                SearchResult complementIgnixa = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+                SearchResult complementLegacy = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+                Assert.True(
+                    ignixaSearchService.InstanceIgnixaExecutedQueryCount > complementIgnixaBefore,
+                    "Expected the complement search to also run on Ignixa. Router log: " + string.Join(" | ", fixture.IgnixaRouterLog));
+
+                Assert.Equal(new[] { preliminary }, ResourceIdsInResultOrder(complementLegacy));
+                Assert.Equal(ResourceIdsInResultOrder(complementLegacy), ResourceIdsInResultOrder(complementIgnixa));
+            }
+            finally
+            {
+                contextAccessor.RequestContext.Returns(originalContext);
+            }
+        }
+
+        [Fact]
         public async Task GivenAnAsyncOperationSearch_WhenExecutedOnBothEngines_ThenIgnixaRunsItAndMatchesLegacy()
         {
             // IsAsyncOperation is legacy plan shaping, not a compiler capability, so an async page with no query

@@ -1103,21 +1103,45 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
         }
 
         [Fact]
-        public void Create_GivenAWildcardScopeCarryingSearchParameters_DoesNotMarkItTranslated()
+        public void Create_GivenAWildcardScopeCarryingSearchParameters_FoldsThemIntoTheIgnixaQueryAndMarksItTranslated()
         {
             _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
             _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControlWithSearchParameters = true;
             _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(
-                new ScopeRestriction(KnownResourceTypes.All, DataActions.Read, "user", new SearchParams().Add("code", "foo")));
+                new ScopeRestriction(KnownResourceTypes.All, DataActions.Read, "user", new SearchParams().Add("status", "final")));
 
             StubScopePredicate();
 
             SearchOptions options = CreateSearchOptions(resourceType: "Patient");
 
-            // Legacy folds a wildcard scope's parameters into the search itself, so they constrain every requested
-            // type at once. AccessConstraint is keyed by resource type and cannot say "all types", so there is no
-            // faithful spelling and the request stays on the legacy path.
-            Assert.False(options.IgnixaAccessControlTranslated);
+            // Legacy folds a wildcard scope's parameters into the request's own SearchParams rather than treating
+            // them as a per-type restriction, so the Ignixa side folds them into the request's own parameters. They
+            // must reach the binder, not be dropped, and not be re-stated as an AccessConstraint.
+            _ignixaAdapter.Received(1).Build(
+                "Patient",
+                Arg.Is<IReadOnlyList<Tuple<string, string>>>(p => p.Any(t => t.Item1 == "status" && t.Item2 == "final")),
+                Arg.Any<int?>());
+
+            Assert.Empty(options.IgnixaOptions.AllowedResourceTypes);
+            Assert.Empty(options.IgnixaOptions.AccessConstraints);
+            Assert.True(options.IgnixaAccessControlTranslated);
+        }
+
+        [Fact]
+        public void Create_GivenNoFineGrainedAccessControl_DoesNotFoldWildcardScopeParametersIntoTheIgnixaQuery()
+        {
+            // The scope list is only meaningful when fine-grained access control is on. Folding its parameters in
+            // regardless would silently narrow ordinary unconstrained searches.
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = false;
+            _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(
+                new ScopeRestriction(KnownResourceTypes.All, DataActions.Read, "user", new SearchParams().Add("status", "final")));
+
+            CreateSearchOptions(resourceType: "Patient");
+
+            _ignixaAdapter.DidNotReceive().Build(
+                Arg.Any<string>(),
+                Arg.Is<IReadOnlyList<Tuple<string, string>>>(p => p.Any(t => t.Item1 == "status")),
+                Arg.Any<int?>());
         }
 
         [Fact]

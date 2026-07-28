@@ -433,6 +433,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             }
 
             var resourceTypesString = parsedResourceTypes.Select(x => x.ToString()).ToArray();
+            AppendWildcardScopeParametersForIgnixa(ignixaQueryParameters);
             searchOptions.IgnixaOptions = _ignixaSearchOptionsAdapter.Build(resourceType, ignixaQueryParameters, _ignixaSearchTenantAccessor.TenantId);
             AddIgnixaBundleIssues(searchOptions.IgnixaOptions);
 
@@ -837,18 +838,16 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         /// request is permitted to see.
         /// </para>
         /// <para>
-        /// Two cases are deliberately left untranslated, each because Ignixa would otherwise enforce less than
-        /// legacy. Both fail closed by leaving the flag false:
+        /// One case is deliberately left untranslated, because Ignixa would otherwise enforce less than legacy,
+        /// and it fails closed by leaving the flag false: <b>a scope predicate Ignixa cannot parse</b>. Dropping
+        /// the part it did not understand would widen what the caller may see.
         /// </para>
-        /// <list type="number">
-        /// <item><description><b>A <c>*</c> scope carrying search parameters.</b> See above: legacy applies
-        /// these across every requested type, which an <c>AccessConstraint</c> — keyed by resource type —
-        /// cannot express.</description></item>
-        /// <item><description><b>Compartment access.</b> Legacy scopes the whole request to a compartment;
-        /// <c>AppendIgnixaCompartmentExpression</c> ANDs it into the match filter only, so include stages — which
-        /// Ignixa runs as separate row-producing queries — would return resources outside the
-        /// compartment.</description></item>
-        /// </list>
+        /// <para>
+        /// A <c>*</c> scope carrying search parameters is <em>not</em> in that group. Legacy does not treat those
+        /// parameters as a per-type restriction either - it folds them into the request's own SearchParams - and
+        /// <see cref="AppendWildcardScopeParametersForIgnixa"/> does the same on the Ignixa side, before the
+        /// expression is built.
+        /// </para>
         /// <para>
         /// The "no granted resources at all" case <em>is</em> translated, but not as an empty allow-list: an
         /// empty list means "inert" to the compiler, so that spelling would invert a total block into a total
@@ -884,21 +883,13 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 
             bool enforceScopeSearchParameters = accessControl.ApplyFineGrainedAccessControlWithSearchParameters;
 
-            if (restrictions.Any(restriction =>
-                    restriction.Resource == KnownResourceTypes.All &&
-                    restriction.SearchParameters?.Parameters?.Any() == true))
-            {
-                // CheckFineGrainedAccessControl folds a wildcard scope's parameters into searchParams, so they
-                // constrain every requested type at once. AccessConstraint is keyed by resource type and cannot
-                // say "all types", and the allow-list carries no predicate, so there is no faithful spelling.
-                return;
-            }
-
             if (restrictions.Any(restriction => restriction.Resource == KnownResourceTypes.All))
             {
                 // A wildcard scope grants every type, which is what an absent allow-list already means. Leave it
                 // empty rather than expanding to the full type list so the emitted plan stays identical to an
-                // unrestricted one, and mark the translation complete: there is genuinely nothing to enforce.
+                // unrestricted one. Any search parameters the wildcard carries were folded into the request's own
+                // Ignixa parameters by AppendWildcardScopeParametersForIgnixa before the expression was built, so
+                // there is nothing left to enforce here either.
                 searchOptions.IgnixaAccessControlTranslated = true;
                 return;
             }
@@ -941,6 +932,48 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 .ToList();
 
             searchOptions.IgnixaAccessControlTranslated = true;
+        }
+
+        /// <summary>
+        /// Appends a wildcard (<c>*</c>) SMART scope's own search parameters to the Ignixa query parameter list,
+        /// mirroring what <see cref="CheckFineGrainedAccessControl"/> does to the legacy <c>SearchParams</c>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A wildcard scope's parameters are not a per-type restriction, so they have no <c>AccessConstraint</c>
+        /// spelling. Legacy does not treat them as one either: it appends them to the request's own SearchParams,
+        /// which are then parsed exactly like ordinary query parameters. Doing the same on the Ignixa side is the
+        /// faithful translation rather than an approximation of one - the parameters bind against the same
+        /// resource types, through the same binder, and are reported on the bundle the same way when unsupported,
+        /// which keeps the router's unsupported-parameter drop-set comparison meaningful.
+        /// </para>
+        /// <para>
+        /// Runs before <c>IgnixaOptions</c> is built, which is the only point at which parameters can still be
+        /// added; by the time <see cref="TranslateClinicalScopesForIgnixa"/> runs the expression already exists.
+        /// Only the first wildcard restriction contributes, because legacy breaks out of its scope loop there.
+        /// </para>
+        /// </remarks>
+        private void AppendWildcardScopeParametersForIgnixa(List<Tuple<string, string>> ignixaQueryParameters)
+        {
+            AccessControlContext accessControl = _contextAccessor.RequestContext?.AccessControlContext;
+
+            if (accessControl?.ApplyFineGrainedAccessControl != true)
+            {
+                return;
+            }
+
+            ScopeRestriction wildcard = accessControl.AllowedResourceActions?
+                .FirstOrDefault(restriction => restriction.Resource == KnownResourceTypes.All);
+
+            if (wildcard?.SearchParameters?.Parameters == null)
+            {
+                return;
+            }
+
+            foreach (Tuple<string, string> parameter in wildcard.SearchParameters.Parameters)
+            {
+                ignixaQueryParameters.Add(parameter);
+            }
         }
 
         /// <summary>

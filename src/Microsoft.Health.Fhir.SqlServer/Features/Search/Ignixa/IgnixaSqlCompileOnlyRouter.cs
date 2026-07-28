@@ -281,10 +281,9 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             {
                 // SECURITY BOUNDARY. The request carries an access control predicate that
                 // SearchOptionsFactory.TranslateClinicalScopesForIgnixa did not fully translate into IgnixaOptions,
-                // so the compiler would enforce less than the legacy path does — or nothing at all. The remaining
-                // untranslated case is a wildcard (_type = "all") scope carrying search parameters, which legacy
-                // applies to every requested type by mutating the search itself and which therefore has no per-type
-                // AccessConstraint spelling. Keep it on the legacy path.
+                // so the compiler would enforce less than the legacy path does — or nothing at all. What remains
+                // untranslated is a scope predicate Ignixa could not parse: dropping the term it did not
+                // understand would widen what the caller may see, so the request keeps the legacy path.
                 //
                 // The condition is deliberately "not translated" rather than an enumeration of unsupported shapes,
                 // so a future access control mechanism that nobody teaches the translator about fails closed here
