@@ -1319,6 +1319,68 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenAPartialPrecisionLastUpdatedRange_WhenExecutedOnBothEngines_ThenIgnixaBoundsItWhereLegacyDoes()
+        {
+            // A second-precision instant is a *range* in FHIR - "...T10:30:00Z" means the whole second - and
+            // Ignixa's _lastUpdated lowering used to refuse any value whose Start != End, which is every shape a
+            // real client sends. This pins the generalised bound: the cut must fall between the two batches, and
+            // must fall in the same place legacy puts it.
+            //
+            // The batches are separated by a deliberate gap so that no seeded row lands inside the cut instant's
+            // own one-second interval. That keeps the assertion about *where the bound is*, not about how each
+            // engine rounds a row sitting exactly on the boundary - a sub-millisecond difference that is a
+            // pre-existing property of the exact-instant path and not what this test is for.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            async Task<string> SeedAsync()
+            {
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept { Text = $"IgnixaLastUpdatedRange_{Guid.NewGuid()}" },
+                };
+                await UpsertWithSearchIndicesAsync(observation);
+                return observation.Id;
+            }
+
+            var beforeIds = new List<string> { await SeedAsync(), await SeedAsync() };
+
+            await Task.Delay(TimeSpan.FromSeconds(2));
+            DateTimeOffset cut = DateTimeOffset.UtcNow;
+            await Task.Delay(TimeSpan.FromSeconds(2));
+
+            var afterIds = new List<string> { await SeedAsync(), await SeedAsync() };
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", string.Join(",", beforeIds.Concat(afterIds))),
+                Tuple.Create("_lastUpdated", "ge" + cut.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture) + "Z"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+            SearchResult legacyResults = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the partial-precision _lastUpdated range to run on Ignixa. Router log: " + string.Join(" | ", fixture.IgnixaRouterLog));
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            List<string> legacyMatches = ResourceIdsInResultOrder(legacyResults);
+            List<string> ignixaMatches = ResourceIdsInResultOrder(ignixaResults);
+
+            // Anti-vacuity: the range must actually have cut the seeded set in half. An engine that ignored
+            // _lastUpdated entirely would return four, and one that mis-bounded it would return none.
+            Assert.Equal(afterIds.OrderBy(id => id, StringComparer.Ordinal), legacyMatches.OrderBy(id => id, StringComparer.Ordinal));
+            Assert.Equal(legacyMatches, ignixaMatches);
+        }
+
+        [Fact]
         public async Task GivenAForwardIncludeOverIndexedReferences_WhenExecutedOnBothEngines_ThenIgnixaMaterialisesTheSameIncludedRowsAsLegacy()
         {
             // The include differential that is NOT vacuous. Unlike the mediator-seeded include tests in this file,
