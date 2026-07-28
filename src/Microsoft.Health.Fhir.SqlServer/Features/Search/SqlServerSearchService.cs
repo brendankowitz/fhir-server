@@ -2411,6 +2411,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                     using (SqlCommand sqlCommand = connection.CreateCommand()) // WARNING, this code will not set sqlCommand.Transaction. Sql transactions via C#/.NET are not supported in this method.
                     {
                         sqlCommand.CommandTimeout = (int)_sqlServerDataStoreConfiguration.CommandTimeout.TotalSeconds;
+                        var useIgnixaExecution = false;
 
                         var exportTimeTravel = clonedSearchOptions.QueryHints != null && ContainsGlobalEndSurrogateId(clonedSearchOptions);
                         if (exportTimeTravel)
@@ -2420,25 +2421,63 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                         }
                         else
                         {
-                            var stringBuilder = new IndentedStringBuilder(new StringBuilder());
+                            IFhirRequestContext ignixaRequestContext = _requestContextAccessor.RequestContext;
+                            bool accessControlPredicateRequired =
+                                ignixaRequestContext?.AccessControlContext?.ApplyFineGrainedAccessControl == true
+                                || !string.IsNullOrWhiteSpace(ignixaRequestContext?.AccessControlContext?.CompartmentResourceType);
 
-                            EnableTimeAndIoMessageLogging(stringBuilder, connection);
+                            // The $includes page is routed through the same compile-only router as an ordinary
+                            // search (see SearchImpl). When Ignixa accepts the includes-only shape it emits its
+                            // own parameterized SQL; otherwise the legacy generator runs exactly as before. This
+                            // is a router decision, not a replacement - the legacy fallback below is intact.
+                            IgnixaSqlExecutionPlan ignixaPlan = await _ignixaSqlCompileOnlyRouter.TryCreateExecutionPlanAsync(
+                                clonedSearchOptions,
+                                accessControlPredicateRequired,
+                                cancellationToken);
 
-                            var queryGenerator = new SqlQueryGenerator(
-                                stringBuilder,
-                                new HashingSqlQueryParameterManager(new SqlQueryParameterManager(sqlCommand.Parameters)),
-                                _model,
-                                _schemaInformation,
-                                _queryGeneratorFactory,
-                                _fhirSqlServerConfiguration.ReuseQueryPlans && _queryPlanReuseChecker.CanReuseQueryPlan(clonedSearchOptions),
-                                sqlSearchOptions.IsAsyncOperation,
-                                sqlException);
+                            string queryText;
 
-                            expression.AcceptVisitor(queryGenerator, clonedSearchOptions);
+                            if (ignixaPlan != null)
+                            {
+                                useIgnixaExecution = true;
 
-                            SqlCommandSimplifier.RemoveRedundantParameters(stringBuilder, sqlCommand.Parameters, _logger);
+                                queryText = ignixaPlan.EmittedSql.Sql;
 
-                            var queryText = stringBuilder.ToString();
+                                foreach (EmittedSqlParameter ignixaParameter in ignixaPlan.EmittedSql.Parameters)
+                                {
+                                    sqlCommand.Parameters.AddWithValue(ignixaParameter.Name, ignixaParameter.Value ?? DBNull.Value);
+                                }
+
+                                Interlocked.Increment(ref _instanceIgnixaExecutedQueryCount);
+                                _logger.LogInformation(
+                                    "SQL Search Service used the Ignixa execution path for the $includes page. HasIncludes={HasIncludes}",
+                                    ignixaPlan.HasIncludes);
+                            }
+                            else
+                            {
+                                Interlocked.Increment(ref _instanceLegacyExecutedQueryCount);
+
+                                var stringBuilder = new IndentedStringBuilder(new StringBuilder());
+
+                                EnableTimeAndIoMessageLogging(stringBuilder, connection);
+
+                                var queryGenerator = new SqlQueryGenerator(
+                                    stringBuilder,
+                                    new HashingSqlQueryParameterManager(new SqlQueryParameterManager(sqlCommand.Parameters)),
+                                    _model,
+                                    _schemaInformation,
+                                    _queryGeneratorFactory,
+                                    _fhirSqlServerConfiguration.ReuseQueryPlans && _queryPlanReuseChecker.CanReuseQueryPlan(clonedSearchOptions),
+                                    sqlSearchOptions.IsAsyncOperation,
+                                    sqlException);
+
+                                expression.AcceptVisitor(queryGenerator, clonedSearchOptions);
+
+                                SqlCommandSimplifier.RemoveRedundantParameters(stringBuilder, sqlCommand.Parameters, _logger);
+
+                                queryText = stringBuilder.ToString();
+                            }
+
                             var queryHash = _queryHashCalculator.CalculateHash(queryText);
                             _logger.LogInformation("SQL Search Service query hash: {QueryHash}", queryHash);
                             var customQuery = CustomQueries.CheckQueryHash(connection, queryHash, _logger);
@@ -2450,7 +2489,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                                 sqlCommand.CommandType = CommandType.StoredProcedure;
                             }
 
-                            // Command text contains no direct user input.
+                            // Command text is either Ignixa-emitted parameterized SQL or legacy-generated SQL
+                            // with no direct user input.
 #pragma warning disable CA2100 // Review SQL queries for security vulnerabilities
                             sqlCommand.CommandText = queryText;
 #pragma warning restore CA2100 // Review SQL queries for security vulnerabilities
@@ -2495,22 +2535,65 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
 
                                 while (await reader.ReadAsync(cancellationToken))
                                 {
-                                    ReadWrapper(
-                                        reader,
-                                        exportTimeTravel,
-                                        out short resourceTypeId,
-                                        out string resourceId,
-                                        out int version,
-                                        out bool isDeleted,
-                                        out long resourceSurrogateId,
-                                        out string requestMethod,
-                                        out bool isMatch,
-                                        out bool isPartialEntry,
-                                        out bool isRawResourceMetaSet,
-                                        out string searchParameterHash,
-                                        out byte[] rawResourceBytes,
-                                        out bool isInvisible,
-                                        out bool isHistory);
+                                    short resourceTypeId;
+                                    string resourceId;
+                                    int version;
+                                    bool isDeleted;
+                                    long resourceSurrogateId;
+                                    string requestMethod;
+                                    bool isMatch;
+                                    bool isPartialEntry;
+                                    bool isRawResourceMetaSet;
+                                    string searchParameterHash;
+                                    byte[] rawResourceBytes;
+                                    bool isInvisible;
+                                    bool isHistory;
+
+                                    if (useIgnixaExecution)
+                                    {
+                                        // The includes-only plan projects (T1, Sid1, IsMatch, IsPartial, projection)
+                                        // with no custom sort keys, so hasIncludes is true and sortKeyColumnCount is
+                                        // zero. Every row is an included resource (IsMatch = 0); the reader still
+                                        // reports IsMatch so the surrounding loop stays engine-agnostic.
+                                        IgnixaResourceReader.Read(
+                                            reader,
+                                            hasIncludes: true,
+                                            sortKeyColumnCount: 0,
+                                            captureSortValue: false,
+                                            out resourceTypeId,
+                                            out resourceId,
+                                            out version,
+                                            out isDeleted,
+                                            out resourceSurrogateId,
+                                            out requestMethod,
+                                            out isMatch,
+                                            out isPartialEntry,
+                                            out _,
+                                            out isRawResourceMetaSet,
+                                            out searchParameterHash,
+                                            out rawResourceBytes,
+                                            out isInvisible,
+                                            out isHistory);
+                                    }
+                                    else
+                                    {
+                                        ReadWrapper(
+                                            reader,
+                                            exportTimeTravel,
+                                            out resourceTypeId,
+                                            out resourceId,
+                                            out version,
+                                            out isDeleted,
+                                            out resourceSurrogateId,
+                                            out requestMethod,
+                                            out isMatch,
+                                            out isPartialEntry,
+                                            out isRawResourceMetaSet,
+                                            out searchParameterHash,
+                                            out rawResourceBytes,
+                                            out isInvisible,
+                                            out isHistory);
+                                    }
 
                                     if (isInvisible)
                                     {

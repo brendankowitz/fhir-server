@@ -259,14 +259,18 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return false;
             }
 
-            if (searchOptions.IncludesContinuationToken != null)
+            if (searchOptions.IncludesContinuationToken != null && !IsIncludesOperationEligible(searchOptions, out string includesSkipReason))
             {
-                // The $includes sub-operation is a dedicated second-phase paging protocol (IsIncludesOperation path,
-                // IncludesOperationRewriter, and the match surrogate-range windowing that mints IncludesContinuationToken)
-                // entangled with the legacy include machinery this change must not modify. Wiring the compiler's
-                // IncludesOnly capability would require Ignixa to reproduce that entire protocol and prove page-for-page
-                // agreement, which is out of scope here.
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "includes-continuation-token");
+                // The $includes sub-operation now routes to Ignixa's IncludesOnly capability for the plain
+                // (unsorted) include page: SqlServerSearchService.SearchIncludeImpl consults this router, and the
+                // adapter translates the IncludesContinuationToken's match window and resume point into an
+                // includes-only plan. What remains on legacy is the sorted two-phase protocol (SortQuerySecondPhase
+                // / SecondPhaseContinuationToken) and count-only includes; see IsIncludesOperationEligible and
+                // IgnixaSqlCompilerAdapter.TryBuildIncludesOnlyWindow for why those shapes are deferred.
+                _logger.LogDebug(
+                    "Skipping Ignixa compile-only observation. Reason={Reason}, Detail={Detail}",
+                    "includes-continuation-token",
+                    includesSkipReason);
                 return false;
             }
 
@@ -306,6 +310,45 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 // so a future access control mechanism that nobody teaches the translator about fails closed here
                 // instead of silently routing unenforced.
                 _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "access-control-predicate");
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Returns <see langword="true"/> when a <c>$includes</c> request may be served by Ignixa's
+        /// <c>IncludesOnly</c> capability, or <see langword="false"/> with a <paramref name="skipReason"/> for a
+        /// shape still owned by the legacy include machinery. This mirrors
+        /// <c>IgnixaSqlCompilerAdapter.TryBuildIncludesOnlyWindow</c> so the router and the adapter agree on
+        /// which include pages route.
+        /// </summary>
+        private static bool IsIncludesOperationEligible(SqlSearchOptions searchOptions, out string skipReason)
+        {
+            skipReason = null;
+
+            // A count-only $includes is contradictory - Lower rejects IncludesOnly with CountOnly and legacy
+            // never counts included resources - so it stays on legacy.
+            if (searchOptions.CountOnly)
+            {
+                skipReason = "count-only";
+                return false;
+            }
+
+            IncludesContinuationToken token = IncludesContinuationToken.FromString(searchOptions.IncludesContinuationToken);
+            if (token == null)
+            {
+                // An unparseable includes token is a legacy BadRequest, not an Ignixa page.
+                skipReason = "unparseable-token";
+                return false;
+            }
+
+            // Deferred: the sorted two-phase $includes protocol. The cross-phase match reconstruction behind
+            // SortQuerySecondPhase / SecondPhaseContinuationToken has no Ignixa spelling yet, so those pages keep
+            // the legacy path.
+            if (token.SortQuerySecondPhase == true || token.SecondPhaseContinuationToken != null)
+            {
+                skipReason = "second-phase-sort";
                 return false;
             }
 

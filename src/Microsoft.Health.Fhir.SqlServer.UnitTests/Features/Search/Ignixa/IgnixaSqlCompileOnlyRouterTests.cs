@@ -337,13 +337,54 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
-        public async Task ObserveAsync_WhenIncludesContinuationTokenSet_DoesNotCompile()
+        public async Task ObserveAsync_WhenIncludesContinuationTokenIsUnparseable_DoesNotCompile()
         {
+            // The includes gate is now narrowed: a plain (unsorted) $includes page routes to Ignixa's IncludesOnly
+            // capability, but an includes token that does not parse is still legacy's -- SearchIncludeImpl raises a
+            // BadRequest on it, and Ignixa must not serve an unbounded include stream in its place. "some-includes-
+            // token" is not a valid token, so the gate closes and the adapter is never asked to compile.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
             var router = CreateRouter(adapter, EnabledConfig());
 
             SqlSearchOptions options = CreateEligibleOptions();
             options.IncludesContinuationToken = "some-includes-token";
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenIncludesContinuationTokenIsFirstPage_Compiles()
+        {
+            // A plain first-page $includes token ([MatchTypeId, min, max], no include cursor, no second phase) is
+            // exactly the shape the IncludesOnly path serves, so the gate must let it through to the adapter. The
+            // mock returns a capability failure only to keep the assertion on "was CompileAsync reached", not on
+            // the emitted SQL -- the end-to-end SQL is covered by the integration differentials.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.IncludesContinuationToken = new IncludesContinuationToken(new object[] { (short)1, 1L, 100L }).ToString();
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenIncludesContinuationTokenIsSecondPhaseSort_DoesNotCompile()
+        {
+            // The sorted two-phase $includes protocol (SortQuerySecondPhase set) reconstructs the match set across
+            // an ascending/descending phase boundary, which Ignixa has no spelling for yet. That shape stays on
+            // legacy, so the gate must close and never reach the adapter even though the token itself parses.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.IncludesContinuationToken = new IncludesContinuationToken(new object[] { (short)1, 1L, 100L, null, null, true }).ToString();
 
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
 

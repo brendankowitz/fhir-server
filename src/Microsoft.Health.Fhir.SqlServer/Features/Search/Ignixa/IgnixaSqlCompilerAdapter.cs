@@ -113,6 +113,22 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             IReadOnlyList<IncludeExpression> includes = searchOptions.CountOnly ? EmptyIncludes : (ignixaOptions.Include ?? EmptyIncludes);
             IReadOnlyList<IncludeExpression> revIncludes = searchOptions.CountOnly ? EmptyIncludes : (ignixaOptions.RevInclude ?? EmptyIncludes);
 
+            // The FHIR $includes sub-operation. When the request carries an IncludesContinuationToken, the
+            // caller already has the match page and is asking only for the remaining included resources, paged
+            // globally over the union of every include stage. Translate that token into the three inputs the
+            // Ignixa emitter needs - IncludesOnly, the match surrogate window, and the resume cursor - or, for
+            // the shapes still owned by legacy (count-only, unparseable token, sorted second phase), return a
+            // capability failure so the request falls back to the legacy include machinery.
+            IgnixaSqlCompilationOutcome includesFailure = TryBuildIncludesOnlyWindow(
+                searchOptions,
+                out bool includesOnly,
+                out SurrogateIdRange includesSurrogateRange,
+                out IncludeCursor includeCursor);
+            if (includesFailure != null)
+            {
+                return includesFailure;
+            }
+
             // The legacy SQL search service issues two query phases for sorts on parameters that may be
             // missing. Ascending sorts search missing values first, while descending sorts search valued
             // values first. Map the legacy phase flag to the corresponding Ignixa sort phase.
@@ -296,6 +312,15 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                         // the legacy generator's truth table exactly - including History-only and
                         // SoftDeleted-only, which legacy renders as IsHistory = 1 / IsDeleted = 1.
                         Visibility = ToVisibility(searchOptions.ResourceVersionTypes),
+
+                        // The FHIR $includes page. IncludesOnly drops the match arm from the output while still
+                        // using it to seed the include stages; SurrogateRange bounds that seed to the exact
+                        // match window the first page recorded (legacy's "Sid BETWEEN @min AND @max"); and
+                        // IncludeCursor resumes the global (T1, Sid1) include stream after the last row the
+                        // previous page returned. All three are null/false for an ordinary search.
+                        IncludesOnly = includesOnly,
+                        SurrogateRange = includesSurrogateRange,
+                        IncludeCursor = includeCursor,
                     });
             }
             catch (NotSupportedException ex)
@@ -449,6 +474,79 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             return separator >= 0 && separator < informationalVersion.Length - 1
                 ? informationalVersion[(separator + 1)..]
                 : UnknownVersion;
+        }
+
+        /// <summary>
+        /// Detects the FHIR <c>$includes</c> sub-operation and translates its
+        /// <see cref="IncludesContinuationToken"/> into the three Ignixa emitter inputs that reproduce the
+        /// legacy global include page. Returns <see langword="null"/> on success (with the out-parameters set),
+        /// or a capability failure for a shape still owned by the legacy path so the caller falls back.
+        /// </summary>
+        /// <param name="searchOptions">The search request under compilation.</param>
+        /// <param name="includesOnly">Set to <see langword="true"/> when this is an includes page.</param>
+        /// <param name="surrogateRange">The inclusive match surrogate-id window, or <see langword="null"/> when not an includes page.</param>
+        /// <param name="includeCursor">The include-stream resume cursor, or <see langword="null"/> on the first includes page.</param>
+        /// <returns>A capability failure to fall back to legacy, or <see langword="null"/> to proceed.</returns>
+        private IgnixaSqlCompilationOutcome TryBuildIncludesOnlyWindow(
+            SqlSearchOptions searchOptions,
+            out bool includesOnly,
+            out SurrogateIdRange surrogateRange,
+            out IncludeCursor includeCursor)
+        {
+            includesOnly = false;
+            surrogateRange = null;
+            includeCursor = null;
+
+            if (string.IsNullOrEmpty(searchOptions.IncludesContinuationToken))
+            {
+                return null;
+            }
+
+            IncludesContinuationToken token = IncludesContinuationToken.FromString(searchOptions.IncludesContinuationToken);
+            if (token == null)
+            {
+                // Legacy SearchIncludeImpl throws BadRequestException on an unparseable includes token. Declining
+                // here hands the same request to the legacy path, which raises that error - Ignixa must not
+                // silently serve an unbounded include stream in its place.
+                return CapabilityFailure("includes", "includes-continuation-token-unparseable", EmptyUnresolvedParameters);
+            }
+
+            // Deferred: the sorted two-phase $includes protocol. SortQuerySecondPhase and a
+            // SecondPhaseContinuationToken belong to SqlServerSearchService's second-phase-sort machinery, which
+            // reconstructs the match set across an ascending/descending phase boundary before paging includes.
+            // Ignixa has no equivalent for that cross-phase reconstruction, so these shapes stay on legacy. This
+            // is a scoping decision, not a capability the compiler lacks outright - the plain (unsorted) include
+            // page is what this change delivers.
+            if (token.SortQuerySecondPhase == true || token.SecondPhaseContinuationToken != null)
+            {
+                return CapabilityFailure("includes", "includes-second-phase-sort", EmptyUnresolvedParameters);
+            }
+
+            // A count-only $includes is contradictory: Lower rejects IncludesOnly together with CountOnly, and
+            // included resources are never counted anyway (legacy discards the includes for a count). Fall back.
+            if (searchOptions.CountOnly)
+            {
+                return CapabilityFailure("includes", "includes-count-only", EmptyUnresolvedParameters);
+            }
+
+            includesOnly = true;
+
+            // The match window is supplied as an Ignixa SurrogateRange rather than pushed through the expression
+            // pipeline as the legacy synthetic SqlSearchParameters.ResourceSurrogateIdParameter: that parameter
+            // is a legacy-only construct with no Ignixa search-parameter equivalent, whereas SurrogateRange is
+            // exactly the compiler's inclusive "bound the match set by surrogate id" input.
+            surrogateRange = new SurrogateIdRange(
+                new SqlParameterRef(token.MatchResourceSurrogateIdMin),
+                new SqlParameterRef(token.MatchResourceSurrogateIdMax));
+
+            // No cursor on the first includes page: both include fields are null until a page has returned at
+            // least one include row, and the token mints them together, so require both before resuming.
+            if (token.IncludeResourceTypeId != null && token.IncludeResourceSurrogateId != null)
+            {
+                includeCursor = new IncludeCursor(token.IncludeResourceTypeId.Value, token.IncludeResourceSurrogateId.Value);
+            }
+
+            return null;
         }
 
         /// <summary>

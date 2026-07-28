@@ -2281,9 +2281,9 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             // Two things are pinned. First, that the protocol genuinely engages here: an overflowing include search
             // must mint an IncludesContinuationToken, and feeding it back must return the remaining include rows.
             // Without that guard everything below would pass vacuously on an empty second page. Second, that both
-            // engines produce the same $includes page. That is true today for a reason worth naming: $includes
-            // never reaches the router (see the closing assertions), so both services run the same legacy
-            // generator. When SearchIncludeImpl is routed, this test becomes a real engine differential.
+            // engines produce the same $includes page. SearchIncludeImpl now routes through the compile-only
+            // router, so the includes-enabled Ignixa service serves the page on Ignixa and the legacy service on
+            // the legacy generator -- a genuine engine differential (see the closing assertions).
             var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
             SqlServerSearchService ignixaSearchService = fixture.IgnixaIncludesSearchService;
             SqlServerSearchService legacySearchService = fixture.LegacyIncludesSearchService;
@@ -2364,20 +2364,16 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
 
             Assert.Equal(new[] { patientId, practitionerId }.OrderBy(x => x, StringComparer.Ordinal), acrossPages.OrderBy(x => x, StringComparer.Ordinal));
 
-            // Where Ignixa stands today, and it is not what the router's includes-continuation-token gate
-            // suggests. $includes does not reach the router at all: SqlServerSearchService.SearchAsync sends an
-            // includes-continuation-token request to SearchIncludeImpl, which builds its own SqlQueryGenerator
-            // directly and never consults IIgnixaSqlCompileOnlyRouter. So neither execution counter moves and the
-            // router logs nothing -- the gate is unreachable dead code for this path.
-            //
-            // That makes the remaining work larger than "close a gate": SearchIncludeImpl has to be routed before
-            // an Ignixa includes page can ever run. When it is, replace this block with the usual assertion that
-            // InstanceIgnixaExecutedQueryCount moved and InstanceLegacyExecutedQueryCount did not.
-            Assert.Equal(ignixaBefore, ignixaSearchService.InstanceIgnixaExecutedQueryCount);
-            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+            // SearchIncludeImpl now consults IIgnixaSqlCompileOnlyRouter, so the includes-enabled Ignixa service
+            // serves this $includes page on the Ignixa engine while the legacy service stays on the legacy
+            // generator. The premise of this test changed with that routing: it used to assert $includes bypassed
+            // the router entirely (both counters frozen, empty log). It is now a real engine differential -- the
+            // Ignixa execution counter moved, the legacy counter on the same service did not, and the row-mode
+            // comparison above already proved the two engines' pages are identical.
             Assert.True(
-                string.IsNullOrEmpty(routerLog),
-                $"The router was consulted for the $includes page after all, so it is no longer bypassed and this test's premise has changed. Router log: {routerLog}");
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                $"The Ignixa $includes page did not run on the Ignixa engine. Router log: {routerLog}");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
         }
 
         /// <summary>
@@ -2392,6 +2388,154 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
 
             query.Add(Tuple.Create(Core.Features.KnownQueryParameterNames.IncludesContinuationToken, ContinuationTokenEncoder.Encode(includesContinuationToken)));
             return query;
+        }
+
+        /// <summary>
+        /// Rebuilds a first-page query as a follow-up <c>$includes</c> page request that stays budgeted: unlike
+        /// <see cref="IncludesPageQuery"/> it keeps <c>_includesCount</c>, so each page returns at most that many
+        /// included resources and mints a further token when more remain -- turning a single follow-up page into a
+        /// multi-page walk.
+        /// </summary>
+        private static List<Tuple<string, string>> IncludesWalkPageQuery(IEnumerable<Tuple<string, string>> budgetedQuery, string includesContinuationToken)
+        {
+            var query = budgetedQuery.ToList();
+            query.Add(Tuple.Create(Core.Features.KnownQueryParameterNames.IncludesContinuationToken, ContinuationTokenEncoder.Encode(includesContinuationToken)));
+            return query;
+        }
+
+        [Fact]
+        public async Task GivenAMatchWithThreeIncludesPagedOneAtATime_WhenTheIncludesWalkRunsOnBothEngines_ThenIgnixaPagesEveryIncludedResourceOnceAndMatchesLegacy()
+        {
+            // The point of this test is the multi-page $includes walk, not just a single follow-up page. One match
+            // Observation carries three included resources across two stages (subject -> one Patient, performer ->
+            // two Practitioners). Paged one include at a time (_includesCount=1) the walk must span several
+            // $includes pages, and on every one of them the includes-enabled Ignixa service must run on Ignixa
+            // (its execution counter moves, its legacy counter does not) while producing exactly the rows legacy
+            // produces. Across the whole walk each included resource must appear exactly once and the walk must
+            // terminate -- the property a broken resume boundary (double-emitting or skipping an include) would
+            // violate, and the reason the $includes continuation token exists.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaIncludesSearchService;
+            SqlServerSearchService legacySearchService = fixture.LegacyIncludesSearchService;
+
+            var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            patient.Id = Guid.NewGuid().ToString();
+            string patientId = await UpsertWithSearchIndicesAsync(patient);
+
+            var practitionerA = new Practitioner { Id = Guid.NewGuid().ToString() };
+            string practitionerAId = await UpsertWithSearchIndicesAsync(practitionerA);
+
+            var practitionerB = new Practitioner { Id = Guid.NewGuid().ToString() };
+            string practitionerBId = await UpsertWithSearchIndicesAsync(practitionerB);
+
+            var observation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept { Text = $"IgnixaIncludesWalk_{Guid.NewGuid()}" },
+                Subject = new ResourceReference($"Patient/{patientId}"),
+                Performer = new List<ResourceReference>
+                {
+                    new ResourceReference($"Practitioner/{practitionerAId}"),
+                    new ResourceReference($"Practitioner/{practitionerBId}"),
+                },
+            };
+            string observationId = await UpsertWithSearchIndicesAsync(observation);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", observationId),
+                Tuple.Create("_include", "Observation:subject"),
+                Tuple.Create("_include", "Observation:performer"),
+                Tuple.Create("_includesCount", "1"),
+            };
+
+            SearchResult legacyFirstPage = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+            SearchResult ignixaFirstPage = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            Assert.False(
+                string.IsNullOrEmpty(legacyFirstPage.IncludesContinuationToken),
+                "Legacy did not mint an includes continuation token, so the walk never began and the rest of this test would be vacuous.");
+            Assert.False(
+                string.IsNullOrEmpty(ignixaFirstPage.IncludesContinuationToken),
+                "The Ignixa-routed service did not mint an includes continuation token even though the include budget overflowed.");
+
+            var seeded = new HashSet<string>(new[] { patientId, practitionerAId, practitionerBId, observationId }, StringComparer.Ordinal);
+            Assert.Equal(SeededModeMap(legacyFirstPage, seeded), SeededModeMap(ignixaFirstPage, seeded));
+
+            // Every included resource seen anywhere in the walk, asserting exactly-once as we go.
+            var includedIds = new HashSet<string>(StringComparer.Ordinal);
+
+            void CollectIncludesOnce(SearchResult page)
+            {
+                foreach (SearchResultEntry entry in page.Results)
+                {
+                    if (entry.SearchEntryMode == SearchEntryMode.Include)
+                    {
+                        Assert.True(
+                            includedIds.Add(entry.Resource.ResourceId),
+                            $"{entry.Resource.ResourceId} was returned on more than one page of the $includes walk.");
+                    }
+                }
+            }
+
+            CollectIncludesOnce(legacyFirstPage);
+
+            string legacyToken = legacyFirstPage.IncludesContinuationToken;
+            string ignixaToken = ignixaFirstPage.IncludesContinuationToken;
+
+            int includesPageCount = 0;
+
+            // The walk covers three includes one per page, so it terminates in a handful of pages; the cap only
+            // guards against a resume boundary that never advances, which would otherwise loop forever.
+            const int maxIncludesPages = 12;
+
+            while (!string.IsNullOrEmpty(legacyToken))
+            {
+                Assert.True(++includesPageCount <= maxIncludesPages, "The $includes walk did not terminate.");
+
+                long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                long legacyCounterBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+                fixture.IgnixaRouterLog.Clear();
+
+                SearchResult legacyIncludesPage = await legacySearchService.SearchAsync(
+                    "Observation",
+                    IncludesWalkPageQuery(query, legacyToken),
+                    CancellationToken.None,
+                    isIncludesOperation: true);
+
+                SearchResult ignixaIncludesPage = await ignixaSearchService.SearchAsync(
+                    "Observation",
+                    IncludesWalkPageQuery(query, ignixaToken),
+                    CancellationToken.None,
+                    isIncludesOperation: true);
+
+                string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+
+                Assert.True(
+                    ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                    $"$includes walk page {includesPageCount} did not run on the Ignixa engine. Router log: {routerLog}");
+                Assert.Equal(legacyCounterBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+                Assert.Equal(SeededModeMap(legacyIncludesPage, seeded), SeededModeMap(ignixaIncludesPage, seeded));
+
+                CollectIncludesOnce(legacyIncludesPage);
+
+                legacyToken = legacyIncludesPage.IncludesContinuationToken;
+                ignixaToken = ignixaIncludesPage.IncludesContinuationToken;
+
+                // Both engines must agree on when the walk ends; a divergence here would mean one engine is still
+                // paging while the other has stopped, i.e. a resume-boundary bug rather than a mere row mismatch.
+                Assert.Equal(string.IsNullOrEmpty(legacyToken), string.IsNullOrEmpty(ignixaToken));
+            }
+
+            Assert.True(
+                includesPageCount >= 2,
+                "The walk collapsed to a single $includes page, so multi-page paging was never exercised -- seed more distinct includes.");
+
+            Assert.Equal(
+                new[] { patientId, practitionerAId, practitionerBId }.OrderBy(x => x, StringComparer.Ordinal),
+                includedIds.OrderBy(x => x, StringComparer.Ordinal));
         }
 
         [Fact]
