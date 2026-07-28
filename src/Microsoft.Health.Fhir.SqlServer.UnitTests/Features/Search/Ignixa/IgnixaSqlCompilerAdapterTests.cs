@@ -412,6 +412,159 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Theory]
+
+        // A token carrying a sort value was minted by the valued segment, so the next page continues there -
+        // in BOTH directions. Direction alone would send the descending case to the missing segment.
+        [InlineData(IgnixaSortOrder.Ascending, "[\"2021-01-01T00:00:00.0000000\",1,5000]", SortPhase.Valued)]
+        [InlineData(IgnixaSortOrder.Descending, "[\"2021-01-01T00:00:00.0000000\",1,5000]", SortPhase.Valued)]
+
+        // A token carrying no sort value was minted by the missing segment, so the next page continues there -
+        // again in both directions.
+        [InlineData(IgnixaSortOrder.Ascending, "[1,5000]", SortPhase.MissingPrimary)]
+        [InlineData(IgnixaSortOrder.Descending, "[1,5000]", SortPhase.MissingPrimary)]
+        public async Task CompileAsync_WhenCustomSortContinuationTokenSet_DerivesPhaseFromTheTokenNotTheDirection(
+            IgnixaSortOrder sortOrder,
+            string continuationToken,
+            SortPhase expectedSortPhase)
+        {
+            // SortRewriter's branch order is not a single xor of direction and the second-phase flag once
+            // continuation tokens exist: the token itself decides, because it was minted by the segment that
+            // produced it. Getting this wrong does not mis-order rows subtly - Ignixa's EmitSeekPredicate
+            // enforces boundary arity per phase, so a wrong phase either throws or re-serves the first page.
+            var sortParamUri = new Uri("http://hl7.org/fhir/SearchParameter/Patient-birthdate");
+            var sortParameter = new IgnixaSearchParameterInfo(
+                "birthdate",
+                "birthdate",
+                SearchParamType.Date,
+                sortParamUri,
+                components: null,
+                expression: null,
+                targetResourceTypes: null,
+                baseResourceTypes: new[] { "Patient" },
+                description: null);
+            var model = CreateResolvableModel(sortParamUri);
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+
+            SqlSearchOptions options = CreateOptions(ignixaOptions =>
+            {
+                ignixaOptions.Expression = null;
+                ignixaOptions.Sort = new[] { new SortExpression(sortParameter, sortOrder) };
+            });
+            options.ContinuationToken = continuationToken;
+
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            Assert.True(result.Compiled, $"Expected compilation to succeed; stage={result.FailureStage}, kind={result.FailureKind}");
+            Assert.Equal(expectedSortPhase, result.LoweredPlan!.Plan.Sort!.Phase);
+
+            if (expectedSortPhase == SortPhase.Valued)
+            {
+                // The valued phase makes the one sort key active, so the seek needs exactly one boundary value,
+                // typed like the datetime2 column rather than left as the token's round-trip string - binding the
+                // string would order lexically.
+                Assert.Contains(
+                    result.EmittedSql!.Parameters,
+                    p => p.Value is DateTime dt && dt == new DateTime(2021, 1, 1, 0, 0, 0, DateTimeKind.Unspecified));
+            }
+            else
+            {
+                // The missing phase drops the primary key, so the seek degenerates to the (T1, Sid1) tiebreak
+                // and must carry no sort boundary at all.
+                Assert.DoesNotContain(result.EmittedSql!.Parameters, p => p.Value is DateTime);
+            }
+
+            // Either way the composite identity boundary from the token is bound.
+            Assert.Contains(result.EmittedSql!.Parameters, p => p.Value is short s && s == 1);
+            Assert.Contains(result.EmittedSql.Parameters, p => p.Value is long l && l == 5000L);
+        }
+
+        [Theory]
+        [InlineData(IgnixaSortOrder.Ascending, SortPhase.Valued)]
+        [InlineData(IgnixaSortOrder.Descending, SortPhase.MissingPrimary)]
+        public async Task CompileAsync_WhenSecondPhaseSentinelTokenSet_SwitchesSegmentAndDiscardsTheBoundary(
+            IgnixaSortOrder sortOrder,
+            SortPhase expectedSortPhase)
+        {
+            // SearchImpl mints a sentinel token (sentinel sort value, surrogate id 0) when the first segment
+            // filled the page exactly and a probe found rows in the other segment. SortQuerySecondPhase is a
+            // per-request field and is false on the fresh request carrying that token, so the sentinel must be
+            // honoured on its own or page two repeats page one. Legacy discards the boundary entirely.
+            var sortParamUri = new Uri("http://hl7.org/fhir/SearchParameter/Patient-birthdate");
+            var sortParameter = new IgnixaSearchParameterInfo(
+                "birthdate",
+                "birthdate",
+                SearchParamType.Date,
+                sortParamUri,
+                components: null,
+                expression: null,
+                targetResourceTypes: null,
+                baseResourceTypes: new[] { "Patient" },
+                description: null);
+            var model = CreateResolvableModel(sortParamUri);
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+
+            SqlSearchOptions options = CreateOptions(ignixaOptions =>
+            {
+                ignixaOptions.Expression = null;
+                ignixaOptions.Sort = new[] { new SortExpression(sortParameter, sortOrder) };
+            });
+            options.ContinuationToken = $"[\"{SqlSearchConstants.SortSentinelValueForCt}\",0]";
+
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            Assert.True(result.Compiled, $"Expected compilation to succeed; stage={result.FailureStage}, kind={result.FailureKind}");
+            Assert.Equal(expectedSortPhase, result.LoweredPlan!.Plan.Sort!.Phase);
+
+            // No boundary survives the sentinel: the other segment restarts from the top, exactly as legacy does.
+            Assert.DoesNotContain(result.EmittedSql!.Parameters, p => p.Value is long l && l == 0L);
+        }
+
+        [Fact]
+        public async Task CompileAsync_WhenCustomSortTokenOmitsTheResourceTypeSlot_SubstitutesTheSearchsOwnType()
+        {
+            // This is the shape a real custom-sort token actually has. SearchImpl mints one array slot per
+            // SearchOptions.Sort entry, mapping _type to the type id and _lastUpdated to the surrogate id; a
+            // "_sort=date" request has no _type entry, so the token is [sortValue, surrogateId] and carries no
+            // type slot at all - legacy's sorted keyset compares Sid1 alone and never needed one. Ignixa's
+            // PageSpec always carries a type boundary, so the adapter substitutes the search's own resource
+            // type, which is exactly equivalent while the search is scoped to a single type. Before this the
+            // second page of every custom sort fell back to legacy.
+            var sortParamUri = new Uri("http://hl7.org/fhir/SearchParameter/Patient-birthdate");
+            var sortParameter = new IgnixaSearchParameterInfo(
+                "birthdate",
+                "birthdate",
+                SearchParamType.Date,
+                sortParamUri,
+                components: null,
+                expression: null,
+                targetResourceTypes: null,
+                baseResourceTypes: new[] { "Patient" },
+                description: null);
+            var model = CreateResolvableModel(sortParamUri);
+            var adapter = CreateAdapter(new IgnixaSqlSymbolResolver(model));
+
+            SqlSearchOptions options = CreateOptions(ignixaOptions =>
+            {
+                ignixaOptions.Expression = null;
+                ignixaOptions.Sort = new[] { new SortExpression(sortParameter, IgnixaSortOrder.Descending) };
+            });
+            options.ContinuationToken = "[\"2021-01-01T00:00:00.0000000\",5000]";
+
+            IgnixaSqlCompilationOutcome result = await adapter.CompileAsync(options, CancellationToken.None);
+
+            Assert.True(result.Compiled, $"Expected compilation to succeed; stage={result.FailureStage}, kind={result.FailureKind}");
+            Assert.Equal(SortPhase.Valued, result.LoweredPlan!.Plan.Sort!.Phase);
+
+            // The substituted boundary is Patient's own type id (1 in the resolvable model), the sort value is
+            // typed as a DateTime, and the surrogate id comes from the token.
+            Assert.Contains(result.EmittedSql!.Parameters, p => p.Value is short s && s == 1);
+            Assert.Contains(result.EmittedSql.Parameters, p => p.Value is long l && l == 5000L);
+            Assert.Contains(
+                result.EmittedSql.Parameters,
+                p => p.Value is DateTime dt && dt == new DateTime(2021, 1, 1, 0, 0, 0, DateTimeKind.Unspecified));
+        }
+
+        [Theory]
         [InlineData(false)]
         [InlineData(true)]
         public async Task CompileAsync_WhenSortingByLastUpdated_AlwaysUsesValuedSortPhase(bool sortQuerySecondPhase)

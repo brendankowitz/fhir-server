@@ -1,9 +1,10 @@
-﻿// -------------------------------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -14,6 +15,7 @@ using Medino;
 using Microsoft.AspNetCore.Components.Forms;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Health.Abstractions.Features.Transactions;
@@ -138,6 +140,14 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         // unaffected; this parallel service exists solely to prove the Ignixa execution path runs real
         // SQL against the live database for eligible searches.
         internal SqlServerSearchService IgnixaSearchService { get; private set; }
+
+        /// <summary>
+        /// Every message the Ignixa router logged, newest last. The router logs a specific
+        /// <c>Reason=</c> for each eligibility gate it closes and a <c>Stage=/Kind=</c> for each compiler
+        /// capability gap, so a differential that unexpectedly falls back to legacy can report *why* instead of
+        /// only that it did. Shared across the class, so a test that wants a clean window should clear it first.
+        /// </summary>
+        internal ConcurrentQueue<string> IgnixaRouterLog { get; } = new ConcurrentQueue<string>();
 
         /// <summary>
         /// The request context both search services read. Exposed so a test can install an
@@ -357,9 +367,9 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
                 new IgnixaSqlCompilerAdapter(
                     new IgnixaSqlSymbolResolver(sqlServerFhirModel),
                     SchemaInformation,
-                    NullLogger<IgnixaSqlCompilerAdapter>.Instance),
+                    new CollectingLogger<IgnixaSqlCompilerAdapter>(IgnixaRouterLog)),
                 ignixaExecutionConfiguration,
-                NullLogger<IgnixaSqlCompileOnlyRouter>.Instance);
+                new CollectingLogger<IgnixaSqlCompileOnlyRouter>(IgnixaRouterLog));
 
             IgnixaSearchService = new SqlServerSearchService(
                 ignixaSearchOptionsFactory,
@@ -521,6 +531,43 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// An <see cref="ILogger{TCategoryName}"/> that appends every formatted message to a shared queue so a
+        /// differential test can read the Ignixa router's fallback reasons. The router deliberately logs one
+        /// distinct reason string per gate, which makes an unexpected legacy fallback self-diagnosing.
+        /// </summary>
+        private sealed class CollectingLogger<T> : ILogger<T>
+        {
+            private readonly ConcurrentQueue<string> _sink;
+
+            public CollectingLogger(ConcurrentQueue<string> sink)
+            {
+                _sink = sink;
+            }
+
+            public IDisposable BeginScope<TState>(TState state)
+                where TState : notnull => NullScope.Instance;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception exception, Func<TState, Exception, string> formatter)
+            {
+                if (formatter != null)
+                {
+                    _sink.Enqueue($"{typeof(T).Name}: {formatter(state, exception)}");
+                }
+            }
+
+            private sealed class NullScope : IDisposable
+            {
+                internal static readonly NullScope Instance = new NullScope();
+
+                public void Dispose()
+                {
+                }
+            }
         }
     }
 }

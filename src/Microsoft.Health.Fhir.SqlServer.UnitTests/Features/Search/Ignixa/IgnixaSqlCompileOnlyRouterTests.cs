@@ -29,6 +29,8 @@ using NSubstitute.ExceptionExtensions;
 using Xunit;
 using IgnixaSearchOptions = Ignixa.Search.Models.SearchOptions;
 using IgnixaSearchParameterInfo = Ignixa.Search.Models.SearchParameterInfo;
+using IgnixaSortOrder = Ignixa.Search.Expressions.SortOrder;
+using SortExpression = Ignixa.Search.Expressions.SortExpression;
 
 namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
 {
@@ -235,14 +237,43 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
-        public async Task ObserveAsync_WhenCustomSortContinuationTokenSet_DoesNotCompile()
+        public async Task ObserveAsync_WhenCustomSortContinuationTokenSet_IsEligibleAndCompiles()
         {
-            // A token that carries a sort value was minted for a custom _sort. The surrogate-only PageSpec
-            // cannot express that keyed boundary, so it must stay on the legacy path.
+            // A token that carries a sort value was minted by the valued segment of a single-key custom _sort.
+            // The adapter reconstructs that keyed boundary as a one-value PageSpec, so the request is eligible
+            // rather than being pushed back onto the legacy path.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.IgnixaOptions.Sort = new List<SortExpression>
+            {
+                new SortExpression(CreateDateSortParameter("date"), IgnixaSortOrder.Ascending),
+            };
+            options.ContinuationToken = "[\"2021-01-01T00:00:00.0000000\",3,5000]";
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenMultiKeySortContinuationTokenSet_DoesNotCompile()
+        {
+            // The continuation token carries exactly one SortValue, so a two-key sort has no boundary value
+            // for its second key and its lexicographic seek cannot be reconstructed. That must stay on legacy
+            // rather than seek from a boundary the compiler would reject for having the wrong arity.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
             var router = CreateRouter(adapter, EnabledConfig());
 
             SqlSearchOptions options = CreateEligibleOptions();
+            options.IgnixaOptions.Sort = new List<SortExpression>
+            {
+                new SortExpression(CreateDateSortParameter("date"), IgnixaSortOrder.Ascending),
+                new SortExpression(CreateDateSortParameter("issued"), IgnixaSortOrder.Ascending),
+            };
             options.ContinuationToken = "[\"2021-01-01T00:00:00.0000000\",3,5000]";
 
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
@@ -251,14 +282,36 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
-        public async Task ObserveAsync_WhenTypelessContinuationTokenSet_DoesNotCompile()
+        public async Task ObserveAsync_WhenTypelessContinuationTokenSetOnASingleTypeSearch_IsEligibleAndCompiles()
         {
-            // A bare surrogate-id token (no ResourceTypeId) is handled by legacy as a ResourceSurrogateId-only
-            // comparison, which the composite (T1, Sid1) PageSpec does not reproduce, so it stays on legacy.
+            // A custom-sort token is [sortValue, surrogateId] and never carries a ResourceTypeId slot, because
+            // legacy's sorted keyset compares Sid1 alone. Within a single-type search the search's own type id
+            // is the boundary the token omitted, so the adapter can reconstruct the composite seek and the
+            // request stays on the Ignixa path.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.ContinuationToken = "5000";
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenTypelessContinuationTokenSetOnAMultiTypeSearch_DoesNotCompile()
+        {
+            // With more than one target type there is no single constant ResourceTypeId to substitute for the
+            // boundary the token omitted, and legacy also tie-breaks differently across types (Sid1 alone versus
+            // Ignixa's T1 then Sid1). Keep it on legacy rather than seek from a guessed type boundary.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
             var router = CreateRouter(adapter, EnabledConfig());
 
             SqlSearchOptions options = CreateEligibleOptions();
+            options.IgnixaOptions.ResourceTypes = new List<string> { "Patient", "Observation" };
             options.ContinuationToken = "5000";
 
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
@@ -1080,6 +1133,23 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
                 new IgnixaSqlSymbolResolver(model),
                 schema,
                 NullLogger<IgnixaSqlCompilerAdapter>.Instance);
+        }
+
+        /// <summary>
+        /// A date-typed sort parameter, the shape a custom <c>_sort</c> continuation token is minted for.
+        /// </summary>
+        private static IgnixaSearchParameterInfo CreateDateSortParameter(string code)
+        {
+            return new IgnixaSearchParameterInfo(
+                code,
+                code,
+                global::Ignixa.Specification.ValueSets.Normative.SearchParamType.Date,
+                new Uri($"http://hl7.org/fhir/SearchParameter/clinical-{code}"),
+                components: null,
+                expression: null,
+                targetResourceTypes: null,
+                baseResourceTypes: new[] { "Observation" },
+                description: null);
         }
 
         /// <summary>

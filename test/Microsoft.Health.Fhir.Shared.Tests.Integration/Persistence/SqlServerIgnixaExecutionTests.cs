@@ -1409,6 +1409,219 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             Assert.DoesNotContain(excludedId, ignixaMatches);
         }
 
+        [Theory]
+        [InlineData("date", false)]
+        [InlineData("-date", true)]
+        public async Task GivenACustomSort_WhenPagedAcrossBoundaries_ThenIgnixaSortKeysetPagingAgreesWithLegacy(string sortExpression, bool descending)
+        {
+            // A custom "_sort" continuation token is a different animal from the surrogate-keyset token the
+            // match-all paging test walks: it carries a sort *value* as well as a surrogate id, and the phase the
+            // next page must run in is not a function of direction alone - it is decided by what the token
+            // carries (a token minted by the valued segment has a sort value; one minted by the missing segment
+            // does not) plus the second-phase sentinel. The adapter mirrors SortRewriter's branch order to derive
+            // that, and Ignixa's EmitSeekPredicate *throws* when the boundary arity does not match the phase, so a
+            // wrong derivation is not a subtle mis-order - it either throws or silently re-serves page one.
+            //
+            // Both directions run because they enter through different first-phase branches: ascending starts in
+            // the missing segment (empty here, so SearchImpl immediately runs the valued second phase inside the
+            // same request), descending starts in the valued segment directly.
+            //
+            // A unique "code" token pins the row set to this test's seeds so a shared, concurrently-written table
+            // cannot page the seeds out from under the walk - which also makes the expected order exact rather than
+            // legacy-relative. It is deliberately a search-parameter filter rather than "_id": a Resource-table-only
+            // predicate such as "_id" is silently dropped by the legacy generator once the missing-values phase runs
+            // (see GivenAResourceIdFilterAndACustomSort_...), so it cannot be used to pin a legacy-side comparison.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var chronologicalIds = new List<string>();
+            string codeSystem = "http://example.org/ignixa-sort-page";
+            string codeValue = $"page_{Guid.NewGuid():N}";
+            foreach (int year in new[] { 1962, 1972, 1982, 1992, 2002, 2012 })
+            {
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept(codeSystem, codeValue),
+                    Effective = new FhirDateTime(year, 3, 3),
+                };
+
+                await UpsertWithSearchIndicesAsync(observation);
+                chronologicalIds.Add(observation.Id);
+            }
+
+            var baseQuery = new List<Tuple<string, string>>
+            {
+                Tuple.Create("code", $"{codeSystem}|{codeValue}"),
+                Tuple.Create("_sort", sortExpression),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+            fixture.IgnixaRouterLog.Clear();
+
+            (List<string> ignixaWalk, int ignixaPages) = await WalkPagesAsync(ignixaSearchService, "Observation", baseQuery, pageSize: 2, maxPages: 8, CancellationToken.None);
+
+            long legacyInstanceAfter = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+            long ignixaAfter = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+
+            (List<string> legacyWalk, int legacyPages) = await WalkPagesAsync(legacySearchService, "Observation", baseQuery, pageSize: 2, maxPages: 8, CancellationToken.None);
+
+            _output.WriteLine($"sort={sortExpression} ignixaPages={ignixaPages} ignixa=[{string.Join(",", ignixaWalk)}]");
+            _output.WriteLine($"sort={sortExpression} legacyPages={legacyPages} legacy=[{string.Join(",", legacyWalk)}]");
+            _output.WriteLine($"routerLog={routerLog}");
+
+            // Multi-page: the walk actually crossed page boundaries, so sort continuation tokens were consumed
+            // rather than a single page trivially matching.
+            Assert.True(ignixaPages >= 3, $"Expected the Ignixa sorted walk to span at least three pages, got {ignixaPages}.");
+
+            // Counter evidence: every page ran on Ignixa and none silently fell back to the legacy generator. A
+            // token the router rejected would move the legacy counter instead - the exact failure the narrowed
+            // continuation-token gate exists to avoid. The router log names the gate that closed.
+            Assert.True(ignixaAfter > ignixaBefore, $"Expected the Ignixa sorted paging path to run. before={ignixaBefore} after={ignixaAfter}");
+            Assert.True(
+                legacyInstanceBefore == legacyInstanceAfter,
+                $"Expected no legacy fallback, but {legacyInstanceAfter - legacyInstanceBefore} page(s) fell back. Router log: {routerLog}");
+
+            // No duplicate: a token whose derived phase re-served page one would repeat ids here.
+            Assert.Equal(ignixaWalk.Count, ignixaWalk.Distinct(StringComparer.Ordinal).Count());
+
+            // Exact expected order, not just engine agreement: all six seeds are returned, in date order, across
+            // the paged walk. A wrong seek boundary would drop or reorder rows even if both engines agreed.
+            List<string> expectedOrder = descending
+                ? Enumerable.Reverse(chronologicalIds).ToList()
+                : chronologicalIds;
+
+            Assert.Equal(expectedOrder, legacyWalk);
+            Assert.Equal(legacyWalk, ignixaWalk);
+        }
+
+        [Fact]
+        public async Task GivenAResourceIdFilterAndACustomSort_WhenExecutedOnBothEngines_ThenIgnixaKeepsTheFilterThatLegacyDrops()
+        {
+            // A deliberate, documented divergence - one of the few places the cutover is not bug-for-bug.
+            //
+            // "_id" is a Resource-table-only predicate, so it stays in SqlRootExpression.ResourceTableExpressions
+            // until ResourceColumnPredicatePushdownRewriter turns it into a leading "All" table expression. But an
+            // ascending custom sort runs the missing-values phase first, and SortRewriter emits that phase as a
+            // NotExists table expression at index 0 - which makes MissingSearchParamVisitor insert its own
+            // unpredicated "All" ("seed with all resources so that we have something to restrict") ahead of it.
+            // SqlQueryGenerator.HandleTableKindAll emits "SELECT ... FROM dbo.Resource WHERE <predicate>" with no
+            // join to the preceding CTE, so that seed CTE discards the "_id" restriction produced by the CTE before
+            // it, and the NotExists reads from the unrestricted seed. Net effect: legacy returns arbitrary
+            // resources of the type that merely lack a sort value, ignoring "_id" entirely.
+            //
+            // Ignixa compiles the filter and the missing-values segment into one plan, so the filter survives. This
+            // test pins that Ignixa is correct rather than merely equal, and fails loudly if legacy is ever fixed
+            // (at which point the two engines agree and this test should become a plain differential).
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var seededIds = new List<string>();
+            foreach (int year in new[] { 1965, 1975, 1985 })
+            {
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept("http://example.org/ignixa-id-sort", $"idsort_{Guid.NewGuid():N}"),
+                    Effective = new FhirDateTime(year, 6, 6),
+                };
+
+                await UpsertWithSearchIndicesAsync(observation);
+                seededIds.Add(observation.Id);
+            }
+
+            // An observation with no effective date, so the missing-values phase is genuinely non-empty for the
+            // pinned set and the ascending first phase has something legitimate to return.
+            var undated = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept("http://example.org/ignixa-id-sort", $"idsort_{Guid.NewGuid():N}"),
+            };
+            await UpsertWithSearchIndicesAsync(undated);
+
+            var pinned = new List<string>(seededIds) { undated.Id };
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", string.Join(",", pinned)),
+                Tuple.Create("_sort", "date"),
+                Tuple.Create("_count", "100"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+            SearchResult legacyResults = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the _id-filtered sorted search to run on Ignixa.");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            List<string> ignixaIds = ResourceIdsInResultOrder(ignixaResults);
+            List<string> legacyIds = ResourceIdsInResultOrder(legacyResults);
+
+            // Ignixa honours "_id": exactly the pinned rows, ascending sort putting the missing-value row first.
+            var expected = new List<string> { undated.Id };
+            expected.AddRange(seededIds);
+            Assert.Equal(expected, ignixaIds);
+
+            // Legacy drops it: it returns rows outside the pinned set. Asserted rather than tolerated so the
+            // divergence is visible in the suite instead of hiding behind a "where seeded.Contains" filter.
+            var pinnedSet = new HashSet<string>(pinned, StringComparer.Ordinal);
+            Assert.Contains(legacyIds, id => !pinnedSet.Contains(id));
+        }
+
+        /// <summary>
+        /// Walks a search across continuation-token pages, returning the concatenated match ids and the page count.
+        /// </summary>
+        private static async Task<(List<string> Ids, int Pages)> WalkPagesAsync(
+            ISearchService service,
+            string resourceType,
+            IReadOnlyList<Tuple<string, string>> baseQuery,
+            int pageSize,
+            int maxPages,
+            CancellationToken cancellationToken)
+        {
+            var ids = new List<string>();
+            string continuation = null;
+            int pages = 0;
+
+            while (pages < maxPages)
+            {
+                var query = new List<Tuple<string, string>>(baseQuery)
+                {
+                    Tuple.Create("_count", pageSize.ToString(CultureInfo.InvariantCulture)),
+                };
+
+                if (continuation != null)
+                {
+                    query.Add(Tuple.Create(
+                        Core.Features.KnownQueryParameterNames.ContinuationToken,
+                        ContinuationTokenEncoder.Encode(continuation)));
+                }
+
+                SearchResult page = await service.SearchAsync(resourceType, query, cancellationToken);
+                pages++;
+                ids.AddRange(ResourceIdsInResultOrder(page));
+
+                continuation = page.ContinuationToken;
+                if (string.IsNullOrEmpty(continuation))
+                {
+                    break;
+                }
+            }
+
+            return (ids, pages);
+        }
+
         /// <summary>
         /// Upserts a resource with real search indices extracted by a real <see cref="TypedElementSearchIndexer"/>.
         /// </summary>

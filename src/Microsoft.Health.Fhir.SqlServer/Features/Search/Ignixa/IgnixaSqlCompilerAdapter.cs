@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
@@ -21,6 +22,7 @@ using Microsoft.Health.SqlServer.Features.Schema;
 using IgnixaSearchOptions = Ignixa.Search.Models.SearchOptions;
 using IgnixaSearchParameterInfo = Ignixa.Search.Models.SearchParameterInfo;
 using ResourceVersionType = Microsoft.Health.Fhir.Core.Features.Search.ResourceVersionType;
+using SearchParamType = Ignixa.Specification.ValueSets.Normative.SearchParamType;
 
 namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 {
@@ -115,6 +117,19 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             //     legacy again only ever runs the valued phase.
             // Deriving the phase from direction alone would emit MissingPrimary for an ascending first page in
             // both cases and silently return the complement of the correct rows.
+            ContinuationToken continuation = string.IsNullOrWhiteSpace(searchOptions.ContinuationToken)
+                ? null
+                : ContinuationToken.FromString(searchOptions.ContinuationToken);
+
+            // SearchImpl mints a "special" token - sentinel sort value, surrogate id 0 - when the valued phase
+            // filled the page exactly and a probe found more rows in the other segment. SortRewriter recognises
+            // that token, discards it, and runs the second phase. SortQuerySecondPhase is a per-request field
+            // that is false on the fresh request carrying that token, so the sentinel must be honoured here too
+            // or the second page would repeat the first phase.
+            bool sentinelSecondPhase = continuation != null
+                && continuation.ResourceSurrogateId == 0
+                && string.Equals(continuation.SortValue, SqlSearchConstants.SortSentinelValueForCt, StringComparison.Ordinal);
+
             SortPhase sortPhase = SortPhase.Valued;
             if (requestedSort.Count > 0 &&
                 !ResourceColumnLoweringRule.IsResourceColumnCode(requestedSort[0].Parameter.Code) &&
@@ -122,7 +137,31 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 !searchOptions.SortHasMissingModifier)
             {
                 bool ascendingSort = requestedSort[0].SortOrder == SortOrder.Ascending;
-                bool missingValuesPhase = ascendingSort != searchOptions.SortQuerySecondPhase;
+
+                // Mirrors SortRewriter's branch order exactly, which is NOT a single xor of direction and
+                // phase flag once continuation tokens are in play:
+                //   * second phase (flag or sentinel token) -> the complement of the first phase, so the
+                //     missing segment for descending and the valued segment for ascending;
+                //   * otherwise a token decides, because it was minted by the phase that produced it: a token
+                //     carrying a sort value came from the valued segment, one without came from the missing
+                //     segment. This holds for BOTH directions - a descending second-phase page carries no sort
+                //     value and must stay in the missing segment, which a direction-based xor would send back
+                //     to valued and re-return the first page's rows;
+                //   * with no token at all this is the first page, whose phase is direction-driven.
+                bool missingValuesPhase;
+                if (searchOptions.SortQuerySecondPhase || sentinelSecondPhase)
+                {
+                    missingValuesPhase = !ascendingSort;
+                }
+                else if (continuation != null)
+                {
+                    missingValuesPhase = string.IsNullOrEmpty(continuation.SortValue);
+                }
+                else
+                {
+                    missingValuesPhase = ascendingSort;
+                }
+
                 sortPhase = missingValuesPhase ? SortPhase.MissingPrimary : SortPhase.Valued;
             }
 
@@ -162,17 +201,33 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             // expression tree only, never into ignixaOptions.Expression (which SearchOptionsFactory built
             // before that AND-in), so without an explicit PageSpec the Ignixa plan would re-return page one.
             // The token is translated into a PageSpec here so the compiler emits the same forward keyset seek
-            // the legacy path applies. Only the default surrogate-id keyset (no custom _sort, composite
-            // (ResourceTypeId, ResourceSurrogateId) boundary, no carried sort value) is wired; anything else
-            // yields a capability failure and stays on the legacy path.
+            // the legacy path applies, for both the default surrogate-id order and a custom single-key _sort.
             PageSpec page = null;
-            if (!string.IsNullOrWhiteSpace(searchOptions.ContinuationToken))
+            if (continuation != null && !sentinelSecondPhase)
             {
-                IgnixaSqlCompilationOutcome pageFailure = TryBuildSurrogateKeysetPage(searchOptions, requestedSort, out page);
+                // A custom-sort token is minted from SearchOptions.Sort - one array slot per sort key, with
+                // _type and _lastUpdated mapped to the identity columns and every other key to the sort value.
+                // A single-key custom sort therefore mints [sortValue, surrogateId] with no ResourceTypeId slot
+                // at all, because legacy's sorted keyset compares Sid1 alone. Ignixa's PageSpec always carries a
+                // type boundary, so supply the search's own resource type id when the token omits one - within a
+                // single-type search "T1 = @type AND Sid1 > @sid" is exactly legacy's "Sid1 > @sid".
+                short? scopedResourceTypeId = null;
+                if (continuation.ResourceTypeId == null && resourceType != null && (ignixaOptions.ResourceTypes?.Count ?? 0) <= 1)
+                {
+                    scopedResourceTypeId = await _resolver.GetResourceTypeIdAsync(resourceType, cancellationToken);
+                }
+
+                IgnixaSqlCompilationOutcome pageFailure = TryBuildKeysetPage(continuation, requestedSort, sortPhase, scopedResourceTypeId, out page);
                 if (pageFailure != null)
                 {
                     return pageFailure;
                 }
+            }
+            else if (continuation == null && !string.IsNullOrWhiteSpace(searchOptions.ContinuationToken))
+            {
+                // The token was present but did not parse. Legacy tolerates this shape; Ignixa must not
+                // silently drop the boundary and re-serve page one.
+                return CapabilityFailure("page", "continuation-token-unparseable", EmptyUnresolvedParameters);
             }
 
             LoweredPlan lowered;
@@ -367,61 +422,121 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
         }
 
         /// <summary>
-        /// Translates the FHIR Server continuation token into the compiler's keyset <see cref="PageSpec"/>,
-        /// but only for the default surrogate-id order this pass wires: no custom <c>_sort</c>, and a token
-        /// carrying a composite (ResourceTypeId, ResourceSurrogateId) boundary with no captured sort value.
+        /// Translates the FHIR Server continuation token into the compiler's keyset <see cref="PageSpec"/>.
         /// Returns <see langword="null"/> and sets <paramref name="page"/> on success; otherwise returns a
         /// capability failure and leaves <paramref name="page"/> null so the caller falls back to legacy.
         /// </summary>
         /// <remarks>
-        /// The boundary carries no per-key sort values (empty <see cref="PageSpec.Boundary"/>), so the
-        /// emitter's ISNULL/sentinel substitution never applies here; it is required only for custom-sort
-        /// keys, which this method deliberately refuses. The (ResourceTypeId, ResourceSurrogateId) pair renders
-        /// as bound parameters and drives the forward tuple seek <c>(m.T1, m.Sid1) &gt; (@type, @sid)</c>, the
-        /// exact composite the legacy path applies as a GreaterThan on the partitioned primary key.
+        /// <para>
+        /// Two boundary shapes are produced, and which one is correct is decided by the sort phase rather than
+        /// by the token alone. <see cref="SortPhase.Valued"/> makes every sort key active, so the compiler's
+        /// seek predicate requires exactly one boundary value per key; <see cref="SortPhase.MissingPrimary"/>
+        /// drops the primary key, so for a single-key sort it requires none and the seek degenerates to the
+        /// (T1, Sid1) tiebreak - which is exactly how legacy pages through the missing segment. A boundary
+        /// whose length disagrees with the active key count makes the compiler throw rather than silently
+        /// mis-seek, so this method must never guess.
+        /// </para>
+        /// <para>
+        /// Only a single-key sort is wired, because the FHIR Server continuation token carries exactly one
+        /// <c>SortValue</c>; a two-key sort would need a second boundary value the token never captured.
+        /// </para>
+        /// <para>
+        /// In the valued phase the primary key's value expression is the raw column (Emit skips the
+        /// ISNULL/sentinel wrapper when the key is guaranteed non-null), so the decoded token value compares
+        /// directly against it with no substitution needed. The value must be typed the way the column is:
+        /// legacy round-trips a date sort value through the round-trip ("o") format, and binding that string
+        /// against a datetime2 column would compare under string rather than chronological ordering.
+        /// </para>
         /// </remarks>
-        private IgnixaSqlCompilationOutcome TryBuildSurrogateKeysetPage(
-            SqlSearchOptions searchOptions,
+        private IgnixaSqlCompilationOutcome TryBuildKeysetPage(
+            ContinuationToken token,
             IReadOnlyList<SortExpression> requestedSort,
+            SortPhase sortPhase,
+            short? scopedResourceTypeId,
             out PageSpec page)
         {
             page = null;
 
-            // A user _sort — including _lastUpdated or _type — drives a keyed boundary whose per-key value
-            // would need Emit's ISNULL/sentinel substitution to compare equal to a live column. This pass does
-            // not reproduce that, so any custom sort stays on the legacy path.
-            if (requestedSort.Count > 0)
-            {
-                return CapabilityFailure("page", "continuation-token-custom-sort", EmptyUnresolvedParameters);
-            }
-
-            ContinuationToken token = ContinuationToken.FromString(searchOptions.ContinuationToken);
-            if (token == null)
-            {
-                return CapabilityFailure("page", "continuation-token-unparseable", EmptyUnresolvedParameters);
-            }
-
-            // A carried sort value means the token was minted for a custom sort; the surrogate-only keyset
-            // cannot honour it, and the router should not have routed it here.
-            if (!string.IsNullOrEmpty(token.SortValue))
-            {
-                return CapabilityFailure("page", "continuation-token-sort-value", EmptyUnresolvedParameters);
-            }
-
-            // The composite seek needs a ResourceTypeId boundary. A token without one (legacy tokens, or a
-            // pre-PartitionedTables schema) is handled by the legacy path as a bare ResourceSurrogateId
-            // comparison, which this composite PageSpec does not reproduce.
-            if (token.ResourceTypeId == null)
+            // The composite seek needs a ResourceTypeId boundary. The token supplies one for the default
+            // surrogate order; a custom-sort token does not carry the slot at all, so the caller passes the
+            // search's own (single) resource type id instead. A token with neither - a multi-type sorted search,
+            // or a pre-PartitionedTables legacy token - is handled by the legacy path as a bare
+            // ResourceSurrogateId comparison, which this composite PageSpec does not reproduce.
+            short? boundaryResourceTypeId = token.ResourceTypeId ?? scopedResourceTypeId;
+            if (boundaryResourceTypeId == null)
             {
                 return CapabilityFailure("page", "continuation-token-no-type", EmptyUnresolvedParameters);
             }
 
+            SqlParameterRef[] boundary = Array.Empty<SqlParameterRef>();
+
+            if (requestedSort.Count > 0 && !ResourceColumnLoweringRule.IsResourceColumnCode(requestedSort[0].Parameter.Code))
+            {
+                if (requestedSort.Count > 1)
+                {
+                    return CapabilityFailure("page", "continuation-token-multi-key-sort", EmptyUnresolvedParameters);
+                }
+
+                if (sortPhase == SortPhase.Valued)
+                {
+                    if (string.IsNullOrEmpty(token.SortValue))
+                    {
+                        // The valued phase needs a boundary value for its one active key. A token minted by the
+                        // missing segment carries none, so honouring it here would seek from an empty boundary
+                        // and re-serve the valued segment from the top.
+                        return CapabilityFailure("page", "continuation-token-missing-sort-value", EmptyUnresolvedParameters);
+                    }
+
+                    if (!TryTypeSortValue(requestedSort[0], token.SortValue, out object typedSortValue))
+                    {
+                        return CapabilityFailure("page", "continuation-token-sort-value-type", EmptyUnresolvedParameters);
+                    }
+
+                    boundary = new[] { new SqlParameterRef(typedSortValue) };
+                }
+            }
+            else if (!string.IsNullOrEmpty(token.SortValue))
+            {
+                // No custom sort, yet the token carries a sort value: it was minted for a different query
+                // shape than the one being compiled, and the surrogate-only keyset cannot honour it.
+                return CapabilityFailure("page", "continuation-token-sort-value", EmptyUnresolvedParameters);
+            }
+
             page = new PageSpec(
-                Array.Empty<SqlParameterRef>(),
-                new SqlParameterRef(token.ResourceTypeId.Value),
+                boundary,
+                new SqlParameterRef(boundaryResourceTypeId.Value),
                 new SqlParameterRef(token.ResourceSurrogateId));
 
             return null;
+        }
+
+        /// <summary>
+        /// Converts the token's string sort value into the CLR type the sort column binds as, mirroring the
+        /// legacy generator's <c>GetSortRelatedDetails</c>: date parameters round-trip through the "o" format,
+        /// string parameters bind as-is. Any other sort parameter type is refused rather than guessed at.
+        /// </summary>
+        private static bool TryTypeSortValue(SortExpression sort, string rawSortValue, out object typedSortValue)
+        {
+            switch (sort.Parameter.Type)
+            {
+                case SearchParamType.Date:
+                    if (DateTime.TryParseExact(rawSortValue, "o", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime parsed))
+                    {
+                        typedSortValue = parsed;
+                        return true;
+                    }
+
+                    typedSortValue = null;
+                    return false;
+
+                case SearchParamType.String:
+                    typedSortValue = rawSortValue;
+                    return true;
+
+                default:
+                    typedSortValue = null;
+                    return false;
+            }
         }
 
         /// <summary>

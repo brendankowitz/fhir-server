@@ -219,15 +219,18 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return false;
             }
 
-            if (searchOptions.ContinuationToken != null && !IsSurrogateKeysetContinuation(searchOptions))
+            if (searchOptions.ContinuationToken != null && !IsKeysetContinuation(searchOptions, out string keysetSkipReason))
             {
-                // Keyset pagination is wired only for the default surrogate-id order: a row-returning search
-                // with no custom _sort whose token carries a composite (ResourceTypeId, ResourceSurrogateId)
-                // boundary and no captured sort value. That subset maps to a PageSpec whose forward tuple seek
-                // matches the legacy GreaterThan on the partitioned primary key. Custom-sort tokens, count-only
-                // tokens, and legacy type-less tokens still render a boundary this pass does not reproduce, so
-                // they stay on the legacy path.
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "continuation-token");
+                // Keyset pagination is wired for the default surrogate-id order and for a single-key custom
+                // _sort, in both sort phases. What remains unwired is a token that carries no
+                // (ResourceTypeId, ResourceSurrogateId) composite - legacy type-less tokens render a bare
+                // surrogate comparison the composite PageSpec does not reproduce - a multi-key sort, whose
+                // second boundary value the token never captured, and count-only requests, which never AND the
+                // token into the legacy tree at all.
+                _logger.LogDebug(
+                    "Skipping Ignixa compile-only observation. Reason={Reason}, Detail={Detail}",
+                    "continuation-token",
+                    keysetSkipReason);
                 return false;
             }
 
@@ -273,31 +276,72 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
         /// <summary>
         /// Returns <see langword="true"/> when a continuation token can be honoured by the Ignixa keyset
-        /// <see cref="PageSpec"/> this pass wires: a row-returning search with no custom <c>_sort</c>, whose
-        /// token parses and carries a composite (ResourceTypeId, ResourceSurrogateId) boundary with no captured
-        /// sort value. This is the exact subset <see cref="IgnixaSqlCompilerAdapter"/> builds a PageSpec for, so
-        /// the router and the adapter agree on which tokens route to Ignixa and which fall back to legacy.
+        /// <see cref="PageSpec"/>: a row-returning search whose token parses and carries a composite
+        /// (ResourceTypeId, ResourceSurrogateId) boundary, sorted by at most one custom key. This is the exact
+        /// subset <see cref="IgnixaSqlCompilerAdapter"/> builds a PageSpec for, so the router and the adapter
+        /// agree on which tokens route to Ignixa and which fall back to legacy.
         /// </summary>
-        private static bool IsSurrogateKeysetContinuation(SqlSearchOptions searchOptions)
+        private static bool IsKeysetContinuation(SqlSearchOptions searchOptions, out string skipReason)
         {
+            skipReason = null;
+
             // Count-only requests never AND the token into the legacy tree and do not paginate rows; keep any
             // count-only + token request on the legacy path.
             if (searchOptions.CountOnly)
             {
+                skipReason = "count-only";
                 return false;
             }
 
-            // A custom _sort (including _lastUpdated/_type reaching Ignixa) drives a keyed boundary the
-            // surrogate-only PageSpec cannot express.
-            if ((searchOptions.IgnixaOptions?.Sort?.Count ?? 0) > 0)
+            // The token carries exactly one SortValue, so a multi-key sort has no boundary value for its
+            // second key and its seek predicate cannot be reconstructed.
+            if ((searchOptions.IgnixaOptions?.Sort?.Count ?? 0) > 1)
             {
+                skipReason = "multi-key-sort";
                 return false;
             }
 
             ContinuationToken token = ContinuationToken.FromString(searchOptions.ContinuationToken);
-            return token != null
-                && token.ResourceTypeId != null
-                && string.IsNullOrEmpty(token.SortValue);
+            if (token == null)
+            {
+                skipReason = "unparseable";
+                return false;
+            }
+
+            // The "second phase" sentinel token carries no real boundary - legacy discards it and restarts the
+            // other sort segment from the top, and the adapter does the same - so it is eligible despite
+            // failing the ResourceTypeId check below.
+            if (token.ResourceSurrogateId == 0 &&
+                string.Equals(token.SortValue, SqlSearchConstants.SortSentinelValueForCt, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (token.ResourceTypeId == null && !IsSingleTypeScoped(searchOptions))
+            {
+                // A custom-sort token is [sortValue, surrogateId] - it never carries a ResourceTypeId slot,
+                // because legacy's sorted keyset compares Sid1 alone. The adapter substitutes the search's own
+                // resource type id, which is only equivalent while the search is scoped to a single type; a
+                // multi-type sorted search has no type boundary to substitute and also tie-breaks differently
+                // (legacy orders by Sid1 alone, Ignixa by T1 then Sid1), so it stays on the legacy path.
+                skipReason = "no-resource-type-id";
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Returns <see langword="true"/> when the search targets exactly one resource type, so the compiled
+        /// row set carries a single constant ResourceTypeId that can stand in for a boundary the token omits.
+        /// </summary>
+        private static bool IsSingleTypeScoped(SqlSearchOptions searchOptions)
+        {
+            var ignixaOptions = searchOptions.IgnixaOptions;
+
+            return ignixaOptions != null
+                && !string.IsNullOrEmpty(ignixaOptions.ResourceType)
+                && (ignixaOptions.ResourceTypes?.Count ?? 0) <= 1;
         }
     }
 }
