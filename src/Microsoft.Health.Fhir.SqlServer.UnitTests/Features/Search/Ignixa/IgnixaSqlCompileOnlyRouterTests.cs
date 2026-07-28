@@ -371,6 +371,24 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
+        public async Task ObserveAsync_WhenQueryHintsArePresent_DoesNotCompileRegardlessOfTheAsyncFlag()
+        {
+            // Hint-carrying requests are intercepted by SearchImpl before the router, so this gate is a backstop
+            // against that interception changing. It keys on the hints alone: a hint carrier that somehow arrived
+            // without the async flag would steer legacy plan construction just the same.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.IsAsyncOperation = false;
+            options.QueryHints = new List<(string Param, string Value)> { ("EndSurrogateId", "1") };
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
         public async Task ObserveAsync_WhenIsAsyncOperationSetWithQueryHints_DoesNotCompile()
         {
             // Query hints steer legacy plan construction (surrogate-id windowing, custom command timeouts) in ways

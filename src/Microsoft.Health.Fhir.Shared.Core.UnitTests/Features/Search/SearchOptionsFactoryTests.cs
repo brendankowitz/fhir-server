@@ -1270,6 +1270,29 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
                 });
         }
 
+        [Fact]
+        public void Create_WithoutAGlobalEndSurrogateId_LeavesQueryHintsNull()
+        {
+            // The router's query-hints gate documents itself as unreachable, and this is the invariant that makes
+            // it so: hints exist only for the export/bulk-update time-travel shape, which SearchImpl intercepts
+            // before routing. A change here would silently make hint-carrying requests routable.
+            SearchOptions withoutHints = CreateSearchOptions(
+                queryParameters: new[] { Tuple.Create(KnownQueryParameterNames.StartSurrogateId, "1"), Tuple.Create(KnownQueryParameterNames.EndSurrogateId, "9") });
+
+            Assert.Null(withoutHints.QueryHints);
+
+            SearchOptions withHints = CreateSearchOptions(
+                queryParameters: new[]
+                {
+                    Tuple.Create(KnownQueryParameterNames.StartSurrogateId, "1"),
+                    Tuple.Create(KnownQueryParameterNames.EndSurrogateId, "9"),
+                    Tuple.Create(KnownQueryParameterNames.GlobalEndSurrogateId, "9"),
+                });
+
+            Assert.NotNull(withHints.QueryHints);
+            Assert.Contains(withHints.QueryHints, hint => hint.Param == KnownQueryParameterNames.GlobalEndSurrogateId);
+        }
+
         private SearchOptions CreateSearchOptions(
             string resourceType = DefaultResourceType,
             IReadOnlyList<Tuple<string, string>> queryParameters = null,

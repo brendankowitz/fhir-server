@@ -1333,6 +1333,58 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenAnAsyncOperationSearch_WhenExecutedOnBothEngines_ThenIgnixaRunsItAndMatchesLegacy()
+        {
+            // IsAsyncOperation is legacy plan shaping, not a compiler capability, so an async page with no query
+            // hints must route. This is the live half of the router's query-hints gate: the gate keys on the hints
+            // alone, and hint-carrying requests never reach the router because SearchImpl intercepts them.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            string marker = Guid.NewGuid().ToString("N");
+            var seeded = new List<string>();
+
+            for (int i = 0; i < 3; i++)
+            {
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept("http://example.org/ignixa-async", marker),
+                };
+                seeded.Add(await UpsertWithSearchIndicesAsync(observation));
+            }
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("code", $"http://example.org/ignixa-async|{marker}"),
+                Tuple.Create("status", "final"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+            fixture.IgnixaRouterLog.Clear();
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync(
+                "Observation", query, CancellationToken.None, isAsyncOperation: true);
+            string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+            SearchResult legacyResults = await legacySearchService.SearchAsync(
+                "Observation", query, CancellationToken.None, isAsyncOperation: true);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the async-operation search to run on Ignixa. Router log: " + routerLog);
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            List<string> legacyMatches = ResourceIdsInResultOrder(legacyResults);
+            Assert.Equal(
+                seeded.OrderBy(id => id, StringComparer.Ordinal),
+                legacyMatches.OrderBy(id => id, StringComparer.Ordinal));
+            Assert.Equal(legacyMatches, ResourceIdsInResultOrder(ignixaResults));
+        }
+
+        [Fact]
         public async Task GivenACompartmentSearch_WhenExecutedOnBothEngines_ThenIgnixaRestrictsToTheCompartmentLikeLegacy()
         {
             // AppendIgnixaCompartmentExpression already ANDs a CompartmentSearchExpression into the Ignixa match
