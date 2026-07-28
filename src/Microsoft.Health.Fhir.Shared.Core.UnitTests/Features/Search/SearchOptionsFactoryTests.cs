@@ -924,6 +924,69 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
         // ---------------------------------------------------------------------------
 
         [Fact]
+        public void Create_GivenNoUnsupportedParameters_MarksTheDropSetsAsAgreeing()
+        {
+            SearchOptions options = CreateSearchOptions(
+                resourceType: "Patient",
+                queryParameters: new[] { Tuple.Create("_id", "abc") });
+
+            Assert.Empty(options.UnsupportedSearchParams);
+            Assert.True(options.IgnixaUnsupportedParamsAgreeWithLegacy);
+        }
+
+        [Fact]
+        public void Create_GivenAParameterNeitherEngineUnderstands_MarksTheDropSetsAsAgreeing()
+        {
+            // Both parsers reject the same unknown parameter, so the two engines search the same rows and report
+            // the same issue. That is safe to route to Ignixa, which is the whole point of tracking agreement
+            // rather than simply refusing any request with an unsupported parameter.
+            const string bogus = "totallyBogusParameter";
+            _expressionParser
+                .Parse(Arg.Any<string[]>(), bogus, Arg.Any<string>())
+                .Throws(new SearchParameterNotSupportedException(typeof(Patient), bogus));
+            _ignixaAdapter.Build(Arg.Any<string>(), Arg.Any<IReadOnlyList<Tuple<string, string>>>(), Arg.Any<int?>())
+                .Returns(new global::Ignixa.Search.Models.SearchOptions { UnsupportedParams = new List<string> { bogus } });
+
+            SearchOptions options = CreateSearchOptions(
+                resourceType: "Patient",
+                queryParameters: new[] { Tuple.Create(bogus, "x") });
+
+            Assert.Contains(options.UnsupportedSearchParams, p => p.Item1 == bogus);
+            Assert.True(options.IgnixaUnsupportedParamsAgreeWithLegacy);
+        }
+
+        [Fact]
+        public void Create_GivenAParameterOnlyIgnixaRejects_DoesNotMarkTheDropSetsAsAgreeing()
+        {
+            // Legacy parsed the parameter and will filter on it; Ignixa dropped it. Routing this to Ignixa would
+            // return a superset of the correct rows, which is the fail-open direction this flag exists to catch.
+            const string param = "code";
+            _ignixaAdapter.Build(Arg.Any<string>(), Arg.Any<IReadOnlyList<Tuple<string, string>>>(), Arg.Any<int?>())
+                .Returns(new global::Ignixa.Search.Models.SearchOptions { UnsupportedParams = new List<string> { param } });
+
+            SearchOptions options = CreateSearchOptions(
+                resourceType: "Patient",
+                queryParameters: new[] { Tuple.Create(param, "x") });
+
+            Assert.Contains(options.UnsupportedSearchParams, p => p.Item1 == param);
+            Assert.False(options.IgnixaUnsupportedParamsAgreeWithLegacy);
+        }
+
+        [Fact]
+        public void Create_GivenAParameterOnlyLegacyRejects_DoesNotMarkTheDropSetsAsAgreeing()
+        {
+            // "_text" is refused outright by the legacy factory for every resource type. If the Ignixa parser
+            // accepts it, Ignixa would apply a filter legacy ignores and return a subset of legacy's rows, so the
+            // request must stay on the legacy path.
+            SearchOptions options = CreateSearchOptions(
+                resourceType: "Patient",
+                queryParameters: new[] { Tuple.Create("_text", "some text") });
+
+            Assert.Contains(options.UnsupportedSearchParams, p => p.Item1 == "_text");
+            Assert.False(options.IgnixaUnsupportedParamsAgreeWithLegacy);
+        }
+
+        [Fact]
         public void Create_GivenClinicalScopes_TranslatesThemIntoTheIgnixaAllowList()
         {
             _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;

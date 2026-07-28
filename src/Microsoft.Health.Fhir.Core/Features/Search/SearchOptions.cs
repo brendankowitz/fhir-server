@@ -34,6 +34,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             IncludeTotal = other.IncludeTotal;
             IgnixaOptions = CloneIgnixaOptions(other.IgnixaOptions);
             IgnixaAccessControlTranslated = other.IgnixaAccessControlTranslated;
+            IgnixaUnsupportedParamsAgreeWithLegacy = other.IgnixaUnsupportedParamsAgreeWithLegacy;
             OnlyIds = other.OnlyIds;
             FeedRange = other.FeedRange;
             IgnoreSearchParamHash = other.IgnoreSearchParamHash;
@@ -163,6 +164,20 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         /// flag, so it cannot silently reach Ignixa unenforced.
         /// </remarks>
         internal bool IgnixaAccessControlTranslated { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the Ignixa parser and the legacy parser dropped exactly the
+        /// same set of query parameters.
+        /// </summary>
+        /// <remarks>
+        /// A search may legitimately carry parameters neither engine can honour; both simply ignore them and
+        /// report them back on the bundle. What matters for routing is that the two engines ignored the *same*
+        /// ones. A parameter Ignixa dropped but legacy applied would make the Ignixa result a superset of the
+        /// correct rows; the reverse would make it a subset. Either way the request stays on legacy.
+        /// Defaults to <see langword="false"/> so a request that never went through
+        /// <c>SearchOptionsFactory</c> is treated as unverified rather than agreeing.
+        /// </remarks>
+        internal bool IgnixaUnsupportedParamsAgreeWithLegacy { get; set; }
 
         /// <summary>
         /// Gets the collection of search parameters used for filtering and querying resources.

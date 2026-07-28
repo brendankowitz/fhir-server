@@ -370,15 +370,38 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         [Fact]
         public async Task ObserveAsync_WhenUnsupportedSearchParamsPresent_DoesNotCompile()
         {
+            // The two engines disagreed about what to drop (the agreement flag is false), so routing to Ignixa
+            // would return a different row set than legacy in one direction or the other.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
             var router = CreateRouter(adapter, EnabledConfig());
 
             SqlSearchOptions options = CreateEligibleOptions();
             options.UnsupportedSearchParams = new List<Tuple<string, string>> { Tuple.Create("_unknown", "value") };
+            options.IgnixaUnsupportedParamsAgreeWithLegacy = false;
 
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
 
             await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenBothEnginesDroppedTheSameUnsupportedParams_IsEligibleAndCompiles()
+        {
+            // An unsupported parameter is only a routing hazard when the engines disagree about it. When both
+            // ignored the same parameter the row sets are identical and the bundle reports the same issue either
+            // way, so the request belongs on the Ignixa path like any other.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.UnsupportedSearchParams = new List<Tuple<string, string>> { Tuple.Create("_unknown", "value") };
+            options.IgnixaUnsupportedParamsAgreeWithLegacy = true;
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
         }
 
         [Fact]

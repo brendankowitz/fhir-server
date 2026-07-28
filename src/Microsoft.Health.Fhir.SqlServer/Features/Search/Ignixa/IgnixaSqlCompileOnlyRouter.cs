@@ -222,11 +222,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             if (searchOptions.ContinuationToken != null && !IsKeysetContinuation(searchOptions, out string keysetSkipReason))
             {
                 // Keyset pagination is wired for the default surrogate-id order and for a single-key custom
-                // _sort, in both sort phases. What remains unwired is a token that carries no
-                // (ResourceTypeId, ResourceSurrogateId) composite - legacy type-less tokens render a bare
-                // surrogate comparison the composite PageSpec does not reproduce - a multi-key sort, whose
-                // second boundary value the token never captured, and count-only requests, which never AND the
-                // token into the legacy tree at all.
+                // _sort, in both sort phases. What remains unwired is a token with no ResourceTypeId slot on a
+                // multi-type search - there is no single constant type to substitute for the boundary the token
+                // omitted, and legacy tie-breaks such a search on Sid1 alone where Ignixa orders (T1, Sid1) - a
+                // multi-key sort, whose second boundary value the token never captured, and count-only requests,
+                // which never AND the token into the legacy tree at all.
                 _logger.LogDebug(
                     "Skipping Ignixa compile-only observation. Reason={Reason}, Detail={Detail}",
                     "continuation-token",
@@ -245,8 +245,13 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return false;
             }
 
-            if (searchOptions.UnsupportedSearchParams?.Count > 0)
+            if (searchOptions.UnsupportedSearchParams?.Count > 0 && !searchOptions.IgnixaUnsupportedParamsAgreeWithLegacy)
             {
+                // Both engines drop parameters they cannot honour and report them back on the bundle, so an
+                // unsupported parameter is not on its own a reason to avoid Ignixa. A *disagreement* is: a
+                // parameter Ignixa dropped that legacy applied makes the Ignixa result a superset of the correct
+                // rows, and the reverse makes it a subset. SearchOptionsFactory compares the two drop sets and
+                // only sets the flag when they match exactly.
                 _logger.LogDebug(
                     "Skipping Ignixa compile-only observation. Reason={Reason}, Count={Count}",
                     "unsupported-search-params",

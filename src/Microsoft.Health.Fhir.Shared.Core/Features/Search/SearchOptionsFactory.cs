@@ -561,10 +561,35 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 
             if (searchOptions.IgnixaOptions?.UnsupportedParams != null)
             {
-                unsupportedSearchParameters.AddRange(
-                    searchOptions.IgnixaOptions.UnsupportedParams
-                        .Select(param => Tuple.Create(param, string.Empty))
-                        .Where(param => !unsupportedSearchParameters.Any(existing => existing.Item1 == param.Item1)));
+                // Params Ignixa could not handle that legacy did handle. These are the dangerous ones for the
+                // Ignixa SQL path: legacy applies a filter that Ignixa silently dropped, so routing the request
+                // to Ignixa would return a superset of the correct rows. The router refuses such a request.
+                // The reverse case - a param legacy dropped but Ignixa understood - is equally a divergence
+                // (Ignixa would return fewer rows than legacy), so both directions clear the agreement flag.
+                List<Tuple<string, string>> droppedOnlyByIgnixa = searchOptions.IgnixaOptions.UnsupportedParams
+                    .Select(param => Tuple.Create(param, string.Empty))
+                    .Where(param => !unsupportedSearchParameters.Any(existing => existing.Item1 == param.Item1))
+                    .ToList();
+
+                bool droppedOnlyByLegacy = unsupportedSearchParameters
+                    .Any(existing => !searchOptions.IgnixaOptions.UnsupportedParams.Contains(existing.Item1, StringComparer.OrdinalIgnoreCase));
+
+                searchOptions.IgnixaUnsupportedParamsAgreeWithLegacy = droppedOnlyByIgnixa.Count == 0 && !droppedOnlyByLegacy;
+
+                unsupportedSearchParameters.AddRange(droppedOnlyByIgnixa);
+            }
+            else
+            {
+                // No Ignixa parse happened (or it reported nothing), so nothing is known about agreement. Any
+                // param legacy dropped is therefore unverified.
+                searchOptions.IgnixaUnsupportedParamsAgreeWithLegacy = unsupportedSearchParameters.Count == 0;
+            }
+
+            // A chained search that references nothing is a legacy-only diagnostic with no Ignixa counterpart,
+            // so it cannot be shown to agree.
+            if (invalidSearchParameters.Count > 0)
+            {
+                searchOptions.IgnixaUnsupportedParamsAgreeWithLegacy = false;
             }
 
             invalidSearchParameters.AddRange(unsupportedSearchParameters);

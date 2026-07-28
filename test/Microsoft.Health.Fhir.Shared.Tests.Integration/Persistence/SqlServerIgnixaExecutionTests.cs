@@ -1500,6 +1500,68 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenAnUnsupportedSearchParameter_WhenBothEnginesIgnoreIt_ThenIgnixaStillRunsAndAgreesWithLegacy()
+        {
+            // An unsupported parameter used to push the whole request onto legacy. But both parsers drop the same
+            // unknown parameter and both report it back on the bundle, so the row sets are identical and there is
+            // nothing to protect against. The gate now turns on *disagreement* between the two drop sets, which
+            // SearchOptionsFactory computes; this proves the agreeing case reaches the Ignixa engine and returns
+            // legacy's answer, including the unsupported-parameter issue.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            string codeSystem = "http://example.org/ignixa-unsupported";
+            string codeValue = $"unsup_{Guid.NewGuid():N}";
+            var seededIds = new List<string>();
+            for (int i = 0; i < 3; i++)
+            {
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept(codeSystem, codeValue),
+                };
+
+                await UpsertWithSearchIndicesAsync(observation);
+                seededIds.Add(observation.Id);
+            }
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("code", $"{codeSystem}|{codeValue}"),
+
+                // A second filter is required: a lone token search is intercepted by the GetResourcesByTokens
+                // stored-procedure fast path before the router is ever consulted.
+                Tuple.Create("status", "final"),
+                Tuple.Create("thisParameterDoesNotExist", "whatever"),
+                Tuple.Create("_count", "100"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+            fixture.IgnixaRouterLog.Clear();
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+            string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+            SearchResult legacyResults = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                $"Expected the search carrying an unsupported parameter to run on Ignixa. Router log: {routerLog}");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            // The unknown parameter is reported, not silently swallowed - the behaviour a client depends on.
+            Assert.Contains(ignixaResults.UnsupportedSearchParameters, p => p.Item1 == "thisParameterDoesNotExist");
+
+            // Anti-vacuity: the supported half of the query still filtered, and both engines returned the seeds.
+            List<string> ignixaIds = ResourceIdsInResultOrder(ignixaResults);
+            List<string> legacyIds = ResourceIdsInResultOrder(legacyResults);
+            Assert.Equal(seededIds.OrderBy(id => id, StringComparer.Ordinal), ignixaIds.OrderBy(id => id, StringComparer.Ordinal));
+            Assert.Equal(legacyIds.OrderBy(id => id, StringComparer.Ordinal), ignixaIds.OrderBy(id => id, StringComparer.Ordinal));
+        }
+
+        [Fact]
         public async Task GivenAResourceIdFilterAndACustomSort_WhenExecutedOnBothEngines_ThenIgnixaKeepsTheFilterThatLegacyDrops()
         {
             // A deliberate, documented divergence - one of the few places the cutover is not bug-for-bug.
