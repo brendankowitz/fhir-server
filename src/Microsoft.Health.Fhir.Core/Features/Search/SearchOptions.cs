@@ -36,6 +36,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             IgnixaAccessControlTranslated = other.IgnixaAccessControlTranslated;
             IgnixaUnsupportedParamsAgreeWithLegacy = other.IgnixaUnsupportedParamsAgreeWithLegacy;
             IgnixaSmartCompartmentSearch = other.IgnixaSmartCompartmentSearch;
+            IgnixaSmartCompartmentTranslated = other.IgnixaSmartCompartmentTranslated;
             OnlyIds = other.OnlyIds;
             FeedRange = other.FeedRange;
             IgnoreSearchParamHash = other.IgnoreSearchParamHash;
@@ -187,12 +188,24 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         /// <remarks>
         /// The two are not interchangeable. Legacy rewrites a <c>SmartCompartmentSearchExpression</c> through
         /// <c>SmartCompartmentSearchRewriter</c>, which expands membership differently from the standard
-        /// compartment rewriter, whereas <c>AppendIgnixaCompartmentExpression</c> can only build a plain
-        /// <c>CompartmentSearchExpression</c> — Ignixa has no SMART variant to build. Routing a SMART compartment
-        /// search to Ignixa would therefore enforce standard membership in place of SMART membership, so it stays
-        /// on the legacy path until Ignixa can express the distinction.
+        /// compartment rewriter: a resource is admitted if it refers to the SMART user, if it <em>is</em> the
+        /// SMART user's own resource, or if it is a "universal" type belonging to no compartment.
+        /// <c>TryAppendIgnixaSmartCompartmentExpression</c> builds the same three-legged union for Ignixa and
+        /// reports through <see cref="IgnixaSmartCompartmentTranslated"/> whether it managed to.
         /// </remarks>
         internal bool IgnixaSmartCompartmentSearch { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the SMART compartment membership rule was fully expressed in
+        /// <see cref="IgnixaOptions"/>.
+        /// </summary>
+        /// <remarks>
+        /// A security gate, read only when <see cref="IgnixaSmartCompartmentSearch"/> is set. False means some
+        /// part of the membership rule has no Ignixa spelling yet, so the compiled plan would admit a different
+        /// set of resources than legacy - in the widening direction, since every leg is a grant. The request
+        /// stays on the legacy path in that case.
+        /// </remarks>
+        internal bool IgnixaSmartCompartmentTranslated { get; set; }
 
         /// <summary>
         /// Gets the collection of search parameters used for filtering and querying resources.

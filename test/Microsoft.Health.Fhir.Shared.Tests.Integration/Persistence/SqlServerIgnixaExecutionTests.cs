@@ -1181,6 +1181,158 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenASmartUserCompartment_WhenExecutedOnBothEngines_ThenIgnixaAdmitsTheSameThreeLegsAsLegacy()
+        {
+            // The SMART user compartment is a union, not a filter: a resource is visible if it refers to the SMART
+            // user, if it IS the SMART user's own resource, or if it is a "universal" type belonging to no
+            // compartment. Legacy builds that union in SmartCompartmentSearchRewriter; Ignixa now builds the same
+            // three legs and lowers them through UnionExpression.
+            //
+            // All three legs are exercised at once with one _id list spanning them, plus a fourth resource that
+            // satisfies none. Testing a single leg would pass against a plan that dropped the other two, and
+            // testing without the outsider would pass against a plan that dropped the union entirely.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var smartUser = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            smartUser.Id = Guid.NewGuid().ToString();
+            string smartUserId = await UpsertWithSearchIndicesAsync(smartUser);
+
+            var strangerPatient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            strangerPatient.Id = Guid.NewGuid().ToString();
+            string strangerPatientId = await UpsertWithSearchIndicesAsync(strangerPatient);
+
+            // Leg one: refers to the SMART user.
+            var insideObservation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept("http://example.org/ignixa-smart", "inside"),
+                Subject = new ResourceReference($"Patient/{smartUserId}"),
+            };
+            string insideObservationId = await UpsertWithSearchIndicesAsync(insideObservation);
+
+            // Leg three: a universal type, in no compartment at all.
+            var organization = new Organization { Id = Guid.NewGuid().ToString(), Name = "Ignixa Smart Universal" };
+            string organizationId = await UpsertWithSearchIndicesAsync(organization);
+
+            // Outside every leg: an Observation for a different patient.
+            var outsideObservation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept("http://example.org/ignixa-smart", "outside"),
+                Subject = new ResourceReference($"Patient/{strangerPatientId}"),
+            };
+            string outsideObservationId = await UpsertWithSearchIndicesAsync(outsideObservation);
+
+            // Device is the interesting universal type: with EnableSmartCompartmentDeviceRestriction on (the
+            // default) it is removed from the universal list and replaced by two narrower legs, so an orphan
+            // device and this patient's own device are visible while another patient's device is not.
+            var orphanDevice = new Device { Id = Guid.NewGuid().ToString(), Status = Device.FHIRDeviceStatus.Active };
+            string orphanDeviceId = await UpsertWithSearchIndicesAsync(orphanDevice);
+
+            var ownDevice = new Device
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = Device.FHIRDeviceStatus.Active,
+                Patient = new ResourceReference($"Patient/{smartUserId}"),
+            };
+            string ownDeviceId = await UpsertWithSearchIndicesAsync(ownDevice);
+
+            var strangerDevice = new Device
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = Device.FHIRDeviceStatus.Active,
+                Patient = new ResourceReference($"Patient/{strangerPatientId}"),
+            };
+            string strangerDeviceId = await UpsertWithSearchIndicesAsync(strangerDevice);
+
+            RequestContextAccessor<IFhirRequestContext> contextAccessor = fixture.FhirRequestContextAccessor;
+            IFhirRequestContext originalContext = contextAccessor.RequestContext;
+
+            var accessControl = new AccessControlContext
+            {
+                ApplyFineGrainedAccessControl = true,
+                CompartmentResourceType = KnownResourceTypes.Patient,
+                CompartmentId = smartUserId,
+                FhirUserClaim = new Uri($"https://localhost/Patient/{smartUserId}"),
+            };
+
+            accessControl.AllowedResourceActions.Add(new ScopeRestriction(KnownResourceTypes.All, DataActions.Read, "user"));
+
+            var scopedContext = Substitute.For<IFhirRequestContext>();
+            scopedContext.AccessControlContext.Returns(accessControl);
+            scopedContext.CorrelationId.Returns(Guid.NewGuid().ToString());
+            scopedContext.RouteName.Returns("routeName");
+            scopedContext.RequestHeaders.Returns(new Dictionary<string, StringValues>());
+            scopedContext.ResponseHeaders.Returns(new Dictionary<string, StringValues>());
+            contextAccessor.RequestContext.Returns(scopedContext);
+
+            try
+            {
+                // Leg two - the SMART user's own resource - is the smartUserId entry here.
+                foreach (string resourceType in new[] { KnownResourceTypes.Observation, KnownResourceTypes.Patient, KnownResourceTypes.Organization, KnownResourceTypes.Device })
+                {
+                    var query = new List<Tuple<string, string>>
+                    {
+                        Tuple.Create(
+                            "_id",
+                            string.Join(
+                                ",",
+                                new[]
+                                {
+                                    insideObservationId, outsideObservationId, smartUserId, strangerPatientId,
+                                    organizationId, orphanDeviceId, ownDeviceId, strangerDeviceId,
+                                })),
+                        Tuple.Create("_count", "100"),
+                    };
+
+                    long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                    long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+                    fixture.IgnixaRouterLog.Clear();
+
+                    SearchResult ignixaResults = await ignixaSearchService.SearchAsync(resourceType, query, CancellationToken.None);
+                    string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+                    SearchResult legacyResults = await legacySearchService.SearchAsync(resourceType, query, CancellationToken.None);
+
+                    Assert.True(
+                        ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                        $"Expected the SMART compartment {resourceType} search to run on Ignixa. Router log: {routerLog}");
+                    Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+                    List<string> legacyMatches = ResourceIdsInResultOrder(legacyResults);
+                    Assert.Equal(legacyMatches, ResourceIdsInResultOrder(ignixaResults));
+
+                    // Anti-vacuity per type, so a plan that returned nothing at all cannot pass.
+                    switch (resourceType)
+                    {
+                        case KnownResourceTypes.Observation:
+                            Assert.Equal(new[] { insideObservationId }, legacyMatches);
+                            break;
+                        case KnownResourceTypes.Patient:
+                            Assert.Equal(new[] { smartUserId }, legacyMatches);
+                            break;
+                        case KnownResourceTypes.Device:
+                            Assert.Equal(
+                                new[] { orphanDeviceId, ownDeviceId }.OrderBy(id => id, StringComparer.Ordinal),
+                                legacyMatches.OrderBy(id => id, StringComparer.Ordinal));
+                            Assert.DoesNotContain(strangerDeviceId, legacyMatches);
+                            break;
+                        default:
+                            Assert.Equal(new[] { organizationId }, legacyMatches);
+                            break;
+                    }
+                }
+            }
+            finally
+            {
+                contextAccessor.RequestContext.Returns(originalContext);
+            }
+        }
+
+        [Fact]
         public async Task GivenACompartmentSearch_WhenExecutedOnBothEngines_ThenIgnixaRestrictsToTheCompartmentLikeLegacy()
         {
             // AppendIgnixaCompartmentExpression already ANDs a CompartmentSearchExpression into the Ignixa match

@@ -1,4 +1,4 @@
-﻿// -------------------------------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
@@ -54,10 +54,12 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
         private readonly ISortingValidator _sortingValidator;
         private readonly IIgnixaSearchOptionsAdapter _ignixaAdapter;
         private readonly IgnixaSearchTenantAccessor _ignixaSearchTenantAccessor;
+        private readonly ISearchParameterDefinitionManager _searchParameterDefinitionManager;
 
         public SearchOptionsFactoryTests()
         {
-            var searchParameterDefinitionManager = Substitute.For<ISearchParameterDefinitionManager>();
+            ISearchParameterDefinitionManager searchParameterDefinitionManager = Substitute.For<ISearchParameterDefinitionManager>();
+            _searchParameterDefinitionManager = searchParameterDefinitionManager;
             _resourceTypeSearchParameterInfo = new SearchParameter { Name = SearchParameterNames.ResourceType, Code = SearchParameterNames.ResourceType, Type = SearchParamType.String, Url = SearchParameterNames.ResourceTypeUri.AbsoluteUri }.ToInfo();
             _lastUpdatedSearchParameterInfo = new SearchParameter { Name = SearchParameterNames.LastUpdated, Code = SearchParameterNames.LastUpdated, Type = SearchParamType.String }.ToInfo();
             searchParameterDefinitionManager.GetSearchParameter(Arg.Any<string>(), Arg.Any<string>()).Throws(ci => new SearchParameterNotSupportedException(ci.ArgAt<string>(0), ci.ArgAt<string>(1)));
@@ -1133,8 +1135,10 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
         }
 
         [Fact]
-        public void Create_GivenCompartmentAccess_DoesNotMarkItTranslated()
+        public void Create_GivenCompartmentAccess_TranslatesTheScopeAllowListAndTheCompartmentUnion()
         {
+            StubScopePredicate();
+            StubDevicePatientSearchParameter();
             _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
             _defaultFhirRequestContext.AccessControlContext.CompartmentResourceType = "Patient";
             _defaultFhirRequestContext.AccessControlContext.CompartmentId = "123";
@@ -1142,9 +1146,77 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
 
             SearchOptions options = CreateSearchOptions(resourceType: "Patient");
 
-            // Compartment access is ANDed into the match filter only. Ignixa runs includes as separate
-            // row-producing stages, so an included resource would escape the compartment entirely.
-            Assert.False(options.IgnixaAccessControlTranslated);
+            // The two halves are tracked separately because they gate separately: the scope list becomes an
+            // allow-list, the compartment becomes a union of membership legs ANDed into the expression.
+            Assert.True(options.IgnixaAccessControlTranslated);
+            Assert.True(options.IgnixaSmartCompartmentTranslated);
+            Assert.Equal(new[] { "Patient" }, options.IgnixaOptions.AllowedResourceTypes);
+            Assert.Contains(
+                DescendantsOf(options.IgnixaOptions.Expression),
+                e => e is global::Ignixa.Search.Expressions.UnionExpression);
+        }
+
+        [Fact]
+        public void Create_GivenCompartmentAccessWithNoDevicePatientParameter_DoesNotMarkTheCompartmentTranslated()
+        {
+            StubScopePredicate();
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
+            _defaultFhirRequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+            _defaultFhirRequestContext.AccessControlContext.CompartmentId = "123";
+            _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(new ScopeRestriction("Patient", DataActions.Read, "patient"));
+
+            // The device restriction is on but Device.patient is undefined (the R5 shape). Legacy silently drops
+            // the restriction and treats Device as universal; translating that would turn a narrowing into a
+            // widening, so the compartment stays untranslated and the request keeps the legacy path.
+            SearchOptions options = CreateSearchOptions(resourceType: "Patient");
+
+            Assert.False(options.IgnixaSmartCompartmentTranslated);
+        }
+
+        [Fact]
+        public void Create_GivenCompartmentAccessWithNoIgnixaOptions_DoesNotMarkTheCompartmentTranslated()
+        {
+            StubScopePredicate();
+            StubDevicePatientSearchParameter();
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
+            _defaultFhirRequestContext.AccessControlContext.CompartmentResourceType = "Patient";
+            _defaultFhirRequestContext.AccessControlContext.CompartmentId = "123";
+            _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(new ScopeRestriction("Patient", DataActions.Read, "patient"));
+
+            // No Ignixa options means there is no expression to AND the union into. The flag must stay false so
+            // the router keeps the request on legacy rather than running an unrestricted compartment search.
+            _ignixaAdapter
+                .Build(Arg.Any<string>(), Arg.Any<IReadOnlyList<Tuple<string, string>>>(), Arg.Any<int?>())
+                .Returns((global::Ignixa.Search.Models.SearchOptions)null);
+
+            SearchOptions options = CreateSearchOptions(resourceType: "Patient");
+
+            Assert.False(options.IgnixaSmartCompartmentTranslated);
+        }
+
+        private static IEnumerable<global::Ignixa.Search.Expressions.Expression> DescendantsOf(global::Ignixa.Search.Expressions.Expression expression)
+        {
+            if (expression == null)
+            {
+                yield break;
+            }
+
+            yield return expression;
+
+            IEnumerable<global::Ignixa.Search.Expressions.Expression> children = expression switch
+            {
+                global::Ignixa.Search.Expressions.MultiaryExpression multiary => multiary.Expressions,
+                global::Ignixa.Search.Expressions.UnionExpression union => union.Expressions,
+                _ => Array.Empty<global::Ignixa.Search.Expressions.Expression>(),
+            };
+
+            foreach (global::Ignixa.Search.Expressions.Expression child in children)
+            {
+                foreach (global::Ignixa.Search.Expressions.Expression descendant in DescendantsOf(child))
+                {
+                    yield return descendant;
+                }
+            }
         }
 
         [Fact]
@@ -1173,6 +1245,29 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
                 .Returns(new global::Ignixa.Search.Models.SearchOptions { Expression = predicate });
 
             return predicate;
+        }
+
+        /// <summary>
+        /// Makes <c>Device.patient</c> resolvable, which is what the SMART compartment device restriction keys on.
+        /// Without it the factory takes the fail-closed path and leaves the compartment untranslated.
+        /// </summary>
+        private void StubDevicePatientSearchParameter()
+        {
+            var devicePatient = new SearchParameter
+            {
+                Name = "patient",
+                Code = "patient",
+                Type = SearchParamType.Reference,
+                Url = "http://hl7.org/fhir/SearchParameter/Device-patient",
+            }.ToInfo();
+
+            _searchParameterDefinitionManager
+                .TryGetSearchParameter(KnownResourceTypes.Device, "patient", out Arg.Any<SearchParameterInfo>())
+                .Returns(x =>
+                {
+                    x[2] = devicePatient;
+                    return true;
+                });
         }
 
         private SearchOptions CreateSearchOptions(

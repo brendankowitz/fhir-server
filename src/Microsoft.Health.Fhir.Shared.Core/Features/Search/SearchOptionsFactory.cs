@@ -1,4 +1,4 @@
-﻿// -------------------------------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
@@ -38,6 +38,24 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         /// predicate. An empty allow-list cannot serve here: the compiler reads empty as unconstrained.
         /// </summary>
         private const string DeniedResourceTypeSentinel = "none";
+
+        /// <summary>
+        /// The Device reference parameter the SMART compartment device restriction keys on. Must match
+        /// <c>SmartCompartmentSearchRewriter</c>'s constant of the same name.
+        /// </summary>
+        private const string DevicePatientSearchParameterCode = "patient";
+
+        /// <summary>
+        /// The Ignixa <c>_id</c> and <c>_type</c> parameters, used to hand-build the resource-column legs of a
+        /// SMART compartment union. The compiler dispatches these two by <see cref="Ignixa.Search.Models.SearchParameterInfo.Code"/>
+        /// onto dbo.Resource's own columns and never looks them up in the symbol table, so only the code has to
+        /// be right; the URL is carried for parity with the bound form.
+        /// </summary>
+        private static readonly Ignixa.Search.Models.SearchParameterInfo IgnixaIdSearchParameter =
+            new("_id", "_id", Ignixa.Specification.ValueSets.Normative.SearchParamType.Token, new Uri("http://hl7.org/fhir/SearchParameter/Resource-id"));
+
+        private static readonly Ignixa.Search.Models.SearchParameterInfo IgnixaTypeSearchParameter =
+            new("_type", "_type", Ignixa.Specification.ValueSets.Normative.SearchParamType.Token, new Uri("http://hl7.org/fhir/SearchParameter/Resource-type"));
 
         private static readonly string SupportedTotalTypes = $"'{TotalType.Accurate}', '{TotalType.None}'".ToLower(CultureInfo.CurrentCulture);
 
@@ -495,9 +513,9 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 
                     if (useSmartCompartmentDefinition)
                     {
-                        // SMART membership differs from standard membership; Ignixa can only express the latter.
                         searchOptions.IgnixaSmartCompartmentSearch = true;
-                        AppendIgnixaCompartmentExpression(searchOptions, compartmentType, compartmentId, resourceTypesString);
+                        searchOptions.IgnixaSmartCompartmentTranslated =
+                            TryAppendIgnixaSmartCompartmentExpression(searchOptions, compartmentType, compartmentId, resourceTypesString);
                         searchExpressions.Add(Expression.SmartCompartmentSearch(compartmentType, compartmentId, resourceTypesString));
                     }
                     else
@@ -529,7 +547,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                     if (!searchExpressions.Any(e => e.ValueInsensitiveEquals(Expression.SmartCompartmentSearch(smartCompartmentType, smartCompartmentId, null))))
                     {
                         searchOptions.IgnixaSmartCompartmentSearch = true;
-                        AppendIgnixaCompartmentExpression(searchOptions, smartCompartmentType, smartCompartmentId, resourceTypesString);
+                        searchOptions.IgnixaSmartCompartmentTranslated =
+                            TryAppendIgnixaSmartCompartmentExpression(searchOptions, smartCompartmentType, smartCompartmentId, resourceTypesString);
                         searchExpressions.Add(Expression.SmartCompartmentSearch(smartCompartmentType, smartCompartmentId, resourceTypesString));
                     }
                 }
@@ -851,11 +870,6 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 return;
             }
 
-            if (!string.IsNullOrWhiteSpace(accessControl.CompartmentResourceType))
-            {
-                return;
-            }
-
             ICollection<ScopeRestriction> restrictions = accessControl.AllowedResourceActions;
             if (restrictions == null || restrictions.Count == 0)
             {
@@ -975,6 +989,172 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         private Expression LegacyExpressionProjection(string[] resourceTypesString, string name, string value)
         {
             return _expressionParser.Parse(resourceTypesString, name, value);
+        }
+
+        /// <summary>
+        /// Builds the Ignixa form of a SMART user compartment and ANDs it into the Ignixa expression, returning
+        /// whether the whole membership rule was expressed.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This mirrors <c>SmartCompartmentSearchRewriter</c>, which admits a resource for any of three reasons:
+        /// it refers to the SMART user (ordinary compartment membership), it <em>is</em> the SMART user's own
+        /// resource, or it is a "universal" type that belongs to no compartment and is visible to everyone. The
+        /// three are alternatives, so they combine as a union of row-producing legs rather than an OR of values
+        /// of one parameter - each leg reads a different table.
+        /// </para>
+        /// <para>
+        /// Every leg carries its own <c>_type</c> predicate rather than relying on the leg's position. Union legs
+        /// lower inside the ambient resource type's scope, so a leg that named no type would be read as a filter
+        /// on whatever type is being searched: the "devices with no patient reference" leg in particular would
+        /// then admit <em>every</em> resource of the searched type, since no Observation carries Device.patient.
+        /// Pairing each such leg with <c>_type</c> makes it collapse to the empty set outside its own type.
+        /// </para>
+        /// <para>
+        /// Returns false, leaving the request on the legacy path, when the Device.patient search parameter the
+        /// device restriction needs is not defined by the FHIR version in use (R5 has no such parameter). The
+        /// legacy rewriter silently drops the restriction in that case and treats Device as universal, which this
+        /// could mirror - but a security narrowing that silently becomes a widening is not worth the parity.
+        /// </para>
+        /// </remarks>
+        private bool TryAppendIgnixaSmartCompartmentExpression(
+            SearchOptions searchOptions,
+            string compartmentType,
+            string compartmentId,
+            IReadOnlyCollection<string> resourceTypesString)
+        {
+            if (searchOptions.IgnixaOptions == null)
+            {
+                return false;
+            }
+
+            var legs = new List<Ignixa.Search.Expressions.Expression>
+            {
+                new Ignixa.Search.Expressions.CompartmentSearchExpression(
+                    compartmentType,
+                    compartmentId,
+                    resourceTypesString?.ToHashSet()),
+                Ignixa.Search.Expressions.Expression.And(
+                    IgnixaResourceColumnEquals(IgnixaIdSearchParameter, compartmentId),
+                    IgnixaResourceColumnEquals(IgnixaTypeSearchParameter, compartmentType)),
+            };
+
+            bool restrictDevices = _featureConfiguration.EnableSmartCompartmentDeviceRestriction &&
+                _searchParameterDefinitionManager.TryGetSearchParameter(KnownResourceTypes.Device, DevicePatientSearchParameterCode, out _);
+
+            if (_featureConfiguration.EnableSmartCompartmentDeviceRestriction && !restrictDevices)
+            {
+                return false;
+            }
+
+            var universalResourceTypes = new List<string>
+            {
+                KnownResourceTypes.Location,
+                KnownResourceTypes.Organization,
+                KnownResourceTypes.Practitioner,
+                KnownResourceTypes.Medication,
+            };
+
+            if (!restrictDevices)
+            {
+                universalResourceTypes.Add(KnownCompartmentTypes.Device);
+            }
+
+            // A _type filter narrows which universal types can still appear. DomainResource is the default
+            // stand-in the rewriter uses for "no filter", so it does not count as one.
+            bool hasResourceTypeFilter = resourceTypesString?.Any(resourceType => !string.Equals(resourceType, KnownResourceTypes.DomainResource, StringComparison.Ordinal)) == true;
+            if (hasResourceTypeFilter)
+            {
+                universalResourceTypes = universalResourceTypes.Where(resourceTypesString.Contains).ToList();
+            }
+
+            // One leg per type rather than a single `_type=a,b,c`: the compiler's resource-column rule lowers a
+            // single equality, and a union of equalities is the same set with no new vocabulary needed.
+            foreach (string universalResourceType in universalResourceTypes)
+            {
+                legs.Add(IgnixaResourceColumnEquals(IgnixaTypeSearchParameter, universalResourceType));
+            }
+
+            if (restrictDevices && (!hasResourceTypeFilter || resourceTypesString.Contains(KnownResourceTypes.Device, StringComparer.Ordinal)))
+            {
+                // Devices with no patient reference at all are visible in every SMART compartment. `:missing=true`
+                // on the reference parameter is exactly the legacy NotReferencingExpression's "no outgoing
+                // reference for this parameter", expressed in vocabulary Ignixa already lowers.
+                Ignixa.Search.Expressions.MultiaryExpression orphanDevices =
+                    BuildIgnixaDeviceLeg(new[] { Tuple.Create($"{DevicePatientSearchParameterCode}:missing", "true") });
+                if (orphanDevices == null)
+                {
+                    return false;
+                }
+
+                legs.Add(orphanDevices);
+
+                if (string.Equals(compartmentType, KnownResourceTypes.Patient, StringComparison.Ordinal))
+                {
+                    Ignixa.Search.Expressions.MultiaryExpression ownDevices =
+                        BuildIgnixaDeviceLeg(new[] { Tuple.Create(DevicePatientSearchParameterCode, $"{compartmentType}/{compartmentId}") });
+                    if (ownDevices == null)
+                    {
+                        return false;
+                    }
+
+                    legs.Add(ownDevices);
+                }
+            }
+
+            Ignixa.Search.Expressions.Expression membership =
+                Ignixa.Search.Expressions.Expression.Union(Ignixa.Search.Expressions.UnionOperator.All, legs);
+
+            searchOptions.IgnixaOptions.Expression = searchOptions.IgnixaOptions.Expression == null
+                ? membership
+                : Ignixa.Search.Expressions.Expression.And(searchOptions.IgnixaOptions.Expression, membership);
+
+            return true;
+        }
+
+        private static Ignixa.Search.Expressions.SearchParameterExpression IgnixaResourceColumnEquals(Ignixa.Search.Models.SearchParameterInfo parameter, string value)
+            => new Ignixa.Search.Expressions.SearchParameterExpression(
+                parameter,
+                new Ignixa.Search.Expressions.SearchParameterPredicateExpression(
+                    parameter,
+                    Ignixa.Specification.ValueSets.Normative.SearchComparator.Eq,
+                    modifier: null,
+                    new Ignixa.Search.Indexing.SearchValues.TokenSearchValue(system: null, code: value, text: null)));
+
+        /// <summary>
+        /// Builds one Device union leg from a query string fragment, paired with its own <c>_type=Device</c>
+        /// predicate, or <see langword="null"/> when the fragment could not be bound.
+        /// </summary>
+        /// <remarks>
+        /// The fragment goes through the same adapter as the request's own parameters rather than being
+        /// hand-assembled, so the reference and <c>:missing</c> shapes are exactly the ones the compiler already
+        /// has lowering rules for. The <c>_type</c> pairing is what confines the leg to Device: see the union
+        /// scoping note on <see cref="TryAppendIgnixaSmartCompartmentExpression"/>.
+        /// </remarks>
+        private Ignixa.Search.Expressions.MultiaryExpression BuildIgnixaDeviceLeg(IReadOnlyList<Tuple<string, string>> parameters)
+        {
+            Ignixa.Search.Models.SearchOptions deviceOptions;
+
+            try
+            {
+                deviceOptions = _ignixaSearchOptionsAdapter.Build(
+                    KnownResourceTypes.Device,
+                    parameters,
+                    _ignixaSearchTenantAccessor.TenantId);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+
+            if (deviceOptions?.Expression == null || deviceOptions.UnsupportedParams?.Count > 0)
+            {
+                return null;
+            }
+
+            return Ignixa.Search.Expressions.Expression.And(
+                IgnixaResourceColumnEquals(IgnixaTypeSearchParameter, KnownResourceTypes.Device),
+                deviceOptions.Expression);
         }
 
         private static void AppendIgnixaCompartmentExpression(SearchOptions searchOptions, string compartmentType, string compartmentId, IReadOnlyCollection<string> resourceTypesString)
