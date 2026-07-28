@@ -279,10 +279,10 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 // SECURITY BOUNDARY. The request carries an access control predicate that
                 // SearchOptionsFactory.TranslateClinicalScopesForIgnixa did not fully translate into IgnixaOptions,
                 // so the compiler would enforce less than the legacy path does — or nothing at all. The untranslated
-                // cases are SMART v2 scopes carrying search parameters (an instance-level restriction that is an
-                // AccessConstraint, not an allow-list), compartment access (ANDed into the match filter only, so
-                // include stages would escape it), and a scope set granting no resources at all (which legacy blocks
-                // outright but an empty allow-list would render inert). Keep all of them on the legacy path.
+                // cases are compartment access (ANDed into the match filter only, so include stages would escape it)
+                // and a wildcard (_type = "all") scope carrying search parameters, which legacy applies to every
+                // requested type by mutating the search itself and which therefore has no per-type AccessConstraint
+                // spelling. Keep both on the legacy path.
                 //
                 // The condition is deliberately "not translated" rather than an enumeration of unsupported shapes,
                 // so a future access control mechanism that nobody teaches the translator about fails closed here

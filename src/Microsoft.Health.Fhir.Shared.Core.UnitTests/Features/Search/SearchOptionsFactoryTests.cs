@@ -1019,32 +1019,117 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
         }
 
         [Fact]
-        public void Create_GivenScopesCarryingSearchParameters_DoesNotMarkThemTranslated()
+        public void Create_GivenScopesCarryingSearchParameters_TranslatesThemIntoAccessConstraints()
         {
             _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControlWithSearchParameters = true;
+            _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(
+                new ScopeRestriction("Patient", DataActions.Read, "patient", new SearchParams().Add("code", "foo")));
+
+            global::Ignixa.Search.Expressions.Expression scopePredicate = StubScopePredicate();
+
+            SearchOptions options = CreateSearchOptions(resourceType: "Patient");
+
+            // A SMART v2 scope restricts which *instances* of a permitted type are visible, which is exactly what
+            // AccessConstraint expresses. Both halves must be present: the allow-list denies the types the scopes
+            // never granted, the constraint narrows the one they did.
+            Assert.Equal(new[] { "Patient" }, options.IgnixaOptions.AllowedResourceTypes);
+            global::Ignixa.Search.Models.AccessConstraint constraint = Assert.Single(options.IgnixaOptions.AccessConstraints);
+            Assert.Equal("Patient", constraint.ResourceType);
+            Assert.Same(scopePredicate, constraint.Predicate);
+            Assert.True(options.IgnixaAccessControlTranslated);
+        }
+
+        [Fact]
+        public void Create_GivenTwoScopesOnOneTypeCarryingSearchParameters_CollapsesThemByConjunction()
+        {
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControlWithSearchParameters = true;
+            _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(
+                new ScopeRestriction("Patient", DataActions.Read, "patient", new SearchParams().Add("code", "foo")));
+            _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(
+                new ScopeRestriction("Patient", DataActions.Read, "user", new SearchParams().Add("status", "active")));
+
+            StubScopePredicate();
+
+            SearchOptions options = CreateSearchOptions(resourceType: "Patient");
+
+            // AccessConstraints permits at most one entry per resource type, and two scopes on one type are two
+            // independent restrictions that must both hold. Keeping only one would widen the grant; ORing them
+            // would too. Conjunction is the same reading legacy takes when it ANDs a type's scope legs together.
+            global::Ignixa.Search.Models.AccessConstraint constraint = Assert.Single(options.IgnixaOptions.AccessConstraints);
+            var conjunction = Assert.IsType<global::Ignixa.Search.Expressions.MultiaryExpression>(constraint.Predicate);
+            Assert.Equal(global::Ignixa.Search.Expressions.MultiaryOperator.And, conjunction.MultiaryOperation);
+            Assert.Equal(2, conjunction.Expressions.Count);
+            Assert.True(options.IgnixaAccessControlTranslated);
+        }
+
+        [Fact]
+        public void Create_GivenScopeSearchParametersIgnixaCannotParse_DoesNotMarkThemTranslated()
+        {
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControlWithSearchParameters = true;
+            _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(
+                new ScopeRestriction("Patient", DataActions.Read, "patient", new SearchParams().Add("code", "foo")));
+
+            _ignixaAdapter.Build("Patient", Arg.Is<IReadOnlyList<Tuple<string, string>>>(p => p.Any(t => t.Item1 == "code")), Arg.Any<int?>())
+                .Returns(new global::Ignixa.Search.Models.SearchOptions { UnsupportedParams = new List<string> { "code" } });
+
+            SearchOptions options = CreateSearchOptions(resourceType: "Patient");
+
+            // Ignixa dropped part of the restriction. Forwarding what it did understand would grant more than the
+            // scope allows, so the request goes back to legacy rather than being enforced approximately.
+            Assert.False(options.IgnixaAccessControlTranslated);
+        }
+
+        [Fact]
+        public void Create_GivenScopesCarryingSearchParametersButTheEnforcementFlagIsOff_TranslatesTheTypeListOnly()
+        {
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControlWithSearchParameters = false;
             _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(
                 new ScopeRestriction("Patient", DataActions.Read, "patient", new SearchParams().Add("code", "foo")));
 
             SearchOptions options = CreateSearchOptions(resourceType: "Patient");
 
-            // A SMART v2 scope restricts which *instances* of a permitted type are visible. Forwarding only the
-            // type list would grant every Patient instead of the constrained subset, so this must stay on the
-            // legacy path even though the type half is trivially translatable.
+            // With the flag off, CheckFineGrainedAccessControl builds the parameter union and then discards it,
+            // keeping only the type restriction. Mirroring that literally is the point: emitting a constraint here
+            // would make Ignixa stricter than legacy and the differential tests would disagree.
+            Assert.Equal(new[] { "Patient" }, options.IgnixaOptions.AllowedResourceTypes);
+            Assert.Empty(options.IgnixaOptions.AccessConstraints);
+            Assert.True(options.IgnixaAccessControlTranslated);
+        }
+
+        [Fact]
+        public void Create_GivenAWildcardScopeCarryingSearchParameters_DoesNotMarkItTranslated()
+        {
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
+            _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControlWithSearchParameters = true;
+            _defaultFhirRequestContext.AccessControlContext.AllowedResourceActions.Add(
+                new ScopeRestriction(KnownResourceTypes.All, DataActions.Read, "user", new SearchParams().Add("code", "foo")));
+
+            StubScopePredicate();
+
+            SearchOptions options = CreateSearchOptions(resourceType: "Patient");
+
+            // Legacy folds a wildcard scope's parameters into the search itself, so they constrain every requested
+            // type at once. AccessConstraint is keyed by resource type and cannot say "all types", so there is no
+            // faithful spelling and the request stays on the legacy path.
             Assert.False(options.IgnixaAccessControlTranslated);
         }
 
         [Fact]
-        public void Create_GivenNoGrantedResources_DoesNotMarkThemTranslated()
+        public void Create_GivenNoGrantedResources_NamesAnUnmatchableTypeAndMarksItTranslated()
         {
             _defaultFhirRequestContext.AccessControlContext.ApplyFineGrainedAccessControl = true;
 
             SearchOptions options = CreateSearchOptions(resourceType: "Patient");
 
-            // Legacy blocks the whole query when no scope grants anything. An empty allow-list means "inert" to
-            // the compiler, so translating this case would turn a total denial into a total bypass -- the single
-            // most dangerous mistranslation available here.
-            Assert.Empty(options.IgnixaOptions.AllowedResourceTypes);
-            Assert.False(options.IgnixaAccessControlTranslated);
+            // Legacy blocks the whole query when no scope grants anything. An empty allow-list means "inert" to the
+            // compiler, so the denial is spelled as a type name that cannot resolve: the compiler keeps an
+            // unresolvable name as its unmatchable sentinel rather than dropping it, which blocks every row.
+            Assert.Equal(new[] { "none" }, options.IgnixaOptions.AllowedResourceTypes);
+            Assert.True(options.IgnixaAccessControlTranslated);
         }
 
         [Fact]
@@ -1071,6 +1156,23 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
             // carries no access control predicate, so ordinary searches are unaffected.
             Assert.Empty(options.IgnixaOptions.AllowedResourceTypes);
             Assert.False(options.IgnixaAccessControlTranslated);
+        }
+
+        /// <summary>
+        /// Makes the Ignixa adapter return a real expression for any <em>non-empty</em> parameter list, which is
+        /// how a scope's own parameters are distinguished from the request's here: the tests that call this issue
+        /// a search with no query parameters, so only the scope predicate build matches.
+        /// </summary>
+        private global::Ignixa.Search.Expressions.Expression StubScopePredicate()
+        {
+            global::Ignixa.Search.Expressions.Expression predicate =
+                global::Ignixa.Search.Expressions.Expression.Missing(global::Ignixa.Search.Expressions.FieldName.TokenCode, componentIndex: null);
+
+            _ignixaAdapter
+                .Build(Arg.Any<string>(), Arg.Is<IReadOnlyList<Tuple<string, string>>>(p => p != null && p.Count > 0), Arg.Any<int?>())
+                .Returns(new global::Ignixa.Search.Models.SearchOptions { Expression = predicate });
+
+            return predicate;
         }
 
         private SearchOptions CreateSearchOptions(

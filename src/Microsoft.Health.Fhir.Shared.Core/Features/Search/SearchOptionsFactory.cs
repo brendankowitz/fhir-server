@@ -31,6 +31,14 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 {
     public class SearchOptionsFactory : ISearchOptionsFactory
     {
+        /// <summary>
+        /// The allow-list entry that denies everything. Named rather than left as a literal because its whole
+        /// meaning is that no resource type can carry this name, so it resolves to the compiler's
+        /// unmatchable-type sentinel - the counterpart to legacy's <c>ResourceType = "none"</c> blocking
+        /// predicate. An empty allow-list cannot serve here: the compiler reads empty as unconstrained.
+        /// </summary>
+        private const string DeniedResourceTypeSentinel = "none";
+
         private static readonly string SupportedTotalTypes = $"'{TotalType.Accurate}', '{TotalType.None}'".ToLower(CultureInfo.CurrentCulture);
 
         private readonly IExpressionParser _expressionParser;
@@ -793,22 +801,42 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         /// <see cref="IncludeExpression.AllowedResourceTypesByScope"/>, which is the same set.
         /// </para>
         /// <para>
-        /// Three cases are deliberately left untranslated, each because Ignixa would otherwise enforce less than
-        /// legacy. All fail closed by leaving the flag false:
+        /// Two shapes carry search parameters and are handled differently, because legacy handles them
+        /// differently. A <em>typed</em> scope's parameters restrict which instances of that one type are
+        /// visible, which is exactly Ignixa's <c>AccessConstraint</c> — a per-type predicate the compiler
+        /// applies structurally to every row-producing stage, where legacy ANDs a union of
+        /// <c>(_type = X AND &lt;params for X&gt;)</c> legs into the match set alone. A <c>*</c> scope's
+        /// parameters are added to <c>searchParams</c> by <see cref="CheckFineGrainedAccessControl"/> and so
+        /// apply to <em>every</em> type in the request; that is not a per-type constraint and has no
+        /// <c>AccessConstraint</c> spelling, so it stays untranslated.
+        /// </para>
+        /// <para>
+        /// Note that legacy only enforces a typed scope's parameters when
+        /// <see cref="AccessControlContext.ApplyFineGrainedAccessControlWithSearchParameters"/> is set — with
+        /// the flag off it builds the union and then discards it, keeping the type allow-list only. The
+        /// translation mirrors that rather than the apparent intent, since routing must not change what a
+        /// request is permitted to see.
+        /// </para>
+        /// <para>
+        /// Two cases are deliberately left untranslated, each because Ignixa would otherwise enforce less than
+        /// legacy. Both fail closed by leaving the flag false:
         /// </para>
         /// <list type="number">
-        /// <item><description><b>No granted resources at all.</b> Legacy blocks every query with a
-        /// <c>ResourceType = "none"</c> predicate. An empty allow-list means "inert" to the compiler — every type
-        /// permitted — so translating this would inverte the control into a total bypass.</description></item>
-        /// <item><description><b>Scopes carrying search parameters (SMART v2).</b> These restrict which
-        /// <em>instances</em> of a permitted type are visible, which is an <c>AccessConstraint</c> rather than an
-        /// allow-list. Forwarding only the type list would grant every instance of each permitted
-        /// type.</description></item>
+        /// <item><description><b>A <c>*</c> scope carrying search parameters.</b> See above: legacy applies
+        /// these across every requested type, which an <c>AccessConstraint</c> — keyed by resource type —
+        /// cannot express.</description></item>
         /// <item><description><b>Compartment access.</b> Legacy scopes the whole request to a compartment;
         /// <c>AppendIgnixaCompartmentExpression</c> ANDs it into the match filter only, so include stages — which
         /// Ignixa runs as separate row-producing queries — would return resources outside the
         /// compartment.</description></item>
         /// </list>
+        /// <para>
+        /// The "no granted resources at all" case <em>is</em> translated, but not as an empty allow-list: an
+        /// empty list means "inert" to the compiler, so that spelling would invert a total block into a total
+        /// bypass. It is translated as an allow-list naming a single type that cannot exist, which the
+        /// compiler resolves to its unmatchable-type sentinel — the same shape legacy's
+        /// <c>ResourceType = "none"</c> predicate produces, and for the same reason.
+        /// </para>
         /// </remarks>
         private void TranslateClinicalScopesForIgnixa(SearchOptions searchOptions)
         {
@@ -831,11 +859,24 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             ICollection<ScopeRestriction> restrictions = accessControl.AllowedResourceActions;
             if (restrictions == null || restrictions.Count == 0)
             {
+                // Legacy blocks every query outright with a ResourceType = "none" predicate. An empty allow-list
+                // would mean the opposite to the compiler, so name a type that cannot resolve: the compiler maps
+                // an unresolvable name to its unmatchable-type sentinel rather than dropping it, which is the same
+                // fail-closed shape by a different route.
+                searchOptions.IgnixaOptions.AllowedResourceTypes = new[] { DeniedResourceTypeSentinel };
+                searchOptions.IgnixaAccessControlTranslated = true;
                 return;
             }
 
-            if (restrictions.Any(restriction => restriction.SearchParameters?.Parameters?.Any() == true))
+            bool enforceScopeSearchParameters = accessControl.ApplyFineGrainedAccessControlWithSearchParameters;
+
+            if (restrictions.Any(restriction =>
+                    restriction.Resource == KnownResourceTypes.All &&
+                    restriction.SearchParameters?.Parameters?.Any() == true))
             {
+                // CheckFineGrainedAccessControl folds a wildcard scope's parameters into searchParams, so they
+                // constrain every requested type at once. AccessConstraint is keyed by resource type and cannot
+                // say "all types", and the allow-list carries no predicate, so there is no faithful spelling.
                 return;
             }
 
@@ -848,12 +889,78 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 return;
             }
 
+            var constraints = new List<Ignixa.Search.Models.AccessConstraint>();
+
+            if (enforceScopeSearchParameters)
+            {
+                foreach (ScopeRestriction restriction in restrictions.Where(r => r.SearchParameters?.Parameters?.Any() == true))
+                {
+                    Ignixa.Search.Expressions.Expression predicate = BuildIgnixaScopePredicate(restriction);
+                    if (predicate == null)
+                    {
+                        // Ignixa could not parse the whole scope predicate. Dropping the part it did not
+                        // understand would widen what the caller may see, so refuse the request instead.
+                        return;
+                    }
+
+                    constraints.Add(new Ignixa.Search.Models.AccessConstraint(restriction.Resource, predicate));
+                }
+
+                // AccessConstraints allows at most one entry per resource type. Two scopes on the same type are
+                // two independent restrictions and both must hold, so they collapse by conjunction - the same
+                // reading legacy takes when it ANDs a type's scope legs together.
+                constraints = constraints
+                    .GroupBy(constraint => constraint.ResourceType, StringComparer.Ordinal)
+                    .Select(group => group.Count() == 1
+                        ? group.First()
+                        : new Ignixa.Search.Models.AccessConstraint(
+                            group.Key,
+                            Ignixa.Search.Expressions.Expression.And(group.Select(constraint => constraint.Predicate).ToArray())))
+                    .ToList();
+            }
+
+            searchOptions.IgnixaOptions.AccessConstraints = constraints;
+
             searchOptions.IgnixaOptions.AllowedResourceTypes = restrictions
                 .Select(restriction => restriction.Resource)
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
 
             searchOptions.IgnixaAccessControlTranslated = true;
+        }
+
+        /// <summary>
+        /// Parses one SMART v2 scope's search parameters into a single Ignixa predicate for that scope's resource
+        /// type, or <see langword="null"/> when any part of it could not be parsed.
+        /// </summary>
+        /// <remarks>
+        /// Reuses the same adapter the request's own parameters go through, so a scope predicate and an ordinary
+        /// filter are parsed by identical code rather than by a second, divergent path. A parameter Ignixa reports
+        /// as unsupported - or one that produces no expression at all - yields <see langword="null"/> rather than
+        /// a partial predicate: silently dropping a term from an access control restriction widens it.
+        /// </remarks>
+        private Ignixa.Search.Expressions.Expression BuildIgnixaScopePredicate(ScopeRestriction restriction)
+        {
+            Ignixa.Search.Models.SearchOptions scopeOptions;
+
+            try
+            {
+                scopeOptions = _ignixaSearchOptionsAdapter.Build(
+                    restriction.Resource,
+                    restriction.SearchParameters.Parameters.ToList(),
+                    _ignixaSearchTenantAccessor.TenantId);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+
+            if (scopeOptions?.Expression == null || scopeOptions.UnsupportedParams?.Count > 0)
+            {
+                return null;
+            }
+
+            return scopeOptions.Expression;
         }
 
         private static void ValidateTotalType(TotalType totalType)

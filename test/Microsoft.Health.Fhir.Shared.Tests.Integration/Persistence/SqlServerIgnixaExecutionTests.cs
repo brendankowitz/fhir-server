@@ -1069,6 +1069,118 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenSmartV2ScopesCarryingSearchParameters_WhenExecutedOnBothEngines_ThenIgnixaEnforcesTheConstraintLikeLegacy()
+        {
+            // SMART v2 lets a scope carry search parameters - `user/Observation.rs?status=final` - which is not an
+            // allow-list but a per-type *constraint*: the caller may see Observations, but only the final ones.
+            // Legacy expresses this as a UNION of (_type = X AND <scope params for X>) legs ANDed into the match
+            // set. Ignixa has a first-class AccessConstraint that carries the same predicate and applies it to
+            // every row-producing stage, so the translation is direct rather than a rewrite.
+            //
+            // Structured as a pair for the same reason the allow-list differential is: the constrained search must
+            // still return the rows that satisfy the constraint (so a plan that blocks everything fails) and must
+            // drop the rows that do not (so a plan that ignores the constraint fails). Only both together are
+            // evidence, and both must run on Ignixa or neither proves anything about the compiler.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            async Task<string> SeedAsync(ObservationStatus status)
+            {
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = status,
+                    Code = new CodeableConcept { Text = $"IgnixaScopeParams_{Guid.NewGuid()}" },
+                };
+                await UpsertWithSearchIndicesAsync(observation);
+                return observation.Id;
+            }
+
+            string finalOne = await SeedAsync(ObservationStatus.Final);
+            string finalTwo = await SeedAsync(ObservationStatus.Final);
+            string preliminary = await SeedAsync(ObservationStatus.Preliminary);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", string.Join(",", new[] { finalOne, finalTwo, preliminary })),
+            };
+
+            RequestContextAccessor<IFhirRequestContext> contextAccessor = fixture.FhirRequestContextAccessor;
+            IFhirRequestContext originalContext = contextAccessor.RequestContext;
+
+            var accessControl = new AccessControlContext
+            {
+                ApplyFineGrainedAccessControl = true,
+                ApplyFineGrainedAccessControlWithSearchParameters = true,
+            };
+
+            var scopedContext = Substitute.For<IFhirRequestContext>();
+            scopedContext.AccessControlContext.Returns(accessControl);
+            scopedContext.CorrelationId.Returns(Guid.NewGuid().ToString());
+            scopedContext.RouteName.Returns("routeName");
+            scopedContext.RequestHeaders.Returns(new Dictionary<string, StringValues>());
+            scopedContext.ResponseHeaders.Returns(new Dictionary<string, StringValues>());
+            contextAccessor.RequestContext.Returns(scopedContext);
+
+            try
+            {
+                var finalOnlyScope = new Hl7.Fhir.Rest.SearchParams();
+                finalOnlyScope.Add("status", "final");
+                accessControl.AllowedResourceActions.Add(
+                    new ScopeRestriction(KnownResourceTypes.Observation, DataActions.Read, "user", finalOnlyScope));
+
+                long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                SearchResult constrainedIgnixa = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+                SearchResult constrainedLegacy = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+                Assert.True(
+                    ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                    "Expected the scope-constrained search to run on Ignixa. Router log: " + string.Join(" | ", fixture.IgnixaRouterLog));
+                Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+                List<string> legacyMatches = ResourceIdsInResultOrder(constrainedLegacy);
+                List<string> ignixaMatches = ResourceIdsInResultOrder(constrainedIgnixa);
+
+                // Anti-vacuity in both directions at once: the two final rows survive (so the constraint is not
+                // blocking everything) and the preliminary one does not (so it is not being ignored).
+                Assert.Equal(
+                    new[] { finalOne, finalTwo }.OrderBy(id => id, StringComparer.Ordinal),
+                    legacyMatches.OrderBy(id => id, StringComparer.Ordinal));
+                Assert.DoesNotContain(preliminary, legacyMatches);
+                Assert.Equal(legacyMatches, ignixaMatches);
+
+                // The complement. Swapping which status the scope grants must swap which rows come back; without
+                // this a constraint that happened to select "whatever the first two rows are" would pass above.
+                accessControl.AllowedResourceActions.Clear();
+                var preliminaryOnlyScope = new Hl7.Fhir.Rest.SearchParams();
+                preliminaryOnlyScope.Add("status", "preliminary");
+                accessControl.AllowedResourceActions.Add(
+                    new ScopeRestriction(KnownResourceTypes.Observation, DataActions.Read, "user", preliminaryOnlyScope));
+
+                long complementIgnixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                long complementLegacyBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                SearchResult complementIgnixa = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+                SearchResult complementLegacy = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+                Assert.True(
+                    ignixaSearchService.InstanceIgnixaExecutedQueryCount > complementIgnixaBefore,
+                    "Expected the complement search to also run on Ignixa. Router log: " + string.Join(" | ", fixture.IgnixaRouterLog));
+                Assert.Equal(complementLegacyBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+                Assert.Equal(new[] { preliminary }, ResourceIdsInResultOrder(complementLegacy));
+                Assert.Equal(ResourceIdsInResultOrder(complementLegacy), ResourceIdsInResultOrder(complementIgnixa));
+            }
+            finally
+            {
+                contextAccessor.RequestContext.Returns(originalContext);
+            }
+        }
+
+        [Fact]
         public async Task GivenACompartmentSearch_WhenExecutedOnBothEngines_ThenIgnixaRestrictsToTheCompartmentLikeLegacy()
         {
             // AppendIgnixaCompartmentExpression already ANDs a CompartmentSearchExpression into the Ignixa match

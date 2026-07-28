@@ -187,6 +187,12 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             // the same list is forwarded to LowerOptions.AllowedResourceTypes below so it is actually enforced.
             // An unresolvable name is likewise kept as an unmatchable sentinel, so a typo narrows rather than
             // widens the allow-list.
+            //
+            // accessConstraints (SMART v2 scopes carrying search parameters) is the third such pair: Resolve
+            // must walk each constraint's predicate so its search parameters land in the symbol table, and the
+            // same list is forwarded to LowerOptions.AccessConstraints. Passing it to only one of the two is
+            // the failure mode this comment exists to prevent - resolve-only compiles a plan that enforces
+            // nothing, lower-only cannot resolve the predicate's symbols.
             ResolvedSymbols resolved = await Resolve.RunAsync(
                 ignixaOptions.Expression,
                 includes,
@@ -198,6 +204,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 compartmentDefinitionManager: _compartmentDefinitionManager,
                 searchParameterDefinitionManager: _searchParameterDefinitionManager,
                 additionalResourceTypes: ignixaOptions.ResourceTypes,
+                accessConstraints: ignixaOptions.AccessConstraints,
                 allowedResourceTypes: ignixaOptions.AllowedResourceTypes);
 
             if (resolved.Unresolved.Count > 0)
@@ -270,6 +277,13 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                         // types the scope never granted, because Ignixa runs includes as separate row-producing
                         // stages rather than as a filter over the match set.
                         AllowedResourceTypes = ignixaOptions.AllowedResourceTypes,
+
+                        // SMART v2 scopes that carry search parameters. An allow-list says which types the
+                        // caller may see; this says which instances of a type they may see, and the compiler
+                        // applies it to the match set, every include stage and every chain target. Legacy
+                        // enforces the same restriction at the match set alone, via a UNION of
+                        // (_type = X AND <scope params>) legs.
+                        AccessConstraints = ignixaOptions.AccessConstraints,
 
                         // Map the server's requested resource visibility onto the compiler's tri-state model,
                         // which filters each of the IsHistory / IsDeleted axes independently and so reproduces
