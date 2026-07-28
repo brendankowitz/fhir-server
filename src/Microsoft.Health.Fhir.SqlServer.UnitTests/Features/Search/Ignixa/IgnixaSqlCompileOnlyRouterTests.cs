@@ -371,9 +371,33 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
-        public async Task ObserveAsync_WhenIsAsyncOperationSet_DoesNotCompile()
+        public async Task ObserveAsync_WhenIsAsyncOperationSetWithQueryHints_DoesNotCompile()
         {
+            // Query hints steer legacy plan construction (surrogate-id windowing, custom command timeouts) in ways
+            // the differential suite does not cover, so a hinted async page stays on legacy even though the async
+            // flag on its own no longer blocks routing.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.IsAsyncOperation = true;
+            options.QueryHints = new List<(string Param, string Value)> { ("EndSurrogateId", "1") };
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenIsAsyncOperationSetWithoutQueryHints_IsEligibleAndCompiles()
+        {
+            // IsAsyncOperation by itself is legacy plan shaping, not a compiler capability. MaxItemCount is
+            // resolved onto the shared SearchOptions before either engine sees it, and the only other effect is the
+            // surrogate-id contribution to the legacy query-plan-reuse hash, which belongs to a parameter manager
+            // Ignixa does not use.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
             var router = CreateRouter(adapter, EnabledConfig());
 
             SqlSearchOptions options = CreateEligibleOptions();
@@ -381,7 +405,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
 
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
 
-            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
         }
 
         [Fact]

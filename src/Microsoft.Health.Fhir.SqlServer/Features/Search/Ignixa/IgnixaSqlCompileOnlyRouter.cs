@@ -208,14 +208,19 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return false;
             }
 
-            if (searchOptions.IsAsyncOperation)
+            if (searchOptions.IsAsyncOperation && searchOptions.QueryHints != null)
             {
-                // Async operations (export/bulk) take the client _count verbatim as MaxItemCount and fold the
-                // surrogate-id predicate into the legacy parameter hash (see ResourceSurrogateIdParameterQueryGenerator).
-                // These are legacy plan-shaping and job-resumption concerns, not a compiler capability, and are not
-                // exercised by the differential suite. Keep async operations on the legacy path until that agreement
-                // can be proven.
-                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "async-operation");
+                // IsAsyncOperation is legacy plan shaping, not a compiler capability, and by itself is inert for
+                // Ignixa: MaxItemCount is resolved by SearchOptionsFactory onto the shared SearchOptions, and the
+                // only other effect - ResourceSurrogateIdParameterQueryGenerator folding the surrogate-id
+                // predicate into the query-plan-reuse hash - belongs to HashingSqlQueryParameterManager, which
+                // Ignixa does not use because it emits its own parameters.
+                //
+                // What is NOT proven is the query-hint shape. Hints carrying a GlobalEndSurrogateId are
+                // intercepted by SearchImpl before the router, but the remaining hint shapes reach here and steer
+                // legacy plan construction in ways the differential suite does not cover. Gate on the hints
+                // rather than on the async flag so ordinary async pages route.
+                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "async-operation-query-hints");
                 return false;
             }
 

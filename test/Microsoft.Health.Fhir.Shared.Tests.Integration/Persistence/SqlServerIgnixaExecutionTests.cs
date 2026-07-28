@@ -1259,6 +1259,66 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenAnAsyncOperationSearch_WhenExecutedOnBothEngines_ThenIgnixaTakesThePathAndAgreesWithLegacy()
+        {
+            // IsAsyncOperation is a legacy plan-shaping concern, not a compiler capability. It does exactly two
+            // things: SearchOptionsFactory takes the client _count verbatim as MaxItemCount (which both engines
+            // then read off the same SearchOptions), and ResourceSurrogateIdParameterQueryGenerator folds the
+            // surrogate-id predicate into the legacy query-plan-reuse hash. Ignixa emits its own parameterised SQL
+            // and never touches HashingSqlQueryParameterManager, so the second is inert for it.
+            //
+            // The export/$import time-travel shape never reaches the router at all - SearchImpl intercepts
+            // QueryHints carrying a GlobalEndSurrogateId before the routing decision - so what remains for this
+            // test is the ordinary async page: a typed search with an explicit _count.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            string marker = $"IgnixaAsyncOp_{Guid.NewGuid()}";
+            var expectedIds = new List<string>();
+
+            for (int i = 0; i < 3; i++)
+            {
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept { Text = marker },
+                };
+                await UpsertWithSearchIndicesAsync(observation);
+                expectedIds.Add(observation.Id);
+            }
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", string.Join(",", expectedIds)),
+                Tuple.Create("status", "final"),
+                Tuple.Create("_count", "1000"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync(
+                "Observation", query, CancellationToken.None, isAsyncOperation: true);
+            SearchResult legacyResults = await legacySearchService.SearchAsync(
+                "Observation", query, CancellationToken.None, isAsyncOperation: true);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the async-operation search to run on Ignixa. Router log: " + string.Join(" | ", fixture.IgnixaRouterLog));
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            List<string> legacyMatches = ResourceIdsInResultOrder(legacyResults);
+            List<string> ignixaMatches = ResourceIdsInResultOrder(ignixaResults);
+
+            // Anti-vacuity: the _id restriction really did isolate the three seeded rows, so an engine that
+            // silently returned nothing cannot pass by agreeing with an empty legacy result.
+            Assert.Equal(3, legacyMatches.Count);
+            Assert.Equal(legacyMatches, ignixaMatches);
+        }
+
+        [Fact]
         public async Task GivenAForwardIncludeOverIndexedReferences_WhenExecutedOnBothEngines_ThenIgnixaMaterialisesTheSameIncludedRowsAsLegacy()
         {
             // The include differential that is NOT vacuous. Unlike the mediator-seeded include tests in this file,
