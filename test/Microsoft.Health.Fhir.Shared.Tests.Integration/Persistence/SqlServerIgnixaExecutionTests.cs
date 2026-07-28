@@ -2272,6 +2272,129 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenAnOverflowingIncludeSearchWithIncludesEnabled_WhenExecutedOnBothEngines_ThenTheIncludesPageMatchesLegacyAndRecordsWhereIgnixaStands()
+        {
+            // The $includes protocol is only reachable when CoreFeatureConfiguration.SupportsIncludes is on, and it
+            // defaults to off -- so the fixture's usual service pair cannot see it at all. This test drives the
+            // dedicated includes-enabled pair (see SqlServerFhirStorageTestsFixture.IgnixaIncludesSearchService).
+            //
+            // Two things are pinned. First, that the protocol genuinely engages here: an overflowing include search
+            // must mint an IncludesContinuationToken, and feeding it back must return the remaining include rows.
+            // Without that guard everything below would pass vacuously on an empty second page. Second, that both
+            // engines produce the same $includes page. That is true today for a reason worth naming: $includes
+            // never reaches the router (see the closing assertions), so both services run the same legacy
+            // generator. When SearchIncludeImpl is routed, this test becomes a real engine differential.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaIncludesSearchService;
+            SqlServerSearchService legacySearchService = fixture.LegacyIncludesSearchService;
+
+            var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            patient.Id = Guid.NewGuid().ToString();
+            string patientId = await UpsertWithSearchIndicesAsync(patient);
+
+            var practitioner = new Practitioner { Id = Guid.NewGuid().ToString() };
+            string practitionerId = await UpsertWithSearchIndicesAsync(practitioner);
+
+            var observation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept { Text = $"IgnixaIncludesOperation_{Guid.NewGuid()}" },
+                Subject = new ResourceReference($"Patient/{patientId}"),
+                Performer = new List<ResourceReference> { new ResourceReference($"Practitioner/{practitionerId}") },
+            };
+            string observationId = await UpsertWithSearchIndicesAsync(observation);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", observationId),
+                Tuple.Create("_include", "Observation:subject"),
+                Tuple.Create("_include", "Observation:performer"),
+                Tuple.Create("_includesCount", "1"),
+            };
+
+            SearchResult legacyFirstPage = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+            SearchResult ignixaFirstPage = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            Assert.False(
+                string.IsNullOrEmpty(legacyFirstPage.IncludesContinuationToken),
+                "Legacy did not mint an includes continuation token, so the $includes protocol never engaged and the rest of this test would be vacuous.");
+            Assert.False(
+                string.IsNullOrEmpty(ignixaFirstPage.IncludesContinuationToken),
+                "The Ignixa-routed service did not mint an includes continuation token even though the include budget overflowed.");
+
+            var seeded = new HashSet<string>(new[] { patientId, practitionerId, observationId }, StringComparer.Ordinal);
+            Assert.Equal(SeededModeMap(legacyFirstPage, seeded), SeededModeMap(ignixaFirstPage, seeded));
+
+            // The $includes page itself. isIncludesOperation flips SearchOptionsFactory into the includes-only
+            // shape; without it the token is ignored with an informational issue rather than honoured.
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+            fixture.IgnixaRouterLog.Clear();
+
+            SearchResult legacySecondPage = await legacySearchService.SearchAsync(
+                "Observation",
+                IncludesPageQuery(query, legacyFirstPage.IncludesContinuationToken),
+                CancellationToken.None,
+                isIncludesOperation: true);
+
+            SearchResult ignixaSecondPage = await ignixaSearchService.SearchAsync(
+                "Observation",
+                IncludesPageQuery(query, ignixaFirstPage.IncludesContinuationToken),
+                CancellationToken.None,
+                isIncludesOperation: true);
+
+            string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+
+            Assert.True(
+                legacySecondPage.Results.Any(),
+                "The legacy $includes page returned nothing, so the protocol did not carry the remaining include row and this comparison would be vacuous.");
+            Assert.Equal(SeededModeMap(legacySecondPage, seeded), SeededModeMap(ignixaSecondPage, seeded));
+
+            // Between them the two pages must deliver both referenced resources exactly once -- the property the
+            // whole protocol exists to provide, and the one a broken resume boundary would break.
+            var acrossPages = new HashSet<string>(StringComparer.Ordinal);
+            foreach (SearchResultEntry entry in legacyFirstPage.Results.Concat(legacySecondPage.Results))
+            {
+                if (entry.SearchEntryMode == SearchEntryMode.Include)
+                {
+                    Assert.True(acrossPages.Add(entry.Resource.ResourceId), $"{entry.Resource.ResourceId} was returned on both $includes pages.");
+                }
+            }
+
+            Assert.Equal(new[] { patientId, practitionerId }.OrderBy(x => x, StringComparer.Ordinal), acrossPages.OrderBy(x => x, StringComparer.Ordinal));
+
+            // Where Ignixa stands today, and it is not what the router's includes-continuation-token gate
+            // suggests. $includes does not reach the router at all: SqlServerSearchService.SearchAsync sends an
+            // includes-continuation-token request to SearchIncludeImpl, which builds its own SqlQueryGenerator
+            // directly and never consults IIgnixaSqlCompileOnlyRouter. So neither execution counter moves and the
+            // router logs nothing -- the gate is unreachable dead code for this path.
+            //
+            // That makes the remaining work larger than "close a gate": SearchIncludeImpl has to be routed before
+            // an Ignixa includes page can ever run. When it is, replace this block with the usual assertion that
+            // InstanceIgnixaExecutedQueryCount moved and InstanceLegacyExecutedQueryCount did not.
+            Assert.Equal(ignixaBefore, ignixaSearchService.InstanceIgnixaExecutedQueryCount);
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+            Assert.True(
+                string.IsNullOrEmpty(routerLog),
+                $"The router was consulted for the $includes page after all, so it is no longer bypassed and this test's premise has changed. Router log: {routerLog}");
+        }
+
+        /// <summary>
+        /// Rebuilds a first-page query as the follow-up <c>$includes</c> page request: the same filters and
+        /// includes, minus the include budget, plus the continuation token the first page minted.
+        /// </summary>
+        private static List<Tuple<string, string>> IncludesPageQuery(IEnumerable<Tuple<string, string>> firstPageQuery, string includesContinuationToken)
+        {
+            var query = firstPageQuery
+                .Where(x => !string.Equals(x.Item1, "_includesCount", StringComparison.Ordinal))
+                .ToList();
+
+            query.Add(Tuple.Create(Core.Features.KnownQueryParameterNames.IncludesContinuationToken, ContinuationTokenEncoder.Encode(includesContinuationToken)));
+            return query;
+        }
+
+        [Fact]
         public async Task GivenTwoIncludeStagesAndAnIncludeBudgetOfOne_WhenExecutedOnBothEngines_ThenIgnixaTruncatesToTheSameIncludedRowAsLegacy()
         {
             // Legacy limits includes GLOBALLY: IncludeUnionAllExpression unions every include CTE and
@@ -2280,10 +2403,15 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             // PER STAGE: each incN CTE carries its own "TOP (Limit + 1)" and the stages are then UNION ALL'd
             // (SqlBuilder.EmitIncludeStage / EmitIncludeLimitStage / BuildUnionArms).
             //
-            // With one budget and two stages the two engines therefore keep different rows: legacy keeps the
-            // single globally lowest (ResourceTypeId, ResourceSurrogateId) across both stages, while Ignixa
-            // produces one row per stage and SqlServerSearchService's overflow guard then trims by arrival order,
-            // which is stage order. This pins that they agree.
+            // With one budget and two stages the two engines could therefore keep different rows -- legacy keeps
+            // the single globally lowest (ResourceTypeId, ResourceSurrogateId) across both stages, while Ignixa
+            // produces one row per stage. They do not, and the reason is worth recording: SqlServerSearchService's
+            // overflow guard trims the excess by arrival order, which is stage-major on both sides, so the
+            // surviving prefix is the same. That agreement is a consequence of two independent implementation
+            // details rather than of either engine's include arithmetic, so it is pinned here.
+            //
+            // The global-vs-per-stage difference does still matter for the $includes operation, where the budget
+            // is the page size rather than a truncation point. That path is covered separately.
             var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
             SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
             ISearchService legacySearchService = _fixture.SearchService;

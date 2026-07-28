@@ -142,6 +142,32 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         internal SqlServerSearchService IgnixaSearchService { get; private set; }
 
         /// <summary>
+        /// The Ignixa-routed counterpart of <see cref="LegacyIncludesSearchService"/>, built on a
+        /// <see cref="CoreFeatureConfiguration"/> with <c>SupportsIncludes</c> enabled.
+        /// </summary>
+        /// <remarks>
+        /// <c>SupportsIncludes</c> defaults to <c>false</c>, and <see cref="SearchOptionsFactory"/> reads it to
+        /// set <c>SearchOptions.IncludesOperationSupported</c> — so with the shared configuration the entire
+        /// <c>$includes</c> protocol (the second-page continuation token, the includes-only query shape, the
+        /// re-entrant <c>SearchIncludeImpl</c> call) is unreachable and cannot be differentially tested at all.
+        /// Enabling it on the shared options instead would change the truncation behaviour of every existing
+        /// include test in the suite, so this pair is built separately rather than flipping the shared flag.
+        /// </remarks>
+        internal SqlServerSearchService IgnixaIncludesSearchService { get; private set; }
+
+        /// <summary>
+        /// The legacy-routed baseline for <c>$includes</c> differentials: identical wiring to
+        /// <see cref="IgnixaIncludesSearchService"/> apart from the substituted Ignixa adapter and router, so
+        /// every search on it stays on the legacy generator.
+        /// </summary>
+        /// <remarks>
+        /// The suite's usual legacy baseline is <c>_fixture.SearchService</c>, but that one is built on the
+        /// shared includes-disabled configuration. Comparing an includes-enabled Ignixa result against it would
+        /// be comparing two different protocols rather than two engines.
+        /// </remarks>
+        internal SqlServerSearchService LegacyIncludesSearchService { get; private set; }
+
+        /// <summary>
         /// Every message the Ignixa router logged, newest last. The router logs a specific
         /// <c>Reason=</c> for each eligibility gate it closes and a <c>Stage=/Kind=</c> for each compiler
         /// capability gap, so a differential that unexpectedly falls back to legacy can report *why* instead of
@@ -393,6 +419,79 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
                 SqlQueryHashCalculator,
                 queryPlanReuseChecker,
                 ignixaExecutionRouter,
+                NullLogger<SqlServerSearchService>.Instance);
+
+            // The $includes pair. Everything is shared with the services above except the core-feature
+            // configuration, which enables SupportsIncludes so SearchOptionsFactory sets
+            // SearchOptions.IncludesOperationSupported and the $includes protocol becomes reachable.
+            // Two factories are needed rather than one because the Ignixa side must use the real adapter
+            // (so SearchOptions.IgnixaOptions is populated) while the legacy baseline must not.
+            IOptions<CoreFeatureConfiguration> includesOptions = Options.Create(new CoreFeatureConfiguration { SupportsIncludes = true });
+
+            var ignixaIncludesSearchOptionsFactory = new SearchOptionsFactory(
+                expressionParser,
+                () => searchableSearchParameterDefinitionManager,
+                includesOptions,
+                _fhirRequestContextAccessor,
+                sqlSortingValidator,
+                new ExpressionAccessControl(_fhirRequestContextAccessor),
+                CreateRealIgnixaSearchOptionsAdapter(),
+                new IgnixaSearchTenantAccessor(_fhirRequestContextAccessor),
+                NullLogger<SearchOptionsFactory>.Instance);
+
+            IgnixaIncludesSearchService = new SqlServerSearchService(
+                ignixaIncludesSearchOptionsFactory,
+                _fhirDataStore,
+                sqlServerFhirModel,
+                sqlRootExpressionRewriter,
+                chainFlatteningRewriter,
+                sortRewriter,
+                partitionEliminationRewriter,
+                compartmentSearchRewriter,
+                smartCompartmentSearchRewriter,
+                searchParamTableExpressionQueryGeneratorFactory,
+                SqlRetryService,
+                SqlServerDataStoreConfiguration,
+                ignixaExecutionConfiguration,
+                SchemaInformation,
+                _fhirRequestContextAccessor,
+                new CompressedRawResourceConverter(),
+                SqlQueryHashCalculator,
+                queryPlanReuseChecker,
+                ignixaExecutionRouter,
+                NullLogger<SqlServerSearchService>.Instance);
+
+            var legacyIncludesSearchOptionsFactory = new SearchOptionsFactory(
+                expressionParser,
+                () => searchableSearchParameterDefinitionManager,
+                includesOptions,
+                _fhirRequestContextAccessor,
+                sqlSortingValidator,
+                new ExpressionAccessControl(_fhirRequestContextAccessor),
+                ignixaSearchOptionsAdapter,
+                new IgnixaSearchTenantAccessor(_fhirRequestContextAccessor),
+                NullLogger<SearchOptionsFactory>.Instance);
+
+            LegacyIncludesSearchService = new SqlServerSearchService(
+                legacyIncludesSearchOptionsFactory,
+                _fhirDataStore,
+                sqlServerFhirModel,
+                sqlRootExpressionRewriter,
+                chainFlatteningRewriter,
+                sortRewriter,
+                partitionEliminationRewriter,
+                compartmentSearchRewriter,
+                smartCompartmentSearchRewriter,
+                searchParamTableExpressionQueryGeneratorFactory,
+                SqlRetryService,
+                SqlServerDataStoreConfiguration,
+                _fhirSqlConfiguration,
+                SchemaInformation,
+                _fhirRequestContextAccessor,
+                new CompressedRawResourceConverter(),
+                SqlQueryHashCalculator,
+                queryPlanReuseChecker,
+                ignixaSqlCompileOnlyRouter,
                 NullLogger<SqlServerSearchService>.Instance);
 
             ISearchParameterSupportResolver searchParameterSupportResolver = Substitute.For<ISearchParameterSupportResolver>();
