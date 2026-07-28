@@ -367,6 +367,8 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
                 new IgnixaSqlCompilerAdapter(
                     new IgnixaSqlSymbolResolver(sqlServerFhirModel),
                     SchemaInformation,
+                    new global::Ignixa.Search.Definition.CompartmentDefinitionManager(IgnixaFhirVersionAdapter.Current),
+                    CreateIgnixaSearchParameterDefinitionManager(),
                     new CollectingLogger<IgnixaSqlCompilerAdapter>(IgnixaRouterLog)),
                 ignixaExecutionConfiguration,
                 new CollectingLogger<IgnixaSqlCompileOnlyRouter>(IgnixaRouterLog));
@@ -419,6 +421,16 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             var connectionBuilder = new SqlConnectionStringBuilder(connectionString);
             var result = new SqlConnection(connectionBuilder.ToString());
             return result;
+        }
+
+        private static global::Ignixa.Search.Definition.ISearchParameterDefinitionManager CreateIgnixaSearchParameterDefinitionManager()
+        {
+            global::Ignixa.Abstractions.IFhirSchemaProvider schemaProvider = IgnixaFhirVersionAdapter.Current.GetSchemaProvider();
+            var searchParameterDefinitionManager = new global::Ignixa.Search.Definition.SearchParameterDefinitionManager(
+                schemaProvider,
+                NullLogger<global::Ignixa.Search.Definition.SearchParameterDefinitionManager>.Instance);
+
+            return new global::Ignixa.Search.Definition.SearchableSearchParameterDefinitionManager(searchParameterDefinitionManager);
         }
 
         private static IIgnixaSearchOptionsAdapter CreateRealIgnixaSearchOptionsAdapter()

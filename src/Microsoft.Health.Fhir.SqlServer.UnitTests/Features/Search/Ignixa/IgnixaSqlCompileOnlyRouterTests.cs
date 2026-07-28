@@ -43,6 +43,23 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
     [Trait(Traits.Category, Categories.Search)]
     public class IgnixaSqlCompileOnlyRouterTests
     {
+        // This assembly is FHIR-version-agnostic, so there is no compilation symbol to map. R4 is used as the\r
+        // representative version: these tests exercise compartment expansion and symbol resolution, whose shapes\r
+        // do not vary by version, and production supplies the real version through DI.\r
+        private const global::Ignixa.Abstractions.FhirVersion IgnixaTestFhirVersion = global::Ignixa.Abstractions.FhirVersion.R4;
+
+        // The real Ignixa definition managers rather than substitutes: both are self-contained (compiled from
+        // the HL7 definitions for the active FHIR version) and are what the compiler consults to expand a
+        // compartment search into reference search parameters, so stubbing them would only test the stub.
+        private static readonly global::Ignixa.Search.Definition.ICompartmentDefinitionManager IgnixaCompartmentDefinitions =
+            new global::Ignixa.Search.Definition.CompartmentDefinitionManager(IgnixaTestFhirVersion);
+
+        private static readonly global::Ignixa.Search.Definition.ISearchParameterDefinitionManager IgnixaSearchParameterDefinitions =
+            new global::Ignixa.Search.Definition.SearchableSearchParameterDefinitionManager(
+                new global::Ignixa.Search.Definition.SearchParameterDefinitionManager(
+                    global::Ignixa.Specification.Extensions.FhirSpecificationSchemaProviderExtensions.GetSchemaProvider(IgnixaTestFhirVersion),
+                    NullLogger<global::Ignixa.Search.Definition.SearchParameterDefinitionManager>.Instance));
+
         // ---------------------------------------------------------------------------
         // Disabled-by-default
         // ---------------------------------------------------------------------------
@@ -405,6 +422,43 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
+        public async Task ObserveAsync_WhenSmartCompartmentSearch_DoesNotCompile()
+        {
+            // SECURITY BOUNDARY. A SMART compartment definition expands membership through
+            // SmartCompartmentSearchRewriter, which does not agree with the standard compartment expansion Ignixa
+            // would apply. Unlike the claims-driven SMART shapes this one arrives with no AccessControlContext, so
+            // the access-control gate never sees it and this gate is the only thing keeping it on legacy.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.IgnixaSmartCompartmentSearch = true;
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenStandardCompartmentSearch_IsEligibleAndCompiles()
+        {
+            // The negative half of the gate: a plain compartment search carries no SMART definition, so
+            // AppendIgnixaCompartmentExpression's CompartmentSearchExpression is the correct membership and the
+            // request routes like any other.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.IgnixaSmartCompartmentSearch = false;
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
+        }
+
+        [Fact]
         public async Task ObserveAsync_WhenIgnixaOptionsNull_DoesNotCompile()
         {
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
@@ -529,6 +583,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             var realAdapter = new IgnixaSqlCompilerAdapter(
                 new IgnixaSqlSymbolResolver(model),
                 schema,
+                IgnixaCompartmentDefinitions,
+                IgnixaSearchParameterDefinitions,
                 NullLogger<IgnixaSqlCompilerAdapter>.Instance);
 
             var router = new IgnixaSqlCompileOnlyRouter(
@@ -720,6 +776,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             var realAdapter = new IgnixaSqlCompilerAdapter(
                 new IgnixaSqlSymbolResolver(model),
                 schema,
+                IgnixaCompartmentDefinitions,
+                IgnixaSearchParameterDefinitions,
                 NullLogger<IgnixaSqlCompilerAdapter>.Instance);
 
             var logger = new CapturingLogger<IgnixaSqlCompileOnlyRouter>();
@@ -1066,6 +1124,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             return new IgnixaSqlCompilerAdapter(
                 new IgnixaSqlSymbolResolver(model),
                 schema,
+                IgnixaCompartmentDefinitions,
+                IgnixaSearchParameterDefinitions,
                 NullLogger<IgnixaSqlCompilerAdapter>.Instance);
         }
 
@@ -1155,6 +1215,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             return new IgnixaSqlCompilerAdapter(
                 new IgnixaSqlSymbolResolver(model),
                 schema,
+                IgnixaCompartmentDefinitions,
+                IgnixaSearchParameterDefinitions,
                 NullLogger<IgnixaSqlCompilerAdapter>.Instance);
         }
 

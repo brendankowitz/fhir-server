@@ -487,6 +487,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 
                     if (useSmartCompartmentDefinition)
                     {
+                        // SMART membership differs from standard membership; Ignixa can only express the latter.
+                        searchOptions.IgnixaSmartCompartmentSearch = true;
                         AppendIgnixaCompartmentExpression(searchOptions, compartmentType, compartmentId, resourceTypesString);
                         searchExpressions.Add(Expression.SmartCompartmentSearch(compartmentType, compartmentId, resourceTypesString));
                     }
@@ -518,6 +520,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                     // Don't add the smart compartment twice. this is a patch for bug number AB#152447.
                     if (!searchExpressions.Any(e => e.ValueInsensitiveEquals(Expression.SmartCompartmentSearch(smartCompartmentType, smartCompartmentId, null))))
                     {
+                        searchOptions.IgnixaSmartCompartmentSearch = true;
                         AppendIgnixaCompartmentExpression(searchOptions, smartCompartmentType, smartCompartmentId, resourceTypesString);
                         searchExpressions.Add(Expression.SmartCompartmentSearch(smartCompartmentType, smartCompartmentId, resourceTypesString));
                     }

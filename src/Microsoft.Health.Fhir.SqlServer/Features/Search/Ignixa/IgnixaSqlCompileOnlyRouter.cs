@@ -259,6 +259,16 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return false;
             }
 
+            if (searchOptions.IgnixaSmartCompartmentSearch)
+            {
+                // SECURITY BOUNDARY. SMART compartment membership is expanded by SmartCompartmentSearchRewriter,
+                // which does not agree with the standard compartment expansion. AppendIgnixaCompartmentExpression
+                // can only build a plain CompartmentSearchExpression, so routing here would silently swap SMART
+                // membership for standard membership.
+                _logger.LogDebug("Skipping Ignixa compile-only observation. Reason={Reason}", "smart-compartment-definition");
+                return false;
+            }
+
             if (accessControlPredicateRequired && !searchOptions.IgnixaAccessControlTranslated)
             {
                 // SECURITY BOUNDARY. The request carries an access control predicate that

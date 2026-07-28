@@ -1069,6 +1069,88 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenACompartmentSearch_WhenExecutedOnBothEngines_ThenIgnixaRestrictsToTheCompartmentLikeLegacy()
+        {
+            // AppendIgnixaCompartmentExpression already ANDs a CompartmentSearchExpression into the Ignixa match
+            // filter for URL-form compartment searches (/Patient/{id}/Observation), and those searches carry no
+            // AccessControlContext, so the router's access-control gate never sees them - they have been routing
+            // to Ignixa unproven. This closes that hole.
+            //
+            // Two Observations differing only in which Patient they reference: the compartment search must return
+            // the one inside and not the one outside. Testing only the inside member would pass against a plan
+            // that dropped the compartment predicate altogether, which is the exact failure this guards.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var insidePatient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            insidePatient.Id = Guid.NewGuid().ToString();
+            string insidePatientId = await UpsertWithSearchIndicesAsync(insidePatient);
+
+            var outsidePatient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            outsidePatient.Id = Guid.NewGuid().ToString();
+            string outsidePatientId = await UpsertWithSearchIndicesAsync(outsidePatient);
+
+            // A shared code token so a single query selects exactly the two seeds and nothing another test wrote.
+            string codeSystem = "http://example.org/ignixa-compartment";
+            string codeValue = $"comp_{Guid.NewGuid():N}";
+
+            var insideObservation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept(codeSystem, codeValue),
+                Subject = new ResourceReference($"Patient/{insidePatientId}"),
+            };
+            string insideObservationId = await UpsertWithSearchIndicesAsync(insideObservation);
+
+            var outsideObservation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept(codeSystem, codeValue),
+                Subject = new ResourceReference($"Patient/{outsidePatientId}"),
+            };
+            string outsideObservationId = await UpsertWithSearchIndicesAsync(outsideObservation);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("code", $"{codeSystem}|{codeValue}"),
+                Tuple.Create("_count", "100"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+            fixture.IgnixaRouterLog.Clear();
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchCompartmentAsync(
+                KnownResourceTypes.Patient, insidePatientId, KnownResourceTypes.Observation, query, CancellationToken.None);
+            string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+            SearchResult legacyResults = await legacySearchService.SearchCompartmentAsync(
+                KnownResourceTypes.Patient, insidePatientId, KnownResourceTypes.Observation, query, CancellationToken.None);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                $"Expected the compartment search to run on Ignixa. Router log: {routerLog}");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            List<string> ignixaIds = ResourceIdsInResultOrder(ignixaResults);
+            List<string> legacyIds = ResourceIdsInResultOrder(legacyResults);
+
+            // Legacy as oracle, asserted in both directions so a seeding regression cannot make this vacuous.
+            Assert.Contains(insideObservationId, legacyIds);
+            Assert.DoesNotContain(outsideObservationId, legacyIds);
+
+            Assert.Contains(insideObservationId, ignixaIds);
+            Assert.DoesNotContain(
+                outsideObservationId,
+                ignixaIds);
+            Assert.Equal(
+                legacyIds.OrderBy(id => id, StringComparer.Ordinal),
+                ignixaIds.OrderBy(id => id, StringComparer.Ordinal));
+        }
+
+        [Fact]
         public async Task GivenClinicalScopesAndAnInclude_WhenTheIncludedTypeIsNotGranted_ThenIgnixaWithholdsItLikeLegacy()
         {
             // SECURITY BOUNDARY. GivenClinicalScopes_... proves the allow-list restricts the *match* set. This

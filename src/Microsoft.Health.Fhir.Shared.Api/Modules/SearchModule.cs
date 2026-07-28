@@ -150,6 +150,13 @@ namespace Microsoft.Health.Fhir.Api.Modules
             services.AddSingleton<Ignixa.Search.Definition.SearchParameterDefinitionManager>();
             services.AddSingleton<Ignixa.Search.Definition.ISearchParameterDefinitionManager>(sp => new Ignixa.Search.Definition.SearchableSearchParameterDefinitionManager(sp.GetRequiredService<Ignixa.Search.Definition.SearchParameterDefinitionManager>()));
             services.AddSingleton<Ignixa.Search.Definition.ISearchParameterDefinitionManager.SearchableSearchParameterDefinitionManagerResolver>(sp => () => sp.GetRequiredService<Ignixa.Search.Definition.ISearchParameterDefinitionManager>());
+
+            // Ignixa's own compartment definitions, needed by the SQL compiler to resolve compartment membership
+            // into reference search parameters. Self-contained (compiled from the HL7 CompartmentDefinition
+            // resources for the active FHIR version), so it does not share state with the FHIR Server
+            // CompartmentDefinitionManager registered below.
+            services.AddSingleton<Ignixa.Search.Definition.ICompartmentDefinitionManager>(
+                _ => new Ignixa.Search.Definition.CompartmentDefinitionManager(IgnixaFhirVersionAdapter.Current));
             services.AddSingleton<Ignixa.Search.Expressions.Parsers.IExpressionParser, Ignixa.Search.Expressions.Parsers.ExpressionParser>();
             services.AddSingleton<Ignixa.Search.Parsing.ISearchOptionsBuilderFactory, IgnixaSearchOptionsBuilderFactory>();
             services.AddSingleton<IIgnixaSearchOptionsAdapter, IgnixaSearchOptionsAdapter>();

@@ -43,6 +43,23 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
     [Trait(Traits.Category, Categories.Search)]
     public class IgnixaSqlCompilerAdapterTests
     {
+        // This assembly is FHIR-version-agnostic, so there is no compilation symbol to map. R4 is used as the\r
+        // representative version: these tests exercise compartment expansion and symbol resolution, whose shapes\r
+        // do not vary by version, and production supplies the real version through DI.\r
+        private const global::Ignixa.Abstractions.FhirVersion IgnixaTestFhirVersion = global::Ignixa.Abstractions.FhirVersion.R4;
+
+        // The real Ignixa definition managers rather than substitutes: both are self-contained (compiled from
+        // the HL7 definitions for the active FHIR version) and are what the compiler consults to expand a
+        // compartment search into reference search parameters, so stubbing them would only test the stub.
+        private static readonly global::Ignixa.Search.Definition.ICompartmentDefinitionManager IgnixaCompartmentDefinitions =
+            new global::Ignixa.Search.Definition.CompartmentDefinitionManager(IgnixaTestFhirVersion);
+
+        private static readonly global::Ignixa.Search.Definition.ISearchParameterDefinitionManager IgnixaSearchParameterDefinitions =
+            new global::Ignixa.Search.Definition.SearchableSearchParameterDefinitionManager(
+                new global::Ignixa.Search.Definition.SearchParameterDefinitionManager(
+                    global::Ignixa.Specification.Extensions.FhirSpecificationSchemaProviderExtensions.GetSchemaProvider(IgnixaTestFhirVersion),
+                    NullLogger<global::Ignixa.Search.Definition.SearchParameterDefinitionManager>.Instance));
+
         private static readonly Regex Sha256HexPattern = new("^[0-9A-Fa-f]{64}$", RegexOptions.Compiled);
 
         [Fact]
@@ -847,7 +864,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             {
                 Current = SchemaVersionConstants.Max,
             };
-            var adapter = new IgnixaSqlCompilerAdapter(resolver, schema, capturingLogger);
+            var adapter = new IgnixaSqlCompilerAdapter(resolver, schema, IgnixaCompartmentDefinitions, IgnixaSearchParameterDefinitions, capturingLogger);
 
             SqlSearchOptions options = CreateOptions(ignixaOptions =>
             {
@@ -1011,6 +1028,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             return new IgnixaSqlCompilerAdapter(
                 resolver,
                 schema,
+                IgnixaCompartmentDefinitions,
+                IgnixaSearchParameterDefinitions,
                 NullLogger<IgnixaSqlCompilerAdapter>.Instance);
         }
 

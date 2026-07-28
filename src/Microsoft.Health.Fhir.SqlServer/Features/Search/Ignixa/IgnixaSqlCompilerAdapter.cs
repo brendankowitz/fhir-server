@@ -58,6 +58,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
         private readonly ISymbolResolver _resolver;
         private readonly SchemaInformation _schemaInformation;
+        private readonly global::Ignixa.Search.Definition.ICompartmentDefinitionManager _compartmentDefinitionManager;
+        private readonly global::Ignixa.Search.Definition.ISearchParameterDefinitionManager _searchParameterDefinitionManager;
         private readonly ILogger<IgnixaSqlCompilerAdapter> _logger;
 
         /// <summary>
@@ -65,18 +67,26 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
         /// </summary>
         /// <param name="resolver">The Ignixa SQL symbol resolver backed by the FHIR Server SQL catalog.</param>
         /// <param name="schemaInformation">The current FHIR Server SQL schema information.</param>
+        /// <param name="compartmentDefinitionManager">Ignixa's compartment definitions, used to expand a compartment search into the reference search parameters that define membership.</param>
+        /// <param name="searchParameterDefinitionManager">Ignixa's search parameter definitions, used alongside the compartment definitions to resolve those reference parameters.</param>
         /// <param name="logger">The logger. Only capability metadata is ever logged, never raw search values or SQL.</param>
         public IgnixaSqlCompilerAdapter(
             ISymbolResolver resolver,
             SchemaInformation schemaInformation,
+            global::Ignixa.Search.Definition.ICompartmentDefinitionManager compartmentDefinitionManager,
+            global::Ignixa.Search.Definition.ISearchParameterDefinitionManager searchParameterDefinitionManager,
             ILogger<IgnixaSqlCompilerAdapter> logger)
         {
             EnsureArg.IsNotNull(resolver, nameof(resolver));
             EnsureArg.IsNotNull(schemaInformation, nameof(schemaInformation));
+            EnsureArg.IsNotNull(compartmentDefinitionManager, nameof(compartmentDefinitionManager));
+            EnsureArg.IsNotNull(searchParameterDefinitionManager, nameof(searchParameterDefinitionManager));
             EnsureArg.IsNotNull(logger, nameof(logger));
 
             _resolver = resolver;
             _schemaInformation = schemaInformation;
+            _compartmentDefinitionManager = compartmentDefinitionManager;
+            _searchParameterDefinitionManager = searchParameterDefinitionManager;
             _logger = logger;
         }
 
@@ -185,8 +195,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 _resolver,
                 resourceType,
                 cancellationToken,
-                compartmentDefinitionManager: null,
-                searchParameterDefinitionManager: null,
+                compartmentDefinitionManager: _compartmentDefinitionManager,
+                searchParameterDefinitionManager: _searchParameterDefinitionManager,
                 additionalResourceTypes: ignixaOptions.ResourceTypes,
                 allowedResourceTypes: ignixaOptions.AllowedResourceTypes);
 

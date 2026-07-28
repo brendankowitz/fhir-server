@@ -35,6 +35,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             IgnixaOptions = CloneIgnixaOptions(other.IgnixaOptions);
             IgnixaAccessControlTranslated = other.IgnixaAccessControlTranslated;
             IgnixaUnsupportedParamsAgreeWithLegacy = other.IgnixaUnsupportedParamsAgreeWithLegacy;
+            IgnixaSmartCompartmentSearch = other.IgnixaSmartCompartmentSearch;
             OnlyIds = other.OnlyIds;
             FeedRange = other.FeedRange;
             IgnoreSearchParamHash = other.IgnoreSearchParamHash;
@@ -178,6 +179,20 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         /// <c>SearchOptionsFactory</c> is treated as unverified rather than agreeing.
         /// </remarks>
         internal bool IgnixaUnsupportedParamsAgreeWithLegacy { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether this request uses the SMART compartment definition rather than
+        /// the standard HL7 one.
+        /// </summary>
+        /// <remarks>
+        /// The two are not interchangeable. Legacy rewrites a <c>SmartCompartmentSearchExpression</c> through
+        /// <c>SmartCompartmentSearchRewriter</c>, which expands membership differently from the standard
+        /// compartment rewriter, whereas <c>AppendIgnixaCompartmentExpression</c> can only build a plain
+        /// <c>CompartmentSearchExpression</c> — Ignixa has no SMART variant to build. Routing a SMART compartment
+        /// search to Ignixa would therefore enforce standard membership in place of SMART membership, so it stays
+        /// on the legacy path until Ignixa can express the distinction.
+        /// </remarks>
+        internal bool IgnixaSmartCompartmentSearch { get; set; }
 
         /// <summary>
         /// Gets the collection of search parameters used for filtering and querying resources.
