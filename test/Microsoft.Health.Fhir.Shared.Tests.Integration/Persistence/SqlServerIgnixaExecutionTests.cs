@@ -2684,6 +2684,87 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenAMultiTypeCustomSortWhoseValuesAllTie_WhenExecutedOnBothEngines_ThenIgnixaBreaksTheTieTheSameWayAsLegacy()
+        {
+            // Pins the tiebreak that follows a custom sort key on a search spanning more than one resource type.
+            //
+            // Read literally, the two generators disagree here: legacy's AppendOrderBy emits
+            // "ORDER BY SortValue <dir>, Sid1 ASC" with no type term, while Ignixa's EmitOrderBy appends its
+            // standard (T1, Sid1) tiebreak after the sort keys, putting T1 *between* the sort value and Sid1.
+            // On a single-type search that is invisible because T1 is constant. Across two types, with every
+            // row tied on the sort value, it should be the difference between grouping by type and
+            // interleaving by surrogate id.
+            //
+            // It is not: both engines return the rows grouped by resource type id. This test exists to pin
+            // that observed agreement, because the plain reading of the two ORDER BY clauses predicts a
+            // divergence and would otherwise keep inviting a "fix" to Ignixa's tiebreak that would actually
+            // introduce one. If a future change to either generator makes the type term start or stop
+            // mattering, this fails.
+            //
+            // Every seeded resource carries the same birthdate, so the sort value ties for all of them and the
+            // tiebreak alone decides the sequence. Seeding alternates Patient / Practitioner so surrogate
+            // order and type order are genuinely different orderings - agreement here cannot come from the
+            // seeds happening to be grouped already.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            const string SharedBirthDate = "1970-01-01";
+            var seededIds = new List<string>();
+            for (int i = 0; i < 3; i++)
+            {
+                var patient = new Patient { Id = Guid.NewGuid().ToString(), BirthDate = SharedBirthDate };
+                await UpsertWithSearchIndicesAsync(patient);
+                seededIds.Add(patient.Id);
+
+                var practitioner = new Practitioner { Id = Guid.NewGuid().ToString(), BirthDate = SharedBirthDate };
+                await UpsertWithSearchIndicesAsync(practitioner);
+                seededIds.Add(practitioner.Id);
+            }
+
+            // _id confines the result to this test's seeds so a concurrently written shared table cannot page
+            // them out; _type keeps the search multi-type, which is the condition under test. Filtering on
+            // birthdate as well is not redundant: without it legacy runs its sorted missing-values phase, and
+            // that phase drops the _id restriction, so rows seeded by other test classes leak in and can push
+            // the seeds out of the page. Because no matching row can lack a birthdate, the filter removes that
+            // phase without altering the ordering being pinned.
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", string.Join(",", seededIds)),
+                Tuple.Create("_type", "Patient,Practitioner"),
+                Tuple.Create("birthdate", SharedBirthDate),
+                Tuple.Create("_sort", "birthdate"),
+                Tuple.Create("_count", "1000"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync(null, query, CancellationToken.None);
+            SearchResult legacyResults = await legacySearchService.SearchAsync(null, query, CancellationToken.None);
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the multi-type sorted search to run on Ignixa rather than fall back.");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            var seeded = new HashSet<string>(seededIds, StringComparer.Ordinal);
+            List<string> legacyOrder = ResourceIdsInResultOrder(legacyResults).Where(seeded.Contains).ToList();
+            List<string> ignixaOrder = ResourceIdsInResultOrder(ignixaResults).Where(seeded.Contains).ToList();
+
+            // Anti-vacuity: if the sort values were not indexed both engines would return nothing, and if the
+            // sort itself were silently dropped as unsupported both would fall back to the default order - in
+            // either case the comparison below would agree for a reason that has nothing to do with the
+            // tiebreak under test.
+            Assert.Equal(seededIds.Count, legacyOrder.Count);
+            Assert.Equal(seededIds.Count, ignixaOrder.Count);
+            Assert.Equal("birthdate", Assert.Single(legacyResults.SortOrder).searchParameterInfo.Code);
+            Assert.Equal("birthdate", Assert.Single(ignixaResults.SortOrder).searchParameterInfo.Code);
+
+            Assert.Equal(legacyOrder, ignixaOrder);
+        }
+
+        [Fact]
         public async Task GivenASortParameterWithAMissingModifier_WhenExecutedOnBothEngines_ThenIgnixaRunsTheValuedPhaseAndAgreesWithLegacy()
         {
             // SortHasMissingModifier: "date:missing=false" makes SortRewriter skip the block that emits the
