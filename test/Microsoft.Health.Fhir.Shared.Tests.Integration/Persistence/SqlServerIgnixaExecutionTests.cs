@@ -1069,6 +1069,114 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenClinicalScopesAndAnInclude_WhenTheIncludedTypeIsNotGranted_ThenIgnixaWithholdsItLikeLegacy()
+        {
+            // SECURITY BOUNDARY. GivenClinicalScopes_... proves the allow-list restricts the *match* set. This
+            // proves it also restricts the *include* stage, which is the harder half: an include is a separate
+            // row-producing query, so an allow-list applied only to the match set would let a caller read a type
+            // their scopes deny simply by asking for it via _include. Legacy enforces this by rendering
+            // IncludeExpression.AllowedResourceTypesByScope as ReferenceResourceTypeId IN (<allowed>); Ignixa must
+            // reach the same answer through LowerOptions.AllowedResourceTypes.
+            //
+            // Both directions are asserted against the same seeded pair, because either alone is satisfied by a
+            // broken implementation: a plan that never returns includes passes the denied case, and one that
+            // ignores the allow-list entirely passes the granted case.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            patient.Id = Guid.NewGuid().ToString();
+            string patientId = await UpsertWithSearchIndicesAsync(patient);
+
+            var observation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept { Text = $"IgnixaScopedInclude_{Guid.NewGuid()}" },
+                Subject = new ResourceReference($"Patient/{patientId}"),
+            };
+            string observationId = await UpsertWithSearchIndicesAsync(observation);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", observationId),
+                Tuple.Create("_include", "Observation:subject"),
+            };
+
+            RequestContextAccessor<IFhirRequestContext> contextAccessor = fixture.FhirRequestContextAccessor;
+            IFhirRequestContext originalContext = contextAccessor.RequestContext;
+
+            var accessControl = new AccessControlContext { ApplyFineGrainedAccessControl = true };
+            var scopedContext = Substitute.For<IFhirRequestContext>();
+            scopedContext.AccessControlContext.Returns(accessControl);
+            scopedContext.CorrelationId.Returns(Guid.NewGuid().ToString());
+            scopedContext.RouteName.Returns("routeName");
+            scopedContext.RequestHeaders.Returns(new Dictionary<string, StringValues>());
+            scopedContext.ResponseHeaders.Returns(new Dictionary<string, StringValues>());
+            contextAccessor.RequestContext.Returns(scopedContext);
+
+            var seeded = new HashSet<string>(new[] { patientId, observationId }, StringComparer.Ordinal);
+
+            try
+            {
+                // Scope grants Observation only. The match is permitted; the included Patient is not.
+                accessControl.AllowedResourceActions.Add(new ScopeRestriction(KnownResourceTypes.Observation, DataActions.Read, "user"));
+
+                long deniedIgnixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                long deniedLegacyBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+                fixture.IgnixaRouterLog.Clear();
+
+                SearchResult deniedIgnixa = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+                string deniedRouterLog = string.Join(" | ", fixture.IgnixaRouterLog);
+                SearchResult deniedLegacy = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+                Assert.True(
+                    ignixaSearchService.InstanceIgnixaExecutedQueryCount > deniedIgnixaBefore,
+                    $"Expected the scoped include search to run on Ignixa. Router log: {deniedRouterLog}");
+                Assert.Equal(deniedLegacyBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+                // Legacy is the oracle: confirm it really does withhold the Patient, so the Ignixa assertion below
+                // is comparing against enforced behaviour rather than an assumption about it.
+                Assert.True(ContainsMode(deniedLegacy, observationId, SearchEntryMode.Match));
+                Assert.False(
+                    ContainsMode(deniedLegacy, patientId, SearchEntryMode.Include),
+                    "Legacy returned a Patient the scopes deny; the oracle for this test is wrong.");
+
+                Assert.True(ContainsMode(deniedIgnixa, observationId, SearchEntryMode.Match));
+                Assert.False(
+                    ContainsMode(deniedIgnixa, patientId, SearchEntryMode.Include),
+                    "Ignixa returned a Patient the caller's SMART scopes deny - the allow-list is not reaching the include stage.");
+                Assert.Equal(SeededModeMap(deniedLegacy, seeded), SeededModeMap(deniedIgnixa, seeded));
+
+                // Scope now grants both types: the identical query must surface the Patient. Without this the
+                // assertions above would pass against a plan that simply never emits includes under access control.
+                accessControl.AllowedResourceActions.Add(new ScopeRestriction(KnownResourceTypes.Patient, DataActions.Read, "user"));
+
+                long allowedIgnixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                long allowedLegacyBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+                SearchResult allowedIgnixa = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+                SearchResult allowedLegacy = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+                Assert.True(
+                    ignixaSearchService.InstanceIgnixaExecutedQueryCount > allowedIgnixaBefore,
+                    "Expected the granted include search to run on Ignixa.");
+                Assert.Equal(allowedLegacyBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+                Assert.True(
+                    ContainsMode(allowedLegacy, patientId, SearchEntryMode.Include),
+                    "Legacy did not return the referenced Patient even though the scopes grant it; the reference index was not seeded, so the denied case above is vacuous.");
+                Assert.True(ContainsMode(allowedIgnixa, patientId, SearchEntryMode.Include));
+                Assert.Equal(SeededModeMap(allowedLegacy, seeded), SeededModeMap(allowedIgnixa, seeded));
+            }
+            finally
+            {
+                contextAccessor.RequestContext.Returns(originalContext);
+            }
+        }
+
+        [Fact]
         public async Task GivenAForwardIncludeOverIndexedReferences_WhenExecutedOnBothEngines_ThenIgnixaMaterialisesTheSameIncludedRowsAsLegacy()
         {
             // The include differential that is NOT vacuous. Unlike the mediator-seeded include tests in this file,
