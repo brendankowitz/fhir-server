@@ -589,13 +589,27 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
         {
             page = null;
 
-            // The composite seek needs a ResourceTypeId boundary. The token supplies one for the default
-            // surrogate order; a custom-sort token does not carry the slot at all, so the caller passes the
-            // search's own (single) resource type id instead. A token with neither - a multi-type sorted search,
-            // or a pre-PartitionedTables legacy token - is handled by the legacy path as a bare
-            // ResourceSurrogateId comparison, which this composite PageSpec does not reproduce.
+            // The seek's ResourceTypeId boundary comes from the token for the default surrogate order, or from
+            // the search's own type when it is single-type scoped. A multi-type custom-sort token has neither:
+            // its slots are [sortValue, surrogateId] and there is no one type to substitute.
+            //
+            // Ignixa can seek without a type boundary, but only for a custom (search-parameter) sort key, whose
+            // ORDER BY it emits as (sortKeys..., Sid1) with no type term - sound because ResourceSurrogateId is
+            // globally unique, so that is already a total order. Every other shape orders type-major and would
+            // disagree with a surrogate-only seek, dropping rows across the page seam; Ignixa rejects those, so
+            // refuse them here rather than compiling a plan it will throw on.
+            bool hasSearchParameterSortKey = false;
+            for (int i = 0; i < requestedSort.Count; i++)
+            {
+                if (!ResourceColumnLoweringRule.IsResourceColumnCode(requestedSort[i].Parameter.Code))
+                {
+                    hasSearchParameterSortKey = true;
+                    break;
+                }
+            }
+
             short? boundaryResourceTypeId = token.ResourceTypeId ?? scopedResourceTypeId;
-            if (boundaryResourceTypeId == null)
+            if (boundaryResourceTypeId == null && !hasSearchParameterSortKey)
             {
                 return CapabilityFailure("page", "continuation-token-no-type", EmptyUnresolvedParameters);
             }
@@ -624,6 +638,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
                 if (code == KnownQueryParameterNames.Type)
                 {
+                    // Unreachable without a type boundary: a _type sort key makes this a resource-column sort,
+                    // and the guard above already refused a typeless boundary for those.
                     boundaryValues.Add(new SqlParameterRef(boundaryResourceTypeId.Value));
                     continue;
                 }
@@ -658,16 +674,6 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 boundaryValues.Add(new SqlParameterRef(typedSortValue));
             }
 
-            bool hasSearchParameterSortKey = false;
-            for (int i = 0; i < requestedSort.Count; i++)
-            {
-                if (!ResourceColumnLoweringRule.IsResourceColumnCode(requestedSort[i].Parameter.Code))
-                {
-                    hasSearchParameterSortKey = true;
-                    break;
-                }
-            }
-
             if (!hasSearchParameterSortKey && !string.IsNullOrEmpty(token.SortValue))
             {
                 // No search-parameter sort key, yet the token carries a sort value: it was minted for a
@@ -679,7 +685,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
             boundary = boundaryValues.ToArray();
             page = new PageSpec(
                 boundary,
-                new SqlParameterRef(boundaryResourceTypeId.Value),
+                boundaryResourceTypeId == null ? null : new SqlParameterRef(boundaryResourceTypeId.Value),
                 new SqlParameterRef(token.ResourceSurrogateId));
 
             return null;

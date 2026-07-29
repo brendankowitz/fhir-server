@@ -2684,27 +2684,20 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
-        public async Task GivenAMultiTypeCustomSortWhoseValuesAllTie_WhenExecutedOnBothEngines_ThenIgnixaBreaksTheTieTheSameWayAsLegacy()
+        public async Task GivenAMultiTypeCustomSortWhoseValuesAllTie_WhenExecutedOnBothEngines_ThenIgnixaAgreesWithLegacy()
         {
-            // Pins the tiebreak that follows a custom sort key on a search spanning more than one resource type.
+            // Pins that the two engines return an identical order for a multi-type custom sort whose values all
+            // tie. Read literally the two generators predict otherwise - legacy's AppendOrderBy emits
+            // "SortValue <dir>, Sid1 ASC" with no type term - so this exists to stop that reading turning into
+            // a "fix" to Ignixa that would introduce the divergence it appears to remove.
             //
-            // Read literally, the two generators disagree here: legacy's AppendOrderBy emits
-            // "ORDER BY SortValue <dir>, Sid1 ASC" with no type term, while Ignixa's EmitOrderBy appends its
-            // standard (T1, Sid1) tiebreak after the sort keys, putting T1 *between* the sort value and Sid1.
-            // On a single-type search that is invisible because T1 is constant. Across two types, with every
-            // row tied on the sort value, it should be the difference between grouping by type and
-            // interleaving by surrogate id.
+            // The order both engines return is type-major. The companion test below explains why: a custom sort
+            // is not applied across resource types at all, so this is the default (ResourceTypeId,
+            // ResourceSurrogateId) order rather than a tiebreak. Read that test before drawing any conclusion
+            // about sort semantics from this one.
             //
-            // It is not: both engines return the rows grouped by resource type id. This test exists to pin
-            // that observed agreement, because the plain reading of the two ORDER BY clauses predicts a
-            // divergence and would otherwise keep inviting a "fix" to Ignixa's tiebreak that would actually
-            // introduce one. If a future change to either generator makes the type term start or stop
-            // mattering, this fails.
-            //
-            // Every seeded resource carries the same birthdate, so the sort value ties for all of them and the
-            // tiebreak alone decides the sequence. Seeding alternates Patient / Practitioner so surrogate
-            // order and type order are genuinely different orderings - agreement here cannot come from the
-            // seeds happening to be grouped already.
+            // Seeding alternates Patient / Practitioner so surrogate order and type order are genuinely
+            // different orderings - agreement here cannot come from the seeds happening to be grouped already.
             var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
             SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
             ISearchService legacySearchService = _fixture.SearchService;
@@ -2754,14 +2747,166 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
 
             // Anti-vacuity: if the sort values were not indexed both engines would return nothing, and if the
             // sort itself were silently dropped as unsupported both would fall back to the default order - in
-            // either case the comparison below would agree for a reason that has nothing to do with the
-            // tiebreak under test.
+            // either case the assertions below would hold for a reason that has nothing to do with the tiebreak.
             Assert.Equal(seededIds.Count, legacyOrder.Count);
             Assert.Equal(seededIds.Count, ignixaOrder.Count);
             Assert.Equal("birthdate", Assert.Single(legacyResults.SortOrder).searchParameterInfo.Code);
             Assert.Equal("birthdate", Assert.Single(ignixaResults.SortOrder).searchParameterInfo.Code);
 
+            // Both engines return the same set...
+            Assert.Equal(
+                seededIds.OrderBy(id => id, StringComparer.Ordinal).ToList(),
+                ignixaOrder.OrderBy(id => id, StringComparer.Ordinal).ToList());
+
+            // ...in the same order, which is the property the cutover depends on.
             Assert.Equal(legacyOrder, ignixaOrder);
+        }
+
+        [Fact]
+        public async Task GivenAMultiTypeCustomSortWithDistinctValues_WhenExecutedOnBothEngines_ThenNeitherAppliesTheSortAcrossTypesButBothAgree()
+        {
+            // Explains a result that otherwise looks like a tiebreak divergence, and settles it by measurement.
+            //
+            // A custom sort is *not* applied across resource types by either engine: with distinct birthdates
+            // and alternating types, neither returns birthdate order - both group by resource type. Every
+            // observation about how a multi-type custom sort "breaks ties" is therefore really an observation
+            // of this, and reading a tiebreak into it leads to inventing divergences that do not exist. That
+            // cost a wrong hypothesis about Ignixa's ORDER BY once already.
+            //
+            // Sort values are assigned so that birthdate order is the exact reverse of insertion order, and
+            // types alternate, so birthdate order differs from both surrogate order and type order - no
+            // accidental agreement is possible.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var seededIds = new List<string>();
+            var byBirthDateAscending = new List<(string BirthDate, string Id)>();
+            for (int i = 0; i < 3; i++)
+            {
+                string patientBirthDate = $"19{89 - (i * 2)}-01-01";
+                var patient = new Patient { Id = Guid.NewGuid().ToString(), BirthDate = patientBirthDate };
+                await UpsertWithSearchIndicesAsync(patient);
+                seededIds.Add(patient.Id);
+                byBirthDateAscending.Add((patientBirthDate, patient.Id));
+
+                string practitionerBirthDate = $"19{88 - (i * 2)}-01-01";
+                var practitioner = new Practitioner { Id = Guid.NewGuid().ToString(), BirthDate = practitionerBirthDate };
+                await UpsertWithSearchIndicesAsync(practitioner);
+                seededIds.Add(practitioner.Id);
+                byBirthDateAscending.Add((practitionerBirthDate, practitioner.Id));
+            }
+
+            List<string> expectedOrder = byBirthDateAscending
+                .OrderBy(x => x.BirthDate, StringComparer.Ordinal)
+                .Select(x => x.Id)
+                .ToList();
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", string.Join(",", seededIds)),
+                Tuple.Create("_type", "Patient,Practitioner"),
+                Tuple.Create("birthdate", "ge1900-01-01"),
+                Tuple.Create("_sort", "birthdate"),
+                Tuple.Create("_count", "1000"),
+            };
+
+            SearchResult ignixaResults = await ignixaSearchService.SearchAsync(null, query, CancellationToken.None);
+            SearchResult legacyResults = await legacySearchService.SearchAsync(null, query, CancellationToken.None);
+
+            var seeded = new HashSet<string>(seededIds, StringComparer.Ordinal);
+            List<string> legacyOrder = ResourceIdsInResultOrder(legacyResults).Where(seeded.Contains).ToList();
+            List<string> ignixaOrder = ResourceIdsInResultOrder(ignixaResults).Where(seeded.Contains).ToList();
+
+            Assert.Equal(seededIds.Count, legacyOrder.Count);
+            Assert.Equal(seededIds.Count, ignixaOrder.Count);
+
+            // The finding: neither engine returns birthdate order. Both group by resource type instead, so the
+            // sort parameter does not order across types at all. This is pre-existing FHIR Server behaviour -
+            // it is not introduced by the Ignixa cutover - and it is asserted here rather than merely noted,
+            // because it is the explanation for every tie-order observation on this shape and it would
+            // otherwise keep being rediscovered as a phantom tiebreak divergence.
+            Assert.NotEqual(expectedOrder, legacyOrder);
+            Assert.NotEqual(expectedOrder, ignixaOrder);
+
+            // What does matter for the cutover: whatever that order is, the two engines produce the same one.
+            Assert.Equal(legacyOrder, ignixaOrder);
+
+            // Anti-vacuity: the agreement above would be trivial if the sort had been rejected outright, so
+            // confirm both engines still report it as an applied sort rather than an unsupported parameter.
+            Assert.Equal("birthdate", Assert.Single(legacyResults.SortOrder).searchParameterInfo.Code);
+            Assert.Equal("birthdate", Assert.Single(ignixaResults.SortOrder).searchParameterInfo.Code);
+        }
+
+        [Fact]
+        public async Task GivenAMultiTypeCustomSortContinuationToken_WhenIgnixaPagesThroughIt_ThenEveryRowIsReturnedExactlyOnce()
+        {
+            // Exercises the shape the router refused until Ignixa gained a type-free page boundary: a
+            // continuation token on a multi-type search sorted by a search parameter. Such a token is
+            // [sortValue, surrogateId] with no ResourceTypeId slot, and a multi-type search has no single type
+            // to substitute, so the seek has to omit the type boundary entirely.
+            //
+            // Legacy cannot serve as the oracle here. It orders these rows type-major while seeking on the
+            // surrogate id alone, so its own walk drops rows across a page seam inside a tie - the companion
+            // test above pins that ordering. What matters instead is that Ignixa is self-consistent: its
+            // ORDER BY and its seek predicate are both (sortValue, Sid1), on the first page as well as on
+            // pages carrying a boundary, so a full walk must return each row exactly once.
+            //
+            // Every row shares one birthdate so the sort value ties throughout and the tiebreak alone drives
+            // paging, which is precisely where an ordering/seek mismatch shows up. Seeding alternates the two
+            // types so surrogate order and type order are genuinely different orderings.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+
+            const string SharedBirthDate = "1971-02-03";
+            var seededIds = new List<string>();
+            for (int i = 0; i < 4; i++)
+            {
+                var patient = new Patient { Id = Guid.NewGuid().ToString(), BirthDate = SharedBirthDate };
+                await UpsertWithSearchIndicesAsync(patient);
+                seededIds.Add(patient.Id);
+
+                var practitioner = new Practitioner { Id = Guid.NewGuid().ToString(), BirthDate = SharedBirthDate };
+                await UpsertWithSearchIndicesAsync(practitioner);
+                seededIds.Add(practitioner.Id);
+            }
+
+            // Filtering on the sort parameter is load-bearing: it suppresses the sorted missing-values phase,
+            // which drops the _id restriction and would pull in rows seeded by other test classes.
+            var baseQuery = new List<Tuple<string, string>>
+            {
+                Tuple.Create("_id", string.Join(",", seededIds)),
+                Tuple.Create("_type", "Patient,Practitioner"),
+                Tuple.Create("birthdate", SharedBirthDate),
+                Tuple.Create("_sort", "birthdate"),
+            };
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+
+            // Page size 3 over 8 tied rows, so the walk crosses several page boundaries inside the tie.
+            (List<string> walkedIds, int pages) = await WalkPagesAsync(
+                ignixaSearchService,
+                resourceType: null,
+                baseQuery,
+                pageSize: 3,
+                maxPages: 12,
+                CancellationToken.None);
+
+            Assert.True(pages < 12, $"Ignixa paging did not terminate within 12 pages (pages={pages}).");
+
+            // Anti-vacuity: more than one page must actually have been fetched, or no continuation token was
+            // ever built and the type-free boundary under test was never exercised.
+            Assert.True(pages > 1, $"Expected the walk to span multiple pages, but it took {pages}.");
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                "Expected the paged multi-type sorted search to run on Ignixa rather than fall back.");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+            Assert.Equal(
+                seededIds.OrderBy(id => id, StringComparer.Ordinal).ToList(),
+                walkedIds.OrderBy(id => id, StringComparer.Ordinal).ToList());
         }
 
         [Fact]

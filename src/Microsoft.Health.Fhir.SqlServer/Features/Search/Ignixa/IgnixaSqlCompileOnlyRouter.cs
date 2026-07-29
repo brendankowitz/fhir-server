@@ -404,13 +404,21 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
 
             if (token.ResourceTypeId == null && !IsSingleTypeScoped(searchOptions))
             {
-                // A custom-sort token is [sortValue, surrogateId] - it never carries a ResourceTypeId slot,
-                // because legacy's sorted keyset compares Sid1 alone. The adapter substitutes the search's own
-                // resource type id, which is only equivalent while the search is scoped to a single type; a
-                // multi-type sorted search has no type boundary to substitute and also tie-breaks differently
-                // (legacy orders by Sid1 alone, Ignixa by T1 then Sid1), so it stays on the legacy path.
-                skipReason = "no-resource-type-id";
-                return false;
+                // A custom-sort token is [sortValue, surrogateId] - it never carries a ResourceTypeId slot.
+                // For a single-type search the adapter substitutes the search's own type, but a multi-type one
+                // has no type to substitute, so the seek has to omit the type boundary entirely. Ignixa can do
+                // that only for a custom (search-parameter) sort key, whose ORDER BY it emits with no type term
+                // - sound because ResourceSurrogateId is globally unique. Every other shape orders type-major
+                // and a surrogate-only seek would drop rows across the page seam.
+                bool hasSearchParameterSortKey = sort != null
+                    && sort.Count > 0
+                    && sort.Any(s => !ResourceColumnLoweringRule.IsResourceColumnCode(s.Parameter.Code));
+
+                if (!hasSearchParameterSortKey)
+                {
+                    skipReason = "no-resource-type-id";
+                    return false;
+                }
             }
 
             return true;
