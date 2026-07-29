@@ -319,11 +319,12 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
-        public async Task ObserveAsync_WhenTypelessContinuationTokenSetOnAMultiTypeSearch_DoesNotCompile()
+        public async Task ObserveAsync_WhenTypelessContinuationTokenSetOnAnUnsortedMultiTypeSearch_DoesNotCompile()
         {
             // With more than one target type there is no single constant ResourceTypeId to substitute for the
-            // boundary the token omitted, and legacy also tie-breaks differently across types (Sid1 alone versus
-            // Ignixa's T1 then Sid1). Keep it on legacy rather than seek from a guessed type boundary.
+            // boundary the token omitted. Ignixa can seek without a type boundary, but only for a custom sort
+            // key, whose ORDER BY carries no type term; an unsorted search orders type-major, so a
+            // surrogate-only seek would disagree with it and drop rows across the page seam.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
             var router = CreateRouter(adapter, EnabledConfig());
 
@@ -334,6 +335,34 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
 
             await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenTypelessContinuationTokenSetOnAMultiTypeCustomSort_Compiles()
+        {
+            // The shape that closed the last continuation-token gate. A custom-sort token is
+            // [sortValue, surrogateId] and never carries a ResourceTypeId slot; across several types there is
+            // none to substitute either. Ignixa emits this sort's ORDER BY as (sortValue, Sid1) with no type
+            // term - a total order, because ResourceSurrogateId is globally unique - so a seek that omits the
+            // type boundary agrees with it and the page is sound.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.IgnixaOptions.ResourceTypes = new List<string> { "Patient", "Observation" };
+            options.IgnixaOptions.Sort = new List<SortExpression>
+            {
+                new SortExpression(CreateDateSortParameter("date"), IgnixaSortOrder.Ascending),
+            };
+
+            // Two slots, no type: exactly what SqlServerSearchService mints for a custom sort.
+            options.ContinuationToken = "[\"2021-01-01T00:00:00.0000000\",5000]";
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
         }
 
         [Fact]
