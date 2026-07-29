@@ -343,22 +343,17 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return false;
             }
 
-            // SortQuerySecondPhase is not a cross-phase reconstruction the compiler has to model: it is simply
-            // which half of the missing/valued partition produced the matches in this token's surrogate range.
-            // SqlServerSearchService copies it onto the options before running the page, and the adapter already
-            // maps it onto Ignixa's SortPhase exactly as it does for an ordinary sorted search. What the range
-            // alone cannot express - that rows of the other phase sitting inside it are not matches - is
-            // precisely what that phase predicate supplies.
+            // Neither SortQuerySecondPhase nor a nested SecondPhaseContinuationToken needs special handling here.
+            // The first is simply which half of the missing/valued partition produced the matches in this token's
+            // surrogate range; SqlServerSearchService copies it onto the options before running the page, and the
+            // adapter maps it onto Ignixa's SortPhase exactly as for an ordinary sorted search. What the range
+            // alone cannot express - that rows of the other phase sitting inside it are not matches - is precisely
+            // what that phase predicate supplies.
             //
-            // A nested SecondPhaseContinuationToken is still refused. It is orchestration rather than
-            // compilation (SqlServerSearchService runs the two pages and stitches the results), and until that
-            // stitched shape is covered by a differential test it stays on the legacy path.
-            if (token.SecondPhaseContinuationToken != null)
-            {
-                skipReason = "second-phase-sort";
-                return false;
-            }
-
+            // The second is pure orchestration: SqlServerSearchService runs this page, notices it under-filled,
+            // re-feeds the nested token as an ordinary six-slot token and runs a second page, then concatenates
+            // the two. Nothing nested ever reaches the compiler - TryBuildIncludesOnlyWindow reads only the
+            // surrogate range and the include cursor - so both pages are ordinary includes compiles.
             return true;
         }
 

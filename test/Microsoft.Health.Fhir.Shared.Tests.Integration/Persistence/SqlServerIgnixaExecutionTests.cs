@@ -2824,6 +2824,162 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenANestedSecondPhaseIncludesToken_WhenTheIncludesPageRunsOnBothEngines_ThenIgnixaStitchesBothSortPhasesLikeLegacy()
+        {
+            // The last $includes shape still routed to legacy: an includes token that NESTS a second one
+            // (SqlServerSearchService.cs ~420-431). It is minted only when a sorted search overflows its include
+            // budget in BOTH sort phases, so the first page owes includes from the missing-values phase and the
+            // valued phase at once. The outer token carries the phase-1 match range, slot 5 false, and the whole
+            // phase-2 token in slot 6.
+            //
+            // The claim under test is that this is orchestration, not compilation: SqlServerSearchService runs the
+            // outer page, notices it under-filled, re-feeds the nested token as an ordinary six-slot token and runs
+            // a second page, then concatenates. Nothing nested ever reaches the emitter. If that is right, both
+            // RunSearch calls are compilable and the gate can go.
+            //
+            // Reaching the shape needs the include budget to overflow twice. Two undated observations (phase 1)
+            // and three dated ones (phase 2) with _count=4 and _includesCount=1: phase 1 matches both undated rows
+            // and under-fills the page, its four includes overflow the budget of one, and phase 2 then runs with a
+            // budget of zero and overflows immediately.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaIncludesSearchService;
+            SqlServerSearchService legacySearchService = fixture.LegacyIncludesSearchService;
+
+            string codeSystem = $"http://ignixa.test/{Guid.NewGuid():N}";
+            const string CodeValue = "nested-second-phase-includes";
+
+            var phaseOneIncludes = new List<string>();
+            var phaseTwoIncludes = new List<string>();
+            var beyondThePageIncludes = new List<string>();
+
+            async Task<string> SeedObservationAsync(int? year, List<string> includeSink)
+            {
+                var patient = new Patient { Id = Guid.NewGuid().ToString() };
+                includeSink.Add(await UpsertWithSearchIndicesAsync(patient));
+
+                var practitioner = new Practitioner { Id = Guid.NewGuid().ToString() };
+                includeSink.Add(await UpsertWithSearchIndicesAsync(practitioner));
+
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept(codeSystem, CodeValue),
+                    Subject = new ResourceReference($"Patient/{patient.Id}"),
+                    Performer = new List<ResourceReference> { new ResourceReference($"Practitioner/{practitioner.Id}") },
+                };
+
+                if (year.HasValue)
+                {
+                    observation.Effective = new FhirDateTime(year.Value, 3, 3);
+                }
+
+                return await UpsertWithSearchIndicesAsync(observation);
+            }
+
+            // Interleaved on purpose, so each phase's surrogate range spans a row belonging to the other phase:
+            // the outer token's range (undated1..undated2) contains dated2, and the nested token's range
+            // (dated1..dated2) contains undated1. Seed the two groups in blocks instead and the ranges become
+            // disjoint, at which point the test passes whether or not either phase predicate is applied.
+            await SeedObservationAsync(1971, phaseTwoIncludes);
+            await SeedObservationAsync(null, phaseOneIncludes);
+            await SeedObservationAsync(1981, phaseTwoIncludes);
+            await SeedObservationAsync(null, phaseOneIncludes);
+            await SeedObservationAsync(2001, beyondThePageIncludes);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("code", $"{codeSystem}|{CodeValue}"),
+                Tuple.Create("status", "final"),
+                Tuple.Create("_include", "Observation:subject"),
+                Tuple.Create("_include", "Observation:performer"),
+                Tuple.Create("_sort", "date"),
+                Tuple.Create("_count", "4"),
+                Tuple.Create("_includesCount", "1"),
+            };
+
+            SearchResult legacyFirstPage = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+            SearchResult ignixaFirstPage = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            // Both engines must mint the seven-slot nested token. For legacy this is anti-vacuity - without it
+            // the test is not exercising the shape it was written for. For Ignixa it is the assertion that
+            // caught the real defect: the two engines returned identical rows on this page and identical first
+            // five token slots, and Ignixa simply omitted the nested slot. That slot is the only record that a
+            // second phase still owes included resources, so dropping it loses them silently rather than
+            // visibly. Read from the raw JSON so the assertion does not lean on assembly internals.
+            foreach ((string engine, SearchResult page) in new[] { ("legacy", legacyFirstPage), ("Ignixa", ignixaFirstPage) })
+            {
+                Assert.False(
+                    string.IsNullOrEmpty(page.IncludesContinuationToken),
+                    $"The {engine} first page minted no includes continuation token, so the $includes protocol never engaged.");
+
+                using System.Text.Json.JsonDocument tokenDocument = System.Text.Json.JsonDocument.Parse(page.IncludesContinuationToken);
+                System.Text.Json.JsonElement root = tokenDocument.RootElement;
+                Assert.True(
+                    root.GetArrayLength() >= 7 && root[6].ValueKind != System.Text.Json.JsonValueKind.Null,
+                    $"The {engine} includes token is not the nested seven-slot form, so a whole sort phase worth of included resources is unreachable: {page.IncludesContinuationToken}");
+            }
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+            fixture.IgnixaRouterLog.Clear();
+
+            SearchResult legacyIncludesPage = await legacySearchService.SearchAsync(
+                "Observation",
+                IncludesPageQuery(query, legacyFirstPage.IncludesContinuationToken),
+                CancellationToken.None,
+                isIncludesOperation: true);
+
+            SearchResult ignixaIncludesPage = await ignixaSearchService.SearchAsync(
+                "Observation",
+                IncludesPageQuery(query, ignixaFirstPage.IncludesContinuationToken),
+                CancellationToken.None,
+                isIncludesOperation: true);
+
+            string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+
+            var allSeeded = new HashSet<string>(
+                phaseOneIncludes.Concat(phaseTwoIncludes).Concat(beyondThePageIncludes),
+                StringComparer.Ordinal);
+
+            Assert.True(
+                legacyIncludesPage.Results.Any(),
+                "The legacy nested $includes page was empty, so the assertions below would hold vacuously.");
+            Assert.Equal(SeededModeMap(legacyIncludesPage, allSeeded), SeededModeMap(ignixaIncludesPage, allSeeded));
+
+            var expectedIncludes = phaseOneIncludes.Concat(phaseTwoIncludes)
+                .OrderBy(x => x, StringComparer.Ordinal)
+                .ToList();
+
+            foreach ((string engine, SearchResult includesPage, SearchResult firstPage) in
+                new[] { ("legacy", legacyIncludesPage, legacyFirstPage), ("Ignixa", ignixaIncludesPage, ignixaFirstPage) })
+            {
+                List<string> includeIds = firstPage.Results.Concat(includesPage.Results)
+                    .Where(r => r.SearchEntryMode == SearchEntryMode.Include)
+                    .Select(r => r.Resource.ResourceId)
+                    .ToList();
+
+                // Both phases are served from one page here, so a dropped phase predicate shows up as the same
+                // resource arriving twice - once from the range that legitimately owns it and once from the range
+                // that merely spans it - rather than as a missing row.
+                Assert.Equal(includeIds.Count, includeIds.Distinct(StringComparer.Ordinal).Count());
+
+                // Every included resource of both sort phases must arrive across the two pages, and nothing
+                // belonging to the observation beyond the second phase's match window may. This is the assertion
+                // the user actually cares about: the client asked for _include and must not silently lose half of
+                // them because the budget happened to run out on a phase boundary.
+                Assert.Equal(
+                    expectedIncludes,
+                    includeIds.OrderBy(x => x, StringComparer.Ordinal).ToList());
+            }
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                $"The nested $includes page did not run on the Ignixa engine. Router log: {routerLog}");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+        }
+
+        [Fact]
         public async Task GivenTwoIncludeStagesAndAnIncludeBudgetOfOne_WhenExecutedOnBothEngines_ThenIgnixaTruncatesToTheSameIncludedRowAsLegacy()
         {
             // Legacy limits includes GLOBALLY: IncludeUnionAllExpression unions every include CTE and

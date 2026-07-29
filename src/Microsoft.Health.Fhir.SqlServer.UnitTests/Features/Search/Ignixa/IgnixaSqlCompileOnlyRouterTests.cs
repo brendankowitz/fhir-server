@@ -425,13 +425,17 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
-        public async Task ObserveAsync_WhenIncludesContinuationTokenNestsASecondPhaseToken_DoesNotCompile()
+        public async Task ObserveAsync_WhenIncludesContinuationTokenNestsASecondPhaseToken_IsEligibleAndCompiles()
         {
             // A nested SecondPhaseContinuationToken is orchestration rather than compilation: SqlServerSearchService
-            // runs two pages and stitches their results. Nothing in it reaches the emitter, so this is a coverage
-            // gap rather than a capability one - it stays on legacy until a differential test pins the stitched
-            // shape, and the gate must close before the adapter is ever consulted.
+            // runs this page, re-feeds the nested token as an ordinary six-slot token, runs a second page and
+            // concatenates the two. Nothing nested reaches the emitter - TryBuildIncludesOnlyWindow reads only the
+            // surrogate range and the include cursor - so each page compiles as an ordinary includes page. The
+            // differential test GivenANestedSecondPhaseIncludesToken_... proves the stitched result agrees with
+            // legacy, delivering every included resource of both sort phases exactly once.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
             var router = CreateRouter(adapter, EnabledConfig());
 
             var innerToken = new IncludesContinuationToken(new object[] { (short)1, 50L, 100L, null, null, true });
@@ -442,7 +446,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
 
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
 
-            await adapter.DidNotReceive().CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>());
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
         }
 
         [Fact]

@@ -511,19 +511,14 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return CapabilityFailure("includes", "includes-continuation-token-unparseable", EmptyUnresolvedParameters);
             }
 
-            // SortQuerySecondPhase needs no special handling: SqlServerSearchService copies it from the token onto
-            // the options before running the page, and the sort-phase mapping above turns it into Ignixa's
-            // SortPhase exactly as for an ordinary sorted search. That phase predicate is what distinguishes the
-            // matches from the other phase's rows sitting inside the same surrogate range.
-            //
-            // A nested SecondPhaseContinuationToken is still declined. It drives SqlServerSearchService's
-            // orchestration - two pages stitched together - rather than anything the compiler emits, so it is a
-            // coverage gap rather than a capability one, and it stays on legacy until a differential test pins it.
-            if (token.SecondPhaseContinuationToken != null)
-            {
-                return CapabilityFailure("includes", "includes-second-phase-sort", EmptyUnresolvedParameters);
-            }
-
+            // Neither SortQuerySecondPhase nor a nested SecondPhaseContinuationToken needs handling here.
+            // SqlServerSearchService copies the first from the token onto the options before running the page, and
+            // the sort-phase mapping above turns it into Ignixa's SortPhase exactly as for an ordinary sorted
+            // search; that phase predicate is what distinguishes the matches from the other phase's rows sitting
+            // inside the same surrogate range. The second is orchestration rather than compilation - the service
+            // runs this page, re-feeds the nested token as an ordinary six-slot token, runs a second page and
+            // concatenates - so nothing nested reaches the compiler and both pages compile as ordinary includes
+            // pages from the range and cursor read below.
             // A count-only $includes is contradictory: Lower rejects IncludesOnly together with CountOnly, and
             // included resources are never counted anyway (legacy discards the includes for a count). Fall back.
             if (searchOptions.CountOnly)
