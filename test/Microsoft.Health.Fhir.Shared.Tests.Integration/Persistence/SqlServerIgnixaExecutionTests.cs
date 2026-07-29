@@ -2539,6 +2539,291 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         [Fact]
+        public async Task GivenACustomSortedIncludeSearch_WhenTheIncludesPageRunsOnBothEngines_ThenIgnixaHonoursTheSortPhaseBoundary()
+        {
+            // Every other $includes test here is unsorted, which leaves the interaction between the sorted
+            // two-phase protocol and the $includes page completely unmeasured -- including for the phase-1 token
+            // that ALREADY routes through Ignixa (the adapter only declines SortQuerySecondPhase == true).
+            //
+            // Why the phase is load-bearing rather than decorative: an $includes page identifies its match set by
+            // a surrogate-id RANGE (IncludesContinuationToken.MatchResourceSurrogateIdMin/Max). That range is only
+            // a bound, not the set. Under an ascending custom sort SortRewriter runs the missing-values phase
+            // first, so the matches on page 1 are the undated rows -- and dated rows sitting between them in
+            // surrogate order fall inside the same range while NOT being matches. The phase predicate is what
+            // excludes them. An engine that honours the range but drops the phase returns includes belonging to
+            // resources that were never matched.
+            //
+            // The seeding is arranged specifically to make that observable: the dated and undated observations
+            // alternate, so the phase-1 range provably spans a phase-2 row. Seed them non-alternating and this
+            // test passes vacuously whether or not the phase is applied.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaIncludesSearchService;
+            SqlServerSearchService legacySearchService = fixture.LegacyIncludesSearchService;
+
+            string codeSystem = $"http://ignixa.test/{Guid.NewGuid():N}";
+            const string CodeValue = "sorted-includes";
+
+            var phaseOneIncludes = new List<string>();
+            var phaseTwoIncludes = new List<string>();
+
+            // Alternating dated / undated. Under "_sort=date" ascending the undated rows are phase 1, so the
+            // dated rows seeded between them land inside the phase-1 surrogate range without being matches.
+            async Task<string> SeedObservationAsync(int? year, List<string> includeSink)
+            {
+                var patient = new Patient { Id = Guid.NewGuid().ToString() };
+                includeSink.Add(await UpsertWithSearchIndicesAsync(patient));
+
+                var practitioner = new Practitioner { Id = Guid.NewGuid().ToString() };
+                includeSink.Add(await UpsertWithSearchIndicesAsync(practitioner));
+
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept(codeSystem, CodeValue),
+                    Subject = new ResourceReference($"Patient/{patient.Id}"),
+                    Performer = new List<ResourceReference> { new ResourceReference($"Practitioner/{practitioner.Id}") },
+                };
+
+                if (year.HasValue)
+                {
+                    observation.Effective = new FhirDateTime(year.Value, 2, 2);
+                }
+
+                return await UpsertWithSearchIndicesAsync(observation);
+            }
+
+            string dated1 = await SeedObservationAsync(1971, phaseTwoIncludes);
+            string undated1 = await SeedObservationAsync(null, phaseOneIncludes);
+            string dated2 = await SeedObservationAsync(1981, phaseTwoIncludes);
+            string undated2 = await SeedObservationAsync(null, phaseOneIncludes);
+            var laterPageIncludes = new List<string>();
+            string undated3 = await SeedObservationAsync(null, laterPageIncludes);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("code", $"{codeSystem}|{CodeValue}"),
+
+                // A lone token search is intercepted by the GetResourcesByTokens fast path before the router.
+                Tuple.Create("status", "final"),
+                Tuple.Create("_include", "Observation:subject"),
+                Tuple.Create("_include", "Observation:performer"),
+                Tuple.Create("_sort", "date"),
+
+                // Two matches per page out of three phase-1 rows: the page overflows (so a match continuation is
+                // minted, which the includes token requires) and its surrogate range still spans dated2.
+                Tuple.Create("_count", "2"),
+                Tuple.Create("_includesCount", "3"),
+            };
+
+            SearchResult legacyFirstPage = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+            SearchResult ignixaFirstPage = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            // Anti-vacuity. Without all three of these the comparison below proves nothing.
+            Assert.False(
+                string.IsNullOrEmpty(legacyFirstPage.IncludesContinuationToken),
+                "Legacy did not mint an includes continuation token, so the $includes protocol never engaged.");
+
+            List<string> legacyFirstMatches = legacyFirstPage.Results
+                .Where(r => r.SearchEntryMode == SearchEntryMode.Match)
+                .Select(r => r.Resource.ResourceId)
+                .ToList();
+            Assert.Equal(new[] { undated1, undated2 }, legacyFirstMatches);
+
+            var phaseOneMatchSet = new HashSet<string>(new[] { undated1, undated2 }, StringComparer.Ordinal);
+            Assert.DoesNotContain(dated1, phaseOneMatchSet);
+            Assert.DoesNotContain(dated2, phaseOneMatchSet);
+            Assert.DoesNotContain(undated3, phaseOneMatchSet);
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+            fixture.IgnixaRouterLog.Clear();
+
+            SearchResult legacyIncludesPage = await legacySearchService.SearchAsync(
+                "Observation",
+                IncludesPageQuery(query, legacyFirstPage.IncludesContinuationToken),
+                CancellationToken.None,
+                isIncludesOperation: true);
+
+            SearchResult ignixaIncludesPage = await ignixaSearchService.SearchAsync(
+                "Observation",
+                IncludesPageQuery(query, ignixaFirstPage.IncludesContinuationToken),
+                CancellationToken.None,
+                isIncludesOperation: true);
+
+            string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+
+            var allSeeded = new HashSet<string>(
+                phaseOneIncludes.Concat(phaseTwoIncludes).Concat(laterPageIncludes).Concat(new[] { dated1, dated2, undated1, undated2, undated3 }),
+                StringComparer.Ordinal);
+
+            Assert.Equal(SeededModeMap(legacyIncludesPage, allSeeded), SeededModeMap(ignixaIncludesPage, allSeeded));
+
+            // The load-bearing assertion, and the one that makes this test worth having: across the first page and
+            // the $includes page, the includes delivered are EXACTLY the four resources referenced by the two
+            // phase-1 matches. dated2 sits between undated1 and undated2 in surrogate order, so its two referenced
+            // resources are inside the token's match range and would be returned by an engine that honoured the
+            // range but dropped the sort-phase predicate. Their absence is the proof that the phase is applied.
+            Assert.True(
+                legacyIncludesPage.Results.Any(),
+                "The legacy $includes page was empty, so the leak assertions below would hold vacuously.");
+
+            foreach ((string engine, SearchResult includesPage, SearchResult firstPage) in
+                new[] { ("legacy", legacyIncludesPage, legacyFirstPage), ("Ignixa", ignixaIncludesPage, ignixaFirstPage) })
+            {
+                List<string> delivered = firstPage.Results.Concat(includesPage.Results)
+                    .Where(r => r.SearchEntryMode == SearchEntryMode.Include)
+                    .Select(r => r.Resource.ResourceId)
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(x => x, StringComparer.Ordinal)
+                    .ToList();
+
+                Assert.Equal(
+                    phaseOneIncludes.OrderBy(x => x, StringComparer.Ordinal).ToList(),
+                    delivered);
+            }
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                $"The sorted $includes page did not run on the Ignixa engine. Router log: {routerLog}");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+        }
+
+        [Fact]
+        public async Task GivenASecondPhaseSortedIncludesToken_WhenTheIncludesPageRunsOnBothEngines_ThenIgnixaExcludesThePhaseOneMatchesInsideTheRange()
+        {
+            // The mirror image of the phase-1 test above, and the shape the adapter's
+            // "includes-second-phase-sort" gate was written for: a token minted by the SECOND phase of a sorted
+            // search (SortQuerySecondPhase == true), whose match range spans a phase-1 row.
+            //
+            // Reaching it takes a specific shape. Phase 1 must UNDER-fill the page so SqlServerSearchService runs
+            // a second phase at all (the !IsSortWithFilter / ContinuationToken == null block), and phase 2 must
+            // then overflow on both matches and includes so it mints an includes token of its own. One undated
+            // observation against four dated ones does that.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaIncludesSearchService;
+            SqlServerSearchService legacySearchService = fixture.LegacyIncludesSearchService;
+
+            string codeSystem = $"http://ignixa.test/{Guid.NewGuid():N}";
+            const string CodeValue = "second-phase-includes";
+
+            var phaseOneIncludes = new List<string>();
+            var phaseTwoIncludes = new List<string>();
+
+            async Task<string> SeedObservationAsync(int? year, List<string> includeSink)
+            {
+                var patient = new Patient { Id = Guid.NewGuid().ToString() };
+                includeSink.Add(await UpsertWithSearchIndicesAsync(patient));
+
+                var practitioner = new Practitioner { Id = Guid.NewGuid().ToString() };
+                includeSink.Add(await UpsertWithSearchIndicesAsync(practitioner));
+
+                var observation = new Observation
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Status = ObservationStatus.Final,
+                    Code = new CodeableConcept(codeSystem, CodeValue),
+                    Subject = new ResourceReference($"Patient/{patient.Id}"),
+                    Performer = new List<ResourceReference> { new ResourceReference($"Practitioner/{practitioner.Id}") },
+                };
+
+                if (year.HasValue)
+                {
+                    observation.Effective = new FhirDateTime(year.Value, 2, 2);
+                }
+
+                return await UpsertWithSearchIndicesAsync(observation);
+            }
+
+            // The single undated row is seeded BETWEEN the two earliest dated rows on purpose: phase 2 returns
+            // dated1 and dated2, so its surrogate range spans the undated row without it being a match. That is
+            // what makes the phase predicate load-bearing rather than redundant with the range.
+            await SeedObservationAsync(1971, phaseTwoIncludes);
+            await SeedObservationAsync(null, phaseOneIncludes);
+            await SeedObservationAsync(1981, phaseTwoIncludes);
+            var untouchedIncludes = new List<string>();
+            await SeedObservationAsync(1991, untouchedIncludes);
+            await SeedObservationAsync(2001, untouchedIncludes);
+
+            var query = new List<Tuple<string, string>>
+            {
+                Tuple.Create("code", $"{codeSystem}|{CodeValue}"),
+                Tuple.Create("status", "final"),
+                Tuple.Create("_include", "Observation:subject"),
+                Tuple.Create("_include", "Observation:performer"),
+                Tuple.Create("_sort", "date"),
+                Tuple.Create("_count", "3"),
+                Tuple.Create("_includesCount", "3"),
+            };
+
+            SearchResult legacyFirstPage = await legacySearchService.SearchAsync("Observation", query, CancellationToken.None);
+            SearchResult ignixaFirstPage = await ignixaSearchService.SearchAsync("Observation", query, CancellationToken.None);
+
+            // Anti-vacuity, and the guard that makes this test about the second phase rather than the first: the
+            // token must actually carry SortQuerySecondPhase == true. Decoded from the raw JSON rather than
+            // through IncludesContinuationToken so the assertion does not depend on assembly internals.
+            Assert.False(
+                string.IsNullOrEmpty(legacyFirstPage.IncludesContinuationToken),
+                "Legacy did not mint an includes continuation token, so the $includes protocol never engaged.");
+
+            using (System.Text.Json.JsonDocument tokenDocument = System.Text.Json.JsonDocument.Parse(legacyFirstPage.IncludesContinuationToken))
+            {
+                System.Text.Json.JsonElement root = tokenDocument.RootElement;
+                Assert.True(
+                    root.GetArrayLength() >= 6,
+                    $"The includes token carries no sort-phase slot, so this test is not exercising the second-phase shape: {legacyFirstPage.IncludesContinuationToken}");
+                Assert.True(
+                    root[5].ValueKind == System.Text.Json.JsonValueKind.True,
+                    $"The includes token was not minted by the second sort phase, so this test would duplicate the phase-1 case: {legacyFirstPage.IncludesContinuationToken}");
+            }
+
+            long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+            long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+            fixture.IgnixaRouterLog.Clear();
+
+            SearchResult legacyIncludesPage = await legacySearchService.SearchAsync(
+                "Observation",
+                IncludesPageQuery(query, legacyFirstPage.IncludesContinuationToken),
+                CancellationToken.None,
+                isIncludesOperation: true);
+
+            SearchResult ignixaIncludesPage = await ignixaSearchService.SearchAsync(
+                "Observation",
+                IncludesPageQuery(query, ignixaFirstPage.IncludesContinuationToken),
+                CancellationToken.None,
+                isIncludesOperation: true);
+
+            string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+
+            var allSeeded = new HashSet<string>(
+                phaseOneIncludes.Concat(phaseTwoIncludes).Concat(untouchedIncludes),
+                StringComparer.Ordinal);
+
+            Assert.True(
+                legacyIncludesPage.Results.Any(),
+                "The legacy second-phase $includes page was empty, so the exclusion assertion below would hold vacuously.");
+            Assert.Equal(SeededModeMap(legacyIncludesPage, allSeeded), SeededModeMap(ignixaIncludesPage, allSeeded));
+
+            // The phase-1 observation sits inside the phase-2 match range, so an engine that honoured the range
+            // but dropped the phase predicate would return its subject and performer here.
+            var phaseOneIncludeSet = new HashSet<string>(phaseOneIncludes, StringComparer.Ordinal);
+            foreach ((string engine, SearchResult page) in new[] { ("legacy", legacyIncludesPage), ("Ignixa", ignixaIncludesPage) })
+            {
+                foreach (SearchResultEntry entry in page.Results)
+                {
+                    Assert.False(
+                        phaseOneIncludeSet.Contains(entry.Resource.ResourceId),
+                        $"The {engine} second-phase $includes page returned {entry.Resource.ResourceId}, which is referenced only by the undated (phase 1) observation. Router log: {routerLog}");
+                }
+            }
+
+            Assert.True(
+                ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                $"The second-phase sorted $includes page did not run on the Ignixa engine. Router log: {routerLog}");
+            Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+        }
+
+        [Fact]
         public async Task GivenTwoIncludeStagesAndAnIncludeBudgetOfOne_WhenExecutedOnBothEngines_ThenIgnixaTruncatesToTheSameIncludedRowAsLegacy()
         {
             // Legacy limits includes GLOBALLY: IncludeUnionAllExpression unions every include CTE and

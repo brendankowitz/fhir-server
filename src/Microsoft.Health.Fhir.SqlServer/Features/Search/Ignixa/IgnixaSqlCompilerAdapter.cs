@@ -511,13 +511,15 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Ignixa
                 return CapabilityFailure("includes", "includes-continuation-token-unparseable", EmptyUnresolvedParameters);
             }
 
-            // Deferred: the sorted two-phase $includes protocol. SortQuerySecondPhase and a
-            // SecondPhaseContinuationToken belong to SqlServerSearchService's second-phase-sort machinery, which
-            // reconstructs the match set across an ascending/descending phase boundary before paging includes.
-            // Ignixa has no equivalent for that cross-phase reconstruction, so these shapes stay on legacy. This
-            // is a scoping decision, not a capability the compiler lacks outright - the plain (unsorted) include
-            // page is what this change delivers.
-            if (token.SortQuerySecondPhase == true || token.SecondPhaseContinuationToken != null)
+            // SortQuerySecondPhase needs no special handling: SqlServerSearchService copies it from the token onto
+            // the options before running the page, and the sort-phase mapping above turns it into Ignixa's
+            // SortPhase exactly as for an ordinary sorted search. That phase predicate is what distinguishes the
+            // matches from the other phase's rows sitting inside the same surrogate range.
+            //
+            // A nested SecondPhaseContinuationToken is still declined. It drives SqlServerSearchService's
+            // orchestration - two pages stitched together - rather than anything the compiler emits, so it is a
+            // coverage gap rather than a capability one, and it stays on legacy until a differential test pins it.
+            if (token.SecondPhaseContinuationToken != null)
             {
                 return CapabilityFailure("includes", "includes-second-phase-sort", EmptyUnresolvedParameters);
             }

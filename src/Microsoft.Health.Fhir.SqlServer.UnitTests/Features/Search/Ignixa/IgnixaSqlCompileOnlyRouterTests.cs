@@ -404,16 +404,41 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search.Ignixa
         }
 
         [Fact]
-        public async Task ObserveAsync_WhenIncludesContinuationTokenIsSecondPhaseSort_DoesNotCompile()
+        public async Task ObserveAsync_WhenIncludesContinuationTokenIsSecondPhaseSort_IsEligibleAndCompiles()
         {
-            // The sorted two-phase $includes protocol (SortQuerySecondPhase set) reconstructs the match set across
-            // an ascending/descending phase boundary, which Ignixa has no spelling for yet. That shape stays on
-            // legacy, so the gate must close and never reach the adapter even though the token itself parses.
+            // SortQuerySecondPhase only records which half of the sorted missing/valued partition produced the
+            // matches in this token's surrogate range. SqlServerSearchService copies it onto the options before
+            // running the page and the adapter maps it onto Ignixa's SortPhase, so the compiler can express it.
+            // The differential test GivenASecondPhaseSortedIncludesToken_... proves the emitted page agrees with
+            // legacy, including excluding the phase-1 rows that sit inside the same range.
             var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            adapter.CompileAsync(Arg.Any<SqlSearchOptions>(), Arg.Any<CancellationToken>())
+                .Returns(CreateCapabilityFailureOutcome("resolve", "unresolved-symbol"));
             var router = CreateRouter(adapter, EnabledConfig());
 
             SqlSearchOptions options = CreateEligibleOptions();
             options.IncludesContinuationToken = new IncludesContinuationToken(new object[] { (short)1, 1L, 100L, null, null, true }).ToString();
+
+            await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
+
+            await adapter.Received(1).CompileAsync(options, CancellationToken.None);
+        }
+
+        [Fact]
+        public async Task ObserveAsync_WhenIncludesContinuationTokenNestsASecondPhaseToken_DoesNotCompile()
+        {
+            // A nested SecondPhaseContinuationToken is orchestration rather than compilation: SqlServerSearchService
+            // runs two pages and stitches their results. Nothing in it reaches the emitter, so this is a coverage
+            // gap rather than a capability one - it stays on legacy until a differential test pins the stitched
+            // shape, and the gate must close before the adapter is ever consulted.
+            var adapter = Substitute.For<IIgnixaSqlCompilerAdapter>();
+            var router = CreateRouter(adapter, EnabledConfig());
+
+            var innerToken = new IncludesContinuationToken(new object[] { (short)1, 50L, 100L, null, null, true });
+
+            SqlSearchOptions options = CreateEligibleOptions();
+            options.IncludesContinuationToken = new IncludesContinuationToken(
+                new object[] { (short)1, 1L, 49L, null, null, false, innerToken.ToJson() }).ToString();
 
             await router.ObserveAsync(options, accessControlPredicateRequired: false, CancellationToken.None);
 
