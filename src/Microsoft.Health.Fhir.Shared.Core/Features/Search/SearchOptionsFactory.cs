@@ -1116,7 +1116,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 new Ignixa.Search.Expressions.CompartmentSearchExpression(
                     compartmentType,
                     compartmentId,
-                    resourceTypesString?.ToHashSet()),
+                    IgnixaCompartmentResourceTypes(resourceTypesString)),
                 Ignixa.Search.Expressions.Expression.And(
                     IgnixaResourceColumnEquals(IgnixaIdSearchParameter, compartmentId),
                     IgnixaResourceColumnEquals(IgnixaTypeSearchParameter, compartmentType)),
@@ -1240,6 +1240,23 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 deviceOptions.Expression);
         }
 
+        /// <summary>
+        /// The resource-type filter to hand Ignixa's compartment lowering, or <see langword="null"/> when the
+        /// request carries no type filter at all.
+        /// </summary>
+        /// <remarks>
+        /// A system-level or wildcard request parses to the single stand-in <c>DomainResource</c>, which the
+        /// legacy rewriters read as "no filter". Ignixa has no such convention: it intersects the compartment's
+        /// membership groups with whatever type names it is given, and no group contains <c>DomainResource</c>,
+        /// so passing the stand-in through collapses the compartment leg to <c>1 = 0</c> and silently drops
+        /// every resource that is in the compartment only by reference. Translating the stand-in back to "no
+        /// filter" here keeps the legacy convention from leaking into Ignixa's vocabulary.
+        /// </remarks>
+        private static HashSet<string> IgnixaCompartmentResourceTypes(IReadOnlyCollection<string> resourceTypesString)
+            => resourceTypesString == null || resourceTypesString.All(resourceType => string.Equals(resourceType, KnownResourceTypes.DomainResource, StringComparison.Ordinal))
+                ? null
+                : resourceTypesString.ToHashSet();
+
         private static void AppendIgnixaCompartmentExpression(SearchOptions searchOptions, string compartmentType, string compartmentId, IReadOnlyCollection<string> resourceTypesString)
         {
             if (searchOptions.IgnixaOptions == null)
@@ -1250,7 +1267,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             var compartmentExpression = new Ignixa.Search.Expressions.CompartmentSearchExpression(
                 compartmentType,
                 compartmentId,
-                resourceTypesString?.ToHashSet());
+                IgnixaCompartmentResourceTypes(resourceTypesString));
 
             if (ContainsIgnixaExpression(searchOptions.IgnixaOptions.Expression, compartmentExpression))
             {

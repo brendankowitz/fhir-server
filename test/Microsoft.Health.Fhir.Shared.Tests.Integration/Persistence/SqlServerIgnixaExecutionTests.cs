@@ -1332,6 +1332,138 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             }
         }
 
+        [Fact]
+        public async Task GivenASystemLevelSmartUserCompartment_WhenExecutedOnBothEngines_ThenIgnixaAdmitsTheSameLegsAsLegacy()
+        {
+            // The same SMART union, but with no target resource type at all. Every leg is written as a _type
+            // equality ANDed with its own predicate, and on a typed search those equalities are redundant - the
+            // ambient type already restricts the source, so a plan that dropped them entirely would still pass
+            // GivenASmartUserCompartment_.... A system-level search removes that safety net: the legs are the
+            // only thing selecting types, and they must be expressible against a multi-type source.
+            //
+            // Every leg is exercised at once, together with three resources that satisfy none, so a plan that
+            // dropped a leg admits too few and one that dropped the union admits too many.
+            var fixture = (SqlServerFhirStorageTestsFixture)_fixture.Service;
+            SqlServerSearchService ignixaSearchService = fixture.IgnixaSearchService;
+            ISearchService legacySearchService = _fixture.SearchService;
+
+            var smartUser = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            smartUser.Id = Guid.NewGuid().ToString();
+            string smartUserId = await UpsertWithSearchIndicesAsync(smartUser);
+
+            var strangerPatient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+            strangerPatient.Id = Guid.NewGuid().ToString();
+            string strangerPatientId = await UpsertWithSearchIndicesAsync(strangerPatient);
+
+            var insideObservation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept("http://example.org/ignixa-smart-system", "inside"),
+                Subject = new ResourceReference($"Patient/{smartUserId}"),
+            };
+            string insideObservationId = await UpsertWithSearchIndicesAsync(insideObservation);
+
+            var outsideObservation = new Observation
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = ObservationStatus.Final,
+                Code = new CodeableConcept("http://example.org/ignixa-smart-system", "outside"),
+                Subject = new ResourceReference($"Patient/{strangerPatientId}"),
+            };
+            string outsideObservationId = await UpsertWithSearchIndicesAsync(outsideObservation);
+
+            var organization = new Organization { Id = Guid.NewGuid().ToString(), Name = "Ignixa Smart System Universal" };
+            string organizationId = await UpsertWithSearchIndicesAsync(organization);
+
+            var orphanDevice = new Device { Id = Guid.NewGuid().ToString(), Status = Device.FHIRDeviceStatus.Active };
+            string orphanDeviceId = await UpsertWithSearchIndicesAsync(orphanDevice);
+
+            var ownDevice = new Device
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = Device.FHIRDeviceStatus.Active,
+                Patient = new ResourceReference($"Patient/{smartUserId}"),
+            };
+            string ownDeviceId = await UpsertWithSearchIndicesAsync(ownDevice);
+
+            var strangerDevice = new Device
+            {
+                Id = Guid.NewGuid().ToString(),
+                Status = Device.FHIRDeviceStatus.Active,
+                Patient = new ResourceReference($"Patient/{strangerPatientId}"),
+            };
+            string strangerDeviceId = await UpsertWithSearchIndicesAsync(strangerDevice);
+
+            RequestContextAccessor<IFhirRequestContext> contextAccessor = fixture.FhirRequestContextAccessor;
+            IFhirRequestContext originalContext = contextAccessor.RequestContext;
+
+            var accessControl = new AccessControlContext
+            {
+                ApplyFineGrainedAccessControl = true,
+                CompartmentResourceType = KnownResourceTypes.Patient,
+                CompartmentId = smartUserId,
+                FhirUserClaim = new Uri($"https://localhost/Patient/{smartUserId}"),
+            };
+
+            accessControl.AllowedResourceActions.Add(new ScopeRestriction(KnownResourceTypes.All, DataActions.Read, "user"));
+
+            var scopedContext = Substitute.For<IFhirRequestContext>();
+            scopedContext.AccessControlContext.Returns(accessControl);
+            scopedContext.CorrelationId.Returns(Guid.NewGuid().ToString());
+            scopedContext.RouteName.Returns("routeName");
+            scopedContext.RequestHeaders.Returns(new Dictionary<string, StringValues>());
+            scopedContext.ResponseHeaders.Returns(new Dictionary<string, StringValues>());
+            contextAccessor.RequestContext.Returns(scopedContext);
+
+            try
+            {
+                var query = new List<Tuple<string, string>>
+                {
+                    Tuple.Create(
+                        "_id",
+                        string.Join(
+                            ",",
+                            new[]
+                            {
+                                insideObservationId, outsideObservationId, smartUserId, strangerPatientId,
+                                organizationId, orphanDeviceId, ownDeviceId, strangerDeviceId,
+                            })),
+                    Tuple.Create("_count", "100"),
+                };
+
+                long ignixaBefore = ignixaSearchService.InstanceIgnixaExecutedQueryCount;
+                long legacyInstanceBefore = ignixaSearchService.InstanceLegacyExecutedQueryCount;
+                fixture.IgnixaRouterLog.Clear();
+
+                SearchResult ignixaResults = await ignixaSearchService.SearchAsync(null, query, CancellationToken.None);
+                string routerLog = string.Join(" | ", fixture.IgnixaRouterLog);
+                SearchResult legacyResults = await legacySearchService.SearchAsync(null, query, CancellationToken.None);
+
+                Assert.True(
+                    ignixaSearchService.InstanceIgnixaExecutedQueryCount > ignixaBefore,
+                    $"Expected the system-level SMART compartment search to run on Ignixa. Router log: {routerLog}");
+                Assert.Equal(legacyInstanceBefore, ignixaSearchService.InstanceLegacyExecutedQueryCount);
+
+                List<string> legacyMatches = ResourceIdsInResultOrder(legacyResults);
+                Assert.Equal(legacyMatches, ResourceIdsInResultOrder(ignixaResults));
+
+                // Anti-vacuity: legacy must genuinely admit one resource per leg and refuse the three outsiders,
+                // otherwise the equality above compares two empty or two unfiltered lists.
+                Assert.Equal(
+                    new[] { insideObservationId, smartUserId, organizationId, orphanDeviceId, ownDeviceId }
+                        .OrderBy(id => id, StringComparer.Ordinal),
+                    legacyMatches.OrderBy(id => id, StringComparer.Ordinal));
+                Assert.DoesNotContain(outsideObservationId, legacyMatches);
+                Assert.DoesNotContain(strangerPatientId, legacyMatches);
+                Assert.DoesNotContain(strangerDeviceId, legacyMatches);
+            }
+            finally
+            {
+                contextAccessor.RequestContext.Returns(originalContext);
+            }
+        }
+
         [Theory]
         [InlineData("_lastUpdated")]
         [InlineData("-_lastUpdated")]

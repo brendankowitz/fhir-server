@@ -11,8 +11,8 @@
       0.6.99 is a deliberately non-release version so it cannot collide with a published one.
       Repoint at the published versions before this branch is proposed for merge.
     -->
-    <IgnixaSearchPackageVersion>0.6.110</IgnixaSearchPackageVersion>
-    <IgnixaSearchSqlPackageVersion>0.6.110-alpha</IgnixaSearchSqlPackageVersion>
+    <IgnixaSearchPackageVersion>0.6.111</IgnixaSearchPackageVersion>
+    <IgnixaSearchSqlPackageVersion>0.6.111-alpha</IgnixaSearchSqlPackageVersion>
   </PropertyGroup>
   <!-- SDK Packages -->
   <Choose>
@@ -159,3 +159,4 @@
     <PackageVersion Include="System.Text.RegularExpressions" Version="4.3.1" />
   </ItemGroup>
 </Project>
+
