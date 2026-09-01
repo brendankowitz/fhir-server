@@ -106,6 +106,127 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
          }
 
 #if !Stu3
+        [Fact]
+        public void GivenObservationWithTwoNotesAndConcatenateVectorPolicy_WhenExtract_ThenCreatesSingleCombinedVectorValue()
+        {
+           var extraction = ExtractVectorSearchEntries(VectorTextExtractionPolicy.Concatenate, 10, "first note", "second note");
+
+           var entry = Assert.Single(extraction.Entries);
+           var value = Assert.IsType<VectorSearchValue>(entry.Value);
+           Assert.Equal("first note\nsecond note", value.SourceText);
+           Assert.Equal(0, value.ChunkOrdinal);
+        }
+
+        [Fact]
+        public void GivenObservationWithTwoNotesAndPerValueRowVectorPolicy_WhenExtract_ThenCreatesVectorValueForEachNote()
+        {
+           var extraction = ExtractVectorSearchEntries(VectorTextExtractionPolicy.PerValueRow, 10, "first note", "second note");
+
+           var values = extraction.Entries
+               .Select(entry => Assert.IsType<VectorSearchValue>(entry.Value))
+               .ToList();
+
+           Assert.Collection(
+               values,
+               value =>
+               {
+                   Assert.Equal("first note", value.SourceText);
+                   Assert.Equal(0, value.ChunkOrdinal);
+               },
+               value =>
+               {
+                   Assert.Equal("second note", value.SourceText);
+                   Assert.Equal(1, value.ChunkOrdinal);
+               });
+        }
+
+        [Fact]
+        public void GivenObservationWithTwoNotesAndFirstValueVectorPolicy_WhenExtract_ThenCreatesVectorValueForFirstNoteOnly()
+        {
+           var extraction = ExtractVectorSearchEntries(VectorTextExtractionPolicy.FirstValue, 10, "first note", "second note");
+
+           var entry = Assert.Single(extraction.Entries);
+           var value = Assert.IsType<VectorSearchValue>(entry.Value);
+           Assert.Equal("first note", value.SourceText);
+           Assert.Equal(0, value.ChunkOrdinal);
+        }
+
+        [Fact]
+        public void GivenObservationWithWhitespaceOnlyNotesAndVectorPolicy_WhenExtract_ThenCreatesNoEntriesWithoutUsingConverter()
+        {
+           var extraction = ExtractVectorSearchEntries(VectorTextExtractionPolicy.Concatenate, 10, " ", "\t");
+
+           Assert.Empty(extraction.Entries);
+           extraction.ConverterManager.DidNotReceiveWithAnyArgs().TryGetConverter(default, default, out _);
+        }
+
+        [Fact]
+        public void GivenObservationWithLongNotesAndConcatenateVectorPolicy_WhenExtract_ThenTruncatesJoinedTextToCharacterBudget()
+        {
+           var extraction = ExtractVectorSearchEntries(VectorTextExtractionPolicy.Concatenate, 3, "1234567890", "abcdefghij");
+
+           var entry = Assert.Single(extraction.Entries);
+           var value = Assert.IsType<VectorSearchValue>(entry.Value);
+           Assert.Equal("1234567890\na", value.SourceText);
+           Assert.Equal(12, value.SourceText.Length);
+        }
+
+        [Fact]
+        public void GivenOrdinarySearchParameter_WhenExtract_ThenUsesNormalConverterPath()
+        {
+           var observationResource = new Observation
+           {
+               Status = ObservationStatus.Final,
+           };
+
+           var entries = _searchIndexer.Extract(observationResource.ToResourceElement());
+
+           var entry = Assert.Single(entries);
+           Assert.IsType<TokenSearchValue>(entry.Value);
+        }
+
+        private (IReadOnlyCollection<SearchIndexEntry> Entries, ITypedElementToSearchValueConverterManager ConverterManager) ExtractVectorSearchEntries(
+           VectorTextExtractionPolicy extractionPolicy,
+           int maxInputTokens,
+           params string[] noteTexts)
+        {
+           var supportedSearchParameterDefinitionManager = Substitute.For<ISupportedSearchParameterDefinitionManager>();
+           var typedElementToSearchValueConverterManager = Substitute.For<ITypedElementToSearchValueConverterManager>();
+           var referenceToElementResolver = Substitute.For<IReferenceToElementResolver>();
+           var logger = Substitute.For<ILogger<TypedElementSearchIndexer>>();
+           var searchParameter = new SearchParameterInfo(
+               "vector-note",
+               "vector-note",
+               (ValueSets.SearchParamType)SearchParamType.String,
+               new Uri("http://example.org/SearchParameter/vector-note"),
+               expression: "Observation.note.text",
+               targetResourceTypes: new[] { "Observation" },
+               baseResourceTypes: new[] { "Observation" })
+           {
+               VectorConfig = new VectorSearchParameterConfig
+               {
+                   ExtractionPolicy = extractionPolicy,
+                   MaxInputTokens = maxInputTokens,
+               },
+           };
+           supportedSearchParameterDefinitionManager.GetSearchParameters("Observation").Returns(new[] { searchParameter });
+
+           var indexer = new TypedElementSearchIndexer(
+               supportedSearchParameterDefinitionManager,
+               typedElementToSearchValueConverterManager,
+               referenceToElementResolver,
+               ModelInfoProvider.Instance,
+               logger);
+           var observationResource = new Observation
+           {
+               Note = noteTexts.Select(text => new Annotation { Text = text }).ToList(),
+           };
+
+           return (indexer.Extract(observationResource.ToResourceElement()), typedElementToSearchValueConverterManager);
+        }
+#endif
+
+#if !Stu3
         // For Stu3 - Coverage.status, Observation.status, and Claim.use are not required fields
         [Fact]
         public void GivenAnValidResource_WhenExtract_ThenExceptionIsNotThrown()

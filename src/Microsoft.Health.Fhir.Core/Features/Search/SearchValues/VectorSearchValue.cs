@@ -58,6 +58,21 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.SearchValues
         public bool IsValidAsCompositeComponent => false;
 
         /// <summary>
+        /// Truncates text to the character budget approximated by the maximum token count.
+        /// </summary>
+        /// <param name="text">The text to truncate.</param>
+        /// <param name="maxTokens">The maximum number of tokens approximated by the character budget.</param>
+        /// <returns>The original text when it fits the budget; otherwise, its truncated prefix.</returns>
+        public static string Truncate(string text, int maxTokens)
+        {
+            EnsureArg.IsNotNull(text, nameof(text));
+            EnsureArg.IsGte(maxTokens, 0, nameof(maxTokens));
+
+            int maxCharacters = maxTokens * 4;
+            return text.Length <= maxCharacters ? text : text.Substring(0, maxCharacters);
+        }
+
+        /// <summary>
         /// Sets the embedding associated with the source text.
         /// </summary>
         /// <param name="embedding">The embedding to associate with the source text.</param>

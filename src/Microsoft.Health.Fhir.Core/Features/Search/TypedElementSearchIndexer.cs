@@ -161,6 +161,16 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             EnsureArg.IsNotNull(searchParameter, nameof(searchParameter));
             Debug.Assert(searchParameter.Type != SearchParamType.Composite, "The search parameter must be non-composite.");
 
+            if (searchParameter.VectorConfig != null)
+            {
+                foreach (SearchIndexEntry entry in ExtractVectorSearchValues(searchParameter, resource, context))
+                {
+                    yield return entry;
+                }
+
+                yield break;
+            }
+
             SearchParameterInfo searchParameterInfo = searchParameter;
 
             foreach (ISearchValue searchValue in ExtractSearchValues(
@@ -186,6 +196,40 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                     // </remarks>
                     throw new BadRequestException(string.Format(Core.Resources.ValueCannotBeNull, searchParameter.Expression));
                 }
+            }
+        }
+
+        private static IEnumerable<SearchIndexEntry> ExtractVectorSearchValues(
+            SearchParameterInfo searchParameter,
+            ITypedElement resource,
+            EvaluationContext context)
+        {
+            List<string> texts = resource
+                .Select(searchParameter.Expression, context)
+                .Select(node => node.Value?.ToString())
+                .Where(text => !string.IsNullOrWhiteSpace(text))
+                .ToList();
+
+            if (texts.Count == 0)
+            {
+                yield break;
+            }
+
+            switch (searchParameter.VectorConfig.ExtractionPolicy)
+            {
+                case VectorTextExtractionPolicy.FirstValue:
+                    yield return new SearchIndexEntry(searchParameter, new VectorSearchValue(VectorSearchValue.Truncate(texts[0], searchParameter.VectorConfig.MaxInputTokens), 0));
+                    break;
+                case VectorTextExtractionPolicy.Concatenate:
+                    yield return new SearchIndexEntry(searchParameter, new VectorSearchValue(VectorSearchValue.Truncate(string.Join('\n', texts), searchParameter.VectorConfig.MaxInputTokens), 0));
+                    break;
+                case VectorTextExtractionPolicy.PerValueRow:
+                    for (int i = 0; i < texts.Count; i++)
+                    {
+                        yield return new SearchIndexEntry(searchParameter, new VectorSearchValue(VectorSearchValue.Truncate(texts[i], searchParameter.VectorConfig.MaxInputTokens), i));
+                    }
+
+                    break;
             }
         }
 
