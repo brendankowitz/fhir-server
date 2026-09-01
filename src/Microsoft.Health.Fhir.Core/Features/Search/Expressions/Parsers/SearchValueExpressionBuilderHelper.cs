@@ -319,6 +319,11 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
             }
         }
 
+        void ISearchValueVisitor.Visit(VectorSearchValue vector)
+        {
+            throw new InvalidOperationException("Vector search values are handled by a dedicated pipeline.");
+        }
+
         private void EnsureOnlyEqualComparatorIsSupported()
         {
             if (_comparator != SearchComparator.Eq)

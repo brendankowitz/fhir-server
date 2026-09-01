@@ -103,6 +103,12 @@ namespace Microsoft.Health.Fhir.CosmosDb.Features.Storage.Search
             AddProperty(_prefix, uri.Uri);
         }
 
+        /// <inheritdoc />
+        public void Visit(VectorSearchValue vector)
+        {
+            throw new InvalidOperationException("Vector search values are handled by a dedicated pipeline.");
+        }
+
         private void CreateEntry()
         {
             CurrentEntry = new JObject();

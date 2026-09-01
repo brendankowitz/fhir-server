@@ -3,6 +3,7 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using EnsureThat;
@@ -134,6 +135,11 @@ namespace Microsoft.Health.Fhir.CosmosDb.Features.Storage.Search
         void ISearchValueVisitor.Visit(UriSearchValue uri)
         {
             AddProperty(SearchValueConstants.UriName, uri.Uri);
+        }
+
+        void ISearchValueVisitor.Visit(VectorSearchValue vector)
+        {
+            throw new InvalidOperationException("Vector search values are handled by a dedicated pipeline.");
         }
 
         private void CreateEntry()
