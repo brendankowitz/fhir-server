@@ -47,11 +47,11 @@ namespace Microsoft.Health.Fhir.CosmosDb.Features.Storage
             CompartmentIndices compartmentIndices,
             IReadOnlyCollection<KeyValuePair<string, string>> lastModifiedClaims,
             string searchParameterHash = null)
-            : base(resourceId, versionId, resourceTypeName, rawResource, request, lastModified, deleted, searchIndices, compartmentIndices, lastModifiedClaims, searchParameterHash)
+            : base(resourceId, versionId, resourceTypeName, rawResource, request, lastModified, deleted, ExcludeVectorSearchIndices(searchIndices), compartmentIndices, lastModifiedClaims, searchParameterHash)
         {
             IsHistory = history;
 
-            UpdateSortIndex(searchIndices);
+            UpdateSortIndex(SearchIndices);
         }
 
         [JsonConstructor]
@@ -115,9 +115,38 @@ namespace Microsoft.Health.Fhir.CosmosDb.Features.Storage
 
         public override void UpdateSearchIndices(IReadOnlyCollection<SearchIndexEntry> searchIndices)
         {
-            base.UpdateSearchIndices(searchIndices);
+            IReadOnlyCollection<SearchIndexEntry> filteredSearchIndices = ExcludeVectorSearchIndices(searchIndices);
+            base.UpdateSearchIndices(filteredSearchIndices);
 
-            UpdateSortIndex(searchIndices);
+            UpdateSortIndex(filteredSearchIndices);
+        }
+
+        private static IReadOnlyCollection<SearchIndexEntry> ExcludeVectorSearchIndices(IReadOnlyCollection<SearchIndexEntry> searchIndices)
+        {
+            if (searchIndices == null)
+            {
+                return null;
+            }
+
+            foreach (SearchIndexEntry entry in searchIndices)
+            {
+                if (entry.Value is VectorSearchValue)
+                {
+                    var filteredSearchIndices = new List<SearchIndexEntry>(searchIndices.Count - 1);
+
+                    foreach (SearchIndexEntry candidate in searchIndices)
+                    {
+                        if (candidate.Value is not VectorSearchValue)
+                        {
+                            filteredSearchIndices.Add(candidate);
+                        }
+                    }
+
+                    return filteredSearchIndices;
+                }
+            }
+
+            return searchIndices;
         }
 
         private void UpdateSortIndex(IReadOnlyCollection<SearchIndexEntry> searchIndices)

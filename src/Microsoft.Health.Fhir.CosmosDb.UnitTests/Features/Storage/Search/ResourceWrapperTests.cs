@@ -11,10 +11,14 @@ using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
+using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.CosmosDb.Features.Storage;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Test.Utilities;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using Xunit;
 
 namespace Microsoft.Health.Fhir.CosmosDb.UnitTests.Features.Storage.Search
@@ -86,6 +90,62 @@ namespace Microsoft.Health.Fhir.CosmosDb.UnitTests.Features.Storage.Search
                 Assert.Equal(lastModified, poco.Meta.LastUpdated);
                 Assert.Equal("test", poco.Meta.Profile.First());
             }
+        }
+
+        [Fact]
+        public void GivenMixedSearchIndices_WhenSerializingAResourceWrapper_ThenVectorSearchIndicesAreExcluded()
+        {
+            FhirCosmosResourceWrapper wrapper = CreateWrapper(CreateMixedSearchIndices());
+
+            JObject serializedWrapper = JObject.Parse(JsonConvert.SerializeObject(wrapper));
+
+            AssertSerializedSearchIndices(serializedWrapper);
+        }
+
+        [Fact]
+        public void GivenMixedSearchIndices_WhenUpdatingAndSerializingAResourceWrapper_ThenVectorSearchIndicesAreExcluded()
+        {
+            FhirCosmosResourceWrapper wrapper = CreateWrapper(Array.Empty<SearchIndexEntry>());
+            wrapper.UpdateSearchIndices(CreateMixedSearchIndices());
+
+            JObject serializedWrapper = JObject.Parse(JsonConvert.SerializeObject(wrapper));
+
+            AssertSerializedSearchIndices(serializedWrapper);
+        }
+
+        private static FhirCosmosResourceWrapper CreateWrapper(IReadOnlyCollection<SearchIndexEntry> searchIndices)
+        {
+            return new FhirCosmosResourceWrapper(
+                "id",
+                "version",
+                "Patient",
+                null,
+                null,
+                DateTimeOffset.UtcNow,
+                false,
+                false,
+                searchIndices,
+                null,
+                null);
+        }
+
+        private static IReadOnlyCollection<SearchIndexEntry> CreateMixedSearchIndices()
+        {
+            return new[]
+            {
+                new SearchIndexEntry(new SearchParameterInfo("string", "string"), new StringSearchValue("string value")),
+                new SearchIndexEntry(new SearchParameterInfo("token", "token"), new TokenSearchValue("system", "code", "text")),
+                new SearchIndexEntry(new SearchParameterInfo("number", "number"), new NumberSearchValue(1.25m)),
+                new SearchIndexEntry(new SearchParameterInfo("vector", "vector"), new VectorSearchValue("source text", 0)),
+            };
+        }
+
+        private static void AssertSerializedSearchIndices(JObject serializedWrapper)
+        {
+            JArray serializedSearchIndices = Assert.IsType<JArray>(serializedWrapper[KnownResourceWrapperProperties.SearchIndices]);
+            Assert.Equal(
+                new[] { "string", "token", "number" },
+                serializedSearchIndices.Children<JObject>().Select(searchIndex => (string)searchIndex["p"]));
         }
     }
 }
