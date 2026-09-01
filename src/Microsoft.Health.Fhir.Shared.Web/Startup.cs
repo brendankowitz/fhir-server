@@ -75,6 +75,7 @@ namespace Microsoft.Health.Fhir.Web
                 .AddContainerRegistryTokenProvider()
                 .AddContainerRegistryAccessValidator()
                 .AddAzureIntegrationDataStoreClient(Configuration)
+                .AddVectorSearchEmbeddingClient()
                 .AddConvertData()
                 .AddMemberMatch();
             services.AddDevelopmentIdentityProvider(Configuration);

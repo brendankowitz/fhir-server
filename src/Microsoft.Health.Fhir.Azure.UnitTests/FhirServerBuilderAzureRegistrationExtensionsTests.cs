@@ -7,12 +7,16 @@ using System;
 using Azure.Storage.Blobs;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Microsoft.Health.Fhir.Azure.ContainerRegistry;
 using Microsoft.Health.Fhir.Azure.ExportDestinationClient;
 using Microsoft.Health.Fhir.Azure.IntegrationDataStore;
+using Microsoft.Health.Fhir.Azure.VectorSearch;
+using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Features.Operations;
 using Microsoft.Health.Fhir.Core.Features.Operations.ConvertData;
 using Microsoft.Health.Fhir.Core.Features.Operations.Export.ExportDestinationClient;
+using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
 using Microsoft.Health.Fhir.Core.Registration;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Test.Utilities;
@@ -215,6 +219,86 @@ namespace Microsoft.Health.Fhir.Azure.UnitTests
             Assert.NotNull(result);
             Assert.Same(_fhirServerBuilder, result);
             Assert.Contains(_services, s => s.ServiceType == typeof(IIntegrationDataStoreClientInitializer) && s.ImplementationType == typeof(AzureConnectionStringClientInitializerV2));
+        }
+
+        [Fact]
+        public void GivenNullBuilder_WhenAddingVectorSearchEmbeddingClient_ThenThrowsArgumentNullException()
+        {
+            // Arrange & Act & Assert
+            Assert.Throws<ArgumentNullException>(() => FhirServerBuilderAzureRegistrationExtensions.AddVectorSearchEmbeddingClient(null));
+        }
+
+        [Fact]
+        public void GivenValidBuilder_WhenAddingVectorSearchEmbeddingClient_ThenReturnsSameBuilder()
+        {
+            // Arrange & Act
+            var result = _fhirServerBuilder.AddVectorSearchEmbeddingClient();
+
+            // Assert
+            Assert.Same(_fhirServerBuilder, result);
+            Assert.Contains(_services, s => s.ServiceType == typeof(IEmbeddingClient));
+        }
+
+        [Fact]
+        public void GivenDisabledVectorSearch_WhenResolvingEmbeddingClient_ThenReturnsNotSupportedEmbeddingClient()
+        {
+            // Arrange
+            _services.AddSingleton(Options.Create(new CoreFeatureConfiguration
+            {
+                VectorSearch = new VectorSearchConfiguration { Enabled = false },
+            }));
+            _fhirServerBuilder.AddVectorSearchEmbeddingClient();
+            ServiceProvider provider = _services.BuildServiceProvider();
+
+            // Act
+            IEmbeddingClient client = provider.GetRequiredService<IEmbeddingClient>();
+
+            // Assert
+            Assert.IsType<NotSupportedEmbeddingClient>(client);
+        }
+
+        [Fact]
+        public void GivenEnabledVectorSearch_WhenResolvingEmbeddingClient_ThenReturnsSuspendableEmbeddingClient()
+        {
+            // Arrange
+            _services.AddSingleton(Options.Create(new CoreFeatureConfiguration
+            {
+                VectorSearch = new VectorSearchConfiguration
+                {
+                    Enabled = true,
+                    EmbeddingEndpoint = new Uri("https://example.invalid/"),
+                    EmbeddingDeploymentName = "embedding-deployment",
+                },
+            }));
+            _fhirServerBuilder.AddVectorSearchEmbeddingClient();
+            ServiceProvider provider = _services.BuildServiceProvider();
+
+            // Act
+            IEmbeddingClient client = provider.GetRequiredService<IEmbeddingClient>();
+
+            // Assert
+            Assert.IsType<SuspendableEmbeddingClient>(client);
+        }
+
+        [Fact]
+        public void GivenVectorSearchEmbeddingClientRegistration_WhenResolvingTwice_ThenItIsSingleton()
+        {
+            // Arrange
+            _services.AddSingleton(Options.Create(new CoreFeatureConfiguration
+            {
+                VectorSearch = new VectorSearchConfiguration { Enabled = false },
+            }));
+            _fhirServerBuilder.AddVectorSearchEmbeddingClient();
+            ServiceDescriptor descriptor = Assert.Single(_services, s => s.ServiceType == typeof(IEmbeddingClient));
+            ServiceProvider provider = _services.BuildServiceProvider();
+
+            // Act
+            IEmbeddingClient first = provider.GetRequiredService<IEmbeddingClient>();
+            IEmbeddingClient second = provider.GetRequiredService<IEmbeddingClient>();
+
+            // Assert
+            Assert.Equal(ServiceLifetime.Singleton, descriptor.Lifetime);
+            Assert.Same(first, second);
         }
 
         private class TestFhirServerBuilder : IFhirServerBuilder

@@ -502,6 +502,15 @@ namespace Microsoft.Health.Fhir.Core {
         }
 
         /// <summary>
+        ///   Looks up a localized string similar to Vector search is not enabled on this server..
+        /// </summary>
+        internal static string VectorSearchNotEnabled {
+            get {
+                return ResourceManager.GetString("VectorSearchNotEnabled", resourceCulture);
+            }
+        }
+
+        /// <summary>
         ///   Looks up a localized string similar to Error validating roles:
         ///{0}.
         /// </summary>

@@ -6,14 +6,18 @@
 using Azure.Storage.Blobs;
 using EnsureThat;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Microsoft.Health.Extensions.DependencyInjection;
 using Microsoft.Health.Fhir.Azure.ContainerRegistry;
 using Microsoft.Health.Fhir.Azure.ExportDestinationClient;
 using Microsoft.Health.Fhir.Azure.IntegrationDataStore;
+using Microsoft.Health.Fhir.Azure.VectorSearch;
 using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Features.Operations;
 using Microsoft.Health.Fhir.Core.Features.Operations.ConvertData;
 using Microsoft.Health.Fhir.Core.Features.Operations.Export.ExportDestinationClient;
+using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
 using Microsoft.Health.Fhir.Core.Registration;
 
 namespace Microsoft.Health.Fhir.Azure
@@ -83,6 +87,34 @@ namespace Microsoft.Health.Fhir.Azure
             fhirServerBuilder.Services.Add<BaseContainerRegistryAccessValidator>()
                 .Transient()
                 .AsService<IContainerRegistryAccessValidator>();
+
+            return fhirServerBuilder;
+        }
+
+        /// <summary>
+        /// Adds the vector search embedding client.
+        /// </summary>
+        /// <param name="fhirServerBuilder">Service builder for FHIR server.</param>
+        /// <returns>The service builder for FHIR server.</returns>
+        public static IFhirServerBuilder AddVectorSearchEmbeddingClient(this IFhirServerBuilder fhirServerBuilder)
+        {
+            EnsureArg.IsNotNull(fhirServerBuilder, nameof(fhirServerBuilder));
+
+            fhirServerBuilder.Services.AddSingleton(sp =>
+                Options.Create(sp.GetRequiredService<IOptions<CoreFeatureConfiguration>>().Value.VectorSearch));
+            fhirServerBuilder.Services.AddSingleton<AzureAIFoundryEmbeddingClient>();
+            fhirServerBuilder.Services.AddSingleton<IEmbeddingClient>(sp =>
+            {
+                IOptions<CoreFeatureConfiguration> coreFeatures = sp.GetRequiredService<IOptions<CoreFeatureConfiguration>>();
+                if (!coreFeatures.Value.VectorSearch.Enabled)
+                {
+                    return new NotSupportedEmbeddingClient();
+                }
+
+                return new SuspendableEmbeddingClient(
+                    sp.GetRequiredService<AzureAIFoundryEmbeddingClient>(),
+                    coreFeatures);
+            });
 
             return fhirServerBuilder;
         }
