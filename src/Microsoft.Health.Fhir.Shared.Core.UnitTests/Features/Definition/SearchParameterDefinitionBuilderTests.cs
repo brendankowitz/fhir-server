@@ -170,7 +170,9 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Definition
             void Act() => BuildFromFixture(fixture);
 
             // Assert
-            Assert.Throws<InvalidDefinitionException>(Act);
+            InvalidDefinitionException exception = Assert.Throws<InvalidDefinitionException>(Act);
+            Assert.Contains("maxInputTokens", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("notanumber", exception.Message, StringComparison.Ordinal);
         }
 
         [Fact]
