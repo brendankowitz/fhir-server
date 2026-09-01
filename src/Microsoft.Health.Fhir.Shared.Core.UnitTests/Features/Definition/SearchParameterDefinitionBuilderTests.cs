@@ -9,13 +9,14 @@ using System.Collections.Generic;
 using System.Linq;
 using Hl7.Fhir.ElementModel;
 using Hl7.Fhir.Model;
-using Hl7.Fhir.Serialization;
+using Hl7.FhirPath;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Health.Fhir.Core.Exceptions;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Definition.BundleWrappers;
+using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
 using Microsoft.Health.Fhir.Core.Models;
@@ -32,8 +33,6 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Definition
     [Trait(Traits.Category, Categories.Search)]
     public class SearchParameterDefinitionBuilderTests
     {
-        private readonly FhirJsonParser _jsonParser = new FhirJsonParser();
-
         private readonly string _invalidEntriesFile = "SearchParametersWithInvalidEntries.json";
         private readonly string _invalidDefinitionsFile = "SearchParametersWithInvalidDefinitions.json";
         private readonly string _validEntriesFile = "SearchParameters.json";
@@ -41,11 +40,109 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Definition
         private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, ConcurrentQueue<string>>> _resourceTypeDictionary;
         private readonly ISearchParameterComparer<SearchParameterInfo> _searchParameterComparer;
 
+        private const string SearchParameterVectorNoteFixture = """
+            {
+              "resourceType": "SearchParameter",
+              "id": "Observation-clinical-note",
+              "url": "http://example.org/fhir/SearchParameter/Observation-clinical-note",
+              "name": "clinicalNote",
+              "code": "clinicalNote",
+              "status": "active",
+              "base": ["Observation"],
+              "type": "special",
+              "expression": "Observation.note.text",
+              "extension": [{
+                "url": "http://microsoft.com/fhir/StructureDefinition/vector-search-config",
+                "extension": [
+                  { "url": "kind", "valueCode": "vector" },
+                  { "url": "extractionPolicy", "valueCode": "concatenate" },
+                  { "url": "maxInputTokens", "valueInteger": 8000 }
+                ]
+              }]
+            }
+            """;
+
+        private const string SearchParameterNearFixture = """
+            {
+              "resourceType": "SearchParameter",
+              "id": "Observation-near",
+              "url": "http://example.org/fhir/SearchParameter/Observation-near",
+              "name": "near",
+              "code": "near",
+              "status": "active",
+              "base": ["Observation"],
+              "type": "special",
+              "expression": "Observation.note.text"
+            }
+            """;
+
+        private const string SearchParameterVectorUnknownPolicyFixture = """
+            {
+              "resourceType": "SearchParameter",
+              "id": "Observation-invalid-clinical-note",
+              "url": "http://example.org/fhir/SearchParameter/Observation-invalid-clinical-note",
+              "name": "invalidClinicalNote",
+              "code": "invalidClinicalNote",
+              "status": "active",
+              "base": ["Observation"],
+              "type": "special",
+              "expression": "Observation.note.text",
+              "extension": [{
+                "url": "http://microsoft.com/fhir/StructureDefinition/vector-search-config",
+                "extension": [
+                  { "url": "extractionPolicy", "valueCode": "invalid" }
+                ]
+              }]
+            }
+            """;
+
         public SearchParameterDefinitionBuilderTests()
         {
             _uriDictionary = new ConcurrentDictionary<string, SearchParameterInfo>();
             _resourceTypeDictionary = new ConcurrentDictionary<string, ConcurrentDictionary<string, ConcurrentQueue<string>>>();
             _searchParameterComparer = new SearchParameterComparer(Substitute.For<ILogger<ISearchParameterComparer<SearchParameterInfo>>>());
+        }
+
+        [Fact]
+        public void GivenSearchParameterWithVectorConfigExtension_WhenBuilt_VectorConfigIsPopulated()
+        {
+            // Arrange
+            const string fixture = SearchParameterVectorNoteFixture;
+
+            // Act
+            SearchParameterInfo info = BuildFromFixture(fixture);
+
+            // Assert
+            Assert.NotNull(info.VectorConfig);
+            Assert.Equal(VectorTextExtractionPolicy.Concatenate, info.VectorConfig.ExtractionPolicy);
+            Assert.Equal(8000, info.VectorConfig.MaxInputTokens);
+            Assert.Equal(Microsoft.Health.Fhir.ValueSets.SearchParamType.Special, info.Type);
+        }
+
+        [Fact]
+        public void GivenSpecialSearchParameterWithoutExtension_VectorConfigIsNull()
+        {
+            // Arrange
+            const string fixture = SearchParameterNearFixture;
+
+            // Act
+            SearchParameterInfo info = BuildFromFixture(fixture);
+
+            // Assert
+            Assert.Null(info.VectorConfig);
+        }
+
+        [Fact]
+        public void GivenSearchParameterWithUnknownVectorExtractionPolicy_WhenBuilt_ThenInvalidDefinitionExceptionIsThrown()
+        {
+            // Arrange
+            const string fixture = SearchParameterVectorUnknownPolicyFixture;
+
+            // Act
+            void Act() => BuildFromFixture(fixture);
+
+            // Assert
+            Assert.Throws<InvalidDefinitionException>(Act);
         }
 
         [Theory]
@@ -360,6 +457,25 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Definition
                 issue.Severity == IssueSeverity.Fatal.ToString() &&
                 issue.Code == IssueType.Invalid.ToString() &&
                 issue.Diagnostics.StartsWith(expectedIssue));
+        }
+
+        private SearchParameterInfo BuildFromFixture(string fixture)
+        {
+            // Arrange
+            var rawResource = new RawResource(fixture, FhirResourceFormat.Json, true);
+            ITypedElement searchParameter = ModelInfoProvider.Instance.ToTypedElement(rawResource);
+
+            // Act
+            SearchParameterDefinitionBuilder.Build(
+                new List<ITypedElement> { searchParameter },
+                _uriDictionary,
+                _resourceTypeDictionary,
+                ModelInfoProvider.Instance,
+                _searchParameterComparer,
+                NullLogger.Instance);
+
+            // Assert
+            return _uriDictionary[searchParameter.Scalar("url")?.ToString()];
         }
 
         private void ValidateSearchParameters(

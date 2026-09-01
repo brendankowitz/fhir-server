@@ -115,7 +115,44 @@ namespace Microsoft.Health.Fhir.Core.Features.Definition
 
         private static SearchParameterInfo GetOrCreateSearchParameterInfo(SearchParameterWrapper searchParameter, ConcurrentDictionary<string, SearchParameterInfo> uriDictionary)
         {
-            return uriDictionary.GetOrAdd(searchParameter.Url, _ => new SearchParameterInfo(searchParameter));
+            return uriDictionary.GetOrAdd(searchParameter.Url, _ => new SearchParameterInfo(searchParameter)
+            {
+                VectorConfig = GetVectorSearchParameterConfig(searchParameter.SearchParameter),
+            });
+        }
+
+        private static VectorSearchParameterConfig GetVectorSearchParameterConfig(ITypedElement searchParameter)
+        {
+            ITypedElement vectorConfigExtension = searchParameter.Select("extension")
+                .FirstOrDefault(extension => string.Equals(extension.Scalar("url")?.ToString(), VectorSearchParameterConfig.ExtensionUrl, StringComparison.Ordinal));
+
+            if (vectorConfigExtension == null)
+            {
+                return null;
+            }
+
+            var vectorConfig = new VectorSearchParameterConfig();
+            foreach (ITypedElement extension in vectorConfigExtension.Select("extension"))
+            {
+                string extensionUrl = extension.Scalar("url")?.ToString();
+                if (string.Equals(extensionUrl, "extractionPolicy", StringComparison.Ordinal))
+                {
+                    string extractionPolicyCode = extension.Scalar("value")?.ToString();
+                    if (!Enum.TryParse(extractionPolicyCode, ignoreCase: true, out VectorTextExtractionPolicy extractionPolicy) ||
+                        !Enum.IsDefined(extractionPolicy))
+                    {
+                        throw new InvalidDefinitionException($"SearchParameter[{searchParameter.Scalar("url")}].extension extractionPolicy '{extractionPolicyCode}' is invalid.");
+                    }
+
+                    vectorConfig.ExtractionPolicy = extractionPolicy;
+                }
+                else if (string.Equals(extensionUrl, "maxInputTokens", StringComparison.Ordinal))
+                {
+                    vectorConfig.MaxInputTokens = Convert.ToInt32(extension.Scalar("value"), CultureInfo.InvariantCulture);
+                }
+            }
+
+            return vectorConfig;
         }
 
         private static List<(string ResourceType, SearchParameterInfo SearchParameter)> ValidateAndGetFlattenedList(

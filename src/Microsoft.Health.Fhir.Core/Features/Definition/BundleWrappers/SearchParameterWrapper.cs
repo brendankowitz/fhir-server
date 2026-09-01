@@ -25,12 +25,14 @@ namespace Microsoft.Health.Fhir.Core.Features.Definition.BundleWrappers
         private readonly Lazy<IReadOnlyList<string>> _target;
         private readonly Lazy<string> _description;
         private Lazy<string> _type;
+        private readonly ITypedElement _searchParameter;
 
         public SearchParameterWrapper(ITypedElement searchParameter)
         {
             EnsureArg.IsNotNull(searchParameter, nameof(searchParameter));
             EnsureArg.Is(KnownResourceTypes.SearchParameter, searchParameter.InstanceType, StringComparison.Ordinal, nameof(searchParameter));
 
+            _searchParameter = searchParameter;
             _name = new Lazy<string>(() => searchParameter.Scalar("name")?.ToString());
             _code = new Lazy<string>(() => searchParameter.Scalar("code")?.ToString());
             _description = new Lazy<string>(() => searchParameter.Scalar("description")?.ToString());
@@ -62,5 +64,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Definition.BundleWrappers
         public IReadOnlyList<string> Target => _target.Value;
 
         public IReadOnlyList<ITypedElement> Component => _component.Value;
+
+        internal ITypedElement SearchParameter => _searchParameter;
     }
 }

@@ -6,6 +6,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.Health.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Registry;
 using Microsoft.Health.Fhir.Core.Models;
@@ -121,6 +122,46 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
             string hash2 = new List<SearchParameterInfo>() { param2 }.CalculateSearchParameterHash();
 
             Assert.Equal(hash1, hash2);
+        }
+
+        [Fact]
+        public void GivenSearchParameterWithoutVectorConfig_WhenCalculateSearchParameterHash_ThenHashMatchesExistingHash()
+        {
+            // Arrange
+            var param = GenerateSearchParameterInfo(_paramUri1, "patient");
+            string expectedHash = "https://localhost/searchparam1Stringexpressionpatient".ComputeHash();
+
+            // Act
+            string actualHash = new List<SearchParameterInfo> { param }.CalculateSearchParameterHash();
+
+            // Assert
+            Assert.Equal(expectedHash, actualHash);
+        }
+
+        [Fact]
+        public void GivenSearchParametersWithDifferentVectorConfig_WhenCalculateSearchParameterHash_ThenHashesAreDifferent()
+        {
+            // Arrange
+            var firstValueParameter = GenerateSearchParameterInfo(_paramUri1, "patient");
+            firstValueParameter.VectorConfig = new VectorSearchParameterConfig
+            {
+                ExtractionPolicy = VectorTextExtractionPolicy.FirstValue,
+                MaxInputTokens = 8000,
+            };
+
+            var perValueRowParameter = GenerateSearchParameterInfo(_paramUri1, "patient");
+            perValueRowParameter.VectorConfig = new VectorSearchParameterConfig
+            {
+                ExtractionPolicy = VectorTextExtractionPolicy.PerValueRow,
+                MaxInputTokens = 8000,
+            };
+
+            // Act
+            string firstValueHash = new List<SearchParameterInfo> { firstValueParameter }.CalculateSearchParameterHash();
+            string perValueRowHash = new List<SearchParameterInfo> { perValueRowParameter }.CalculateSearchParameterHash();
+
+            // Assert
+            Assert.NotEqual(firstValueHash, perValueRowHash);
         }
 
         private SearchParameterInfo GenerateSearchParameterInfo(Uri uri, string resourceType, SortParameterStatus sortParameterStatus = SortParameterStatus.Disabled, SearchParameterStatus searchParameterStatus = SearchParameterStatus.Enabled)

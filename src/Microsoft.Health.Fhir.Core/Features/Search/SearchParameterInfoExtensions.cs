@@ -20,7 +20,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         /// Given a list of <see cref="SearchParameterInfo"/> calculates a hash using the
         /// <see cref="SearchParameterInfo.Url"/>, <see cref="SearchParameterInfo.Type"/>,
         /// <see cref="SearchParameterInfo.Expression"/>, <see cref="SearchParameterInfo.TargetResourceTypes"/>, and
-        /// <see cref="SearchParameterInfo.BaseResourceTypes"/>, <see cref="SearchParameterInfo.SearchParameterStatus"/>
+        /// <see cref="SearchParameterInfo.BaseResourceTypes"/>, <see cref="SearchParameterInfo.VectorConfig"/>, and
+        /// <see cref="SearchParameterInfo.SearchParameterStatus"/>
         /// values of each component. The same collection of search parameter infos (irrespective of their order in the input)
         /// will return the same hash.
         /// </summary>
@@ -51,6 +52,11 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                     searchParamInfo.BaseResourceTypes.Any())
                 {
                     sb.Append(string.Join(null, searchParamInfo.BaseResourceTypes.OrderBy(s => s)));
+                }
+
+                if (searchParamInfo.VectorConfig != null)
+                {
+                    sb.Append(searchParamInfo.VectorConfig.ExtractionPolicy).Append(searchParamInfo.VectorConfig.MaxInputTokens);
                 }
             }
 

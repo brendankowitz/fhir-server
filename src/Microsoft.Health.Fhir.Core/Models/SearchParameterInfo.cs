@@ -126,6 +126,11 @@ namespace Microsoft.Health.Fhir.Core.Models
         public IReadOnlyList<SearchParameterComponentInfo> Component { get; }
 
         /// <summary>
+        /// Gets or sets the vector search indexing configuration, when this is a vector-enabled search parameter.
+        /// </summary>
+        public VectorSearchParameterConfig VectorConfig { get; set; }
+
+        /// <summary>
         /// Current state of the search parameter in the search parameter registry
         /// </summary>
         public SearchParameterStatus SearchParameterStatus { get; set; }
