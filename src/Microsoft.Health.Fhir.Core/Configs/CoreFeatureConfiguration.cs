@@ -41,6 +41,11 @@ namespace Microsoft.Health.Fhir.Core.Configs
         public FhirSdkProvider FhirSdkProvider { get; set; } = FhirSdkProvider.Firely;
 
         /// <summary>
+        /// Gets or sets the vector search configuration.
+        /// </summary>
+        public VectorSearchConfiguration VectorSearch { get; set; } = new VectorSearchConfiguration();
+
+        /// <summary>
         /// Gets or sets the maximum value for _count in search.
         /// </summary>
         public int MaxItemCountPerSearch { get; set; } = 1000;
