@@ -138,17 +138,31 @@ namespace Microsoft.Health.Fhir.Core.Features.Definition
                 if (string.Equals(extensionUrl, "extractionPolicy", StringComparison.Ordinal))
                 {
                     string extractionPolicyCode = extension.Scalar("value")?.ToString();
-                    if (!Enum.TryParse(extractionPolicyCode, ignoreCase: true, out VectorTextExtractionPolicy extractionPolicy) ||
-                        !Enum.IsDefined(extractionPolicy))
+                    switch (extractionPolicyCode)
                     {
-                        throw new InvalidDefinitionException($"SearchParameter[{searchParameter.Scalar("url")}].extension extractionPolicy '{extractionPolicyCode}' is invalid.");
+                        case "firstValue":
+                            vectorConfig.ExtractionPolicy = VectorTextExtractionPolicy.FirstValue;
+                            break;
+                        case "concatenate":
+                            vectorConfig.ExtractionPolicy = VectorTextExtractionPolicy.Concatenate;
+                            break;
+                        case "perValueRow":
+                            vectorConfig.ExtractionPolicy = VectorTextExtractionPolicy.PerValueRow;
+                            break;
+                        default:
+                            throw new InvalidDefinitionException($"SearchParameter[{searchParameter.Scalar("url")}].extension extractionPolicy '{extractionPolicyCode}' is invalid.");
                     }
-
-                    vectorConfig.ExtractionPolicy = extractionPolicy;
                 }
                 else if (string.Equals(extensionUrl, "maxInputTokens", StringComparison.Ordinal))
                 {
-                    vectorConfig.MaxInputTokens = Convert.ToInt32(extension.Scalar("value"), CultureInfo.InvariantCulture);
+                    string maxInputTokensText = extension.Scalar("value")?.ToString();
+                    if (!int.TryParse(maxInputTokensText, NumberStyles.Integer, CultureInfo.InvariantCulture, out int maxInputTokens) ||
+                        maxInputTokens <= 0)
+                    {
+                        throw new InvalidDefinitionException($"SearchParameter[{searchParameter.Scalar("url")}].extension maxInputTokens '{maxInputTokensText}' is invalid.");
+                    }
+
+                    vectorConfig.MaxInputTokens = maxInputTokens;
                 }
             }
 

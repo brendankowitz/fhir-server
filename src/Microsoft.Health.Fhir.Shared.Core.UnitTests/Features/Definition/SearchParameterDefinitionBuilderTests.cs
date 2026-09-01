@@ -146,6 +146,61 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Definition
         }
 
         [Theory]
+        [InlineData("1")]
+        [InlineData("PERVALUEROW")]
+        public void GivenSearchParameterWithInvalidVectorExtractionPolicyCode_WhenBuilt_ThenInvalidDefinitionExceptionIsThrown(string extractionPolicy)
+        {
+            // Arrange
+            string fixture = SearchParameterVectorNoteFixture.Replace("\"concatenate\"", $"\"{extractionPolicy}\"", StringComparison.Ordinal);
+
+            // Act
+            void Act() => BuildFromFixture(fixture);
+
+            // Assert
+            Assert.Throws<InvalidDefinitionException>(Act);
+        }
+
+        [Fact]
+        public void GivenSearchParameterWithNonNumericVectorMaxInputTokens_WhenBuilt_ThenInvalidDefinitionExceptionIsThrown()
+        {
+            // Arrange
+            string fixture = SearchParameterVectorNoteFixture.Replace("\"valueInteger\": 8000", "\"valueString\": \"notanumber\"", StringComparison.Ordinal);
+
+            // Act
+            void Act() => BuildFromFixture(fixture);
+
+            // Assert
+            Assert.Throws<InvalidDefinitionException>(Act);
+        }
+
+        [Fact]
+        public void GivenSearchParameterWithNonPositiveVectorMaxInputTokens_WhenBuilt_ThenInvalidDefinitionExceptionIsThrown()
+        {
+            // Arrange
+            string fixture = SearchParameterVectorNoteFixture.Replace("8000", "0", StringComparison.Ordinal);
+
+            // Act
+            void Act() => BuildFromFixture(fixture);
+
+            // Assert
+            Assert.Throws<InvalidDefinitionException>(Act);
+        }
+
+        [Fact]
+        public void GivenSearchParameterWithPerValueRowVectorExtractionPolicy_WhenBuilt_VectorConfigIsPopulated()
+        {
+            // Arrange
+            string fixture = SearchParameterVectorNoteFixture.Replace("concatenate", "perValueRow", StringComparison.Ordinal);
+
+            // Act
+            SearchParameterInfo info = BuildFromFixture(fixture);
+
+            // Assert
+            Assert.NotNull(info.VectorConfig);
+            Assert.Equal(VectorTextExtractionPolicy.PerValueRow, info.VectorConfig.ExtractionPolicy);
+        }
+
+        [Theory]
         [InlineData("SearchParametersWithInvalidBase.json", "SearchParameter[http://hl7.org/fhir/SearchParameter/DomainResource-text].resource.base is not defined.")]
         public void GivenAnInvalidSearchParameterDefinitionFile_WhenBuilt_ThenInvalidDefinitionExceptionShouldBeThrown(string fileName, string expectedIssue)
         {
