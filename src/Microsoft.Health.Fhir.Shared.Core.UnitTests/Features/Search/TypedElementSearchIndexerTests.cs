@@ -172,6 +172,19 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
         }
 
         [Fact]
+        public void GivenMaxTokensThatOverflowIntMultiplication_WhenTruncate_ThenReturnsOriginalText()
+        {
+           // Arrange
+           const string text = "short text";
+
+           // Act
+           string truncatedText = VectorSearchValue.Truncate(text, int.MaxValue);
+
+           // Assert
+           Assert.Equal(text, truncatedText);
+        }
+
+        [Fact]
         public void GivenOrdinarySearchParameter_WhenExtract_ThenUsesNormalConverterPath()
         {
            var observationResource = new Observation

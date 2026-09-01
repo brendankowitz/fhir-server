@@ -68,8 +68,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.SearchValues
             EnsureArg.IsNotNull(text, nameof(text));
             EnsureArg.IsGte(maxTokens, 0, nameof(maxTokens));
 
-            int maxCharacters = maxTokens * 4;
-            return text.Length <= maxCharacters ? text : text.Substring(0, maxCharacters);
+            long maxCharacters = (long)maxTokens * 4;
+            return text.Length <= maxCharacters ? text : text.Substring(0, (int)maxCharacters);
         }
 
         /// <summary>
