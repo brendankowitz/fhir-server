@@ -493,6 +493,15 @@ namespace Microsoft.Health.Fhir.Core {
         }
         
         /// <summary>
+        ///   Looks up a localized string similar to The embedding service is currently unavailable..
+        /// </summary>
+        internal static string EmbeddingUnavailable {
+            get {
+                return ResourceManager.GetString("EmbeddingUnavailable", resourceCulture);
+            }
+        }
+
+        /// <summary>
         ///   Looks up a localized string similar to Error validating roles:
         ///{0}.
         /// </summary>

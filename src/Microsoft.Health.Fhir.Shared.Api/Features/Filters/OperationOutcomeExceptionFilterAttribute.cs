@@ -28,6 +28,7 @@ using Microsoft.Health.Fhir.Core.Features.Operations;
 using Microsoft.Health.Fhir.Core.Features.Operations.ConvertData.Models;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
+using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
 using Microsoft.Health.Fhir.Core.Features.Validation;
 using Microsoft.Net.Http.Headers;
 
@@ -99,6 +100,7 @@ namespace Microsoft.Health.Fhir.Api.Features.Filters
                         operationOutcomeResult.StatusCode = HttpStatusCode.MethodNotAllowed;
                         break;
                     case OpenIdConfigurationException _:
+                    case EmbeddingUnavailableException _:
                         operationOutcomeResult.StatusCode = HttpStatusCode.ServiceUnavailable;
                         break;
                     case ResourceNotValidException _:

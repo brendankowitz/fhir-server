@@ -193,6 +193,9 @@
   <data name="DuplicateRoleNames" xml:space="preserve">
     <value>There are {0} roles with the name '{1}'</value>
   </data>
+  <data name="EmbeddingUnavailable" xml:space="preserve">
+    <value>The embedding service is currently unavailable.</value>
+  </data>
   <data name="ErrorValidatingRoles" xml:space="preserve">
     <value>Error validating roles:
 {0}</value>
