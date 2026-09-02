@@ -446,7 +446,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
                 ModelInfoProvider.Instance,
                 Substitute.For<RequestContextAccessor<IFhirRequestContext>>(),
                 Substitute.For<IImportErrorSerializer>(),
-                storeClient);
+                storeClient,
+                Substitute.For<IVectorSearchCapabilityProvider>());
 
             return dataStore;
         }
