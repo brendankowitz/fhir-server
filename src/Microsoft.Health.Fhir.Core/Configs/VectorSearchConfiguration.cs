@@ -60,6 +60,13 @@ namespace Microsoft.Health.Fhir.Core.Configs
         public int EmbeddingDimensions { get; set; } = 1536;
 
         /// <summary>
+        /// Version tag recorded alongside the model name in dbo.EmbeddingModel. Bump this when the
+        /// underlying model behind <see cref="EmbeddingDeploymentName"/> changes so that previously
+        /// persisted embeddings remain attributable to the model that produced them.
+        /// </summary>
+        public string EmbeddingModelVersion { get; set; } = "1";
+
+        /// <summary>
         /// Gets or sets the default number of nearest neighbors to return.
         /// </summary>
         public int DefaultK { get; set; } = 200;

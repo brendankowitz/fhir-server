@@ -196,6 +196,10 @@ namespace Microsoft.Extensions.DependencyInjection
                 .Singleton()
                 .AsSelf();
 
+            services.Add<VectorSearchCapabilityProvider>()
+                .Singleton()
+                .AsService<IVectorSearchCapabilityProvider>();
+
             services.AddSingleton<ValueCache<CustomerKeyHealth>>();
 
             services.Add<SqlStatusReporter>()
