@@ -26,6 +26,7 @@ using Microsoft.Health.Fhir.Core.Features.Persistence.Orchestration;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
 using Microsoft.Health.Fhir.Core.Features.Search.Registry;
+using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Core.UnitTests.Extensions;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema;
@@ -430,6 +431,13 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
 
             var sqlConnectionWrapperFactory = new SqlConnectionWrapperFactory(sqlTransactionHandler, sqlConnectionBuilder, sqlRetryLogicBaseProvider, Options.Create(sqlServerDataStoreConfiguration));
 
+            var vectorSearchCapabilityProvider = Substitute.For<IVectorSearchCapabilityProvider>();
+            var vectorEmbeddingEnricher = new VectorEmbeddingEnricher(
+                Substitute.For<IEmbeddingClient>(),
+                vectorSearchCapabilityProvider,
+                Options.Create(new VectorSearchConfiguration()),
+                Substitute.For<RequestContextAccessor<IFhirRequestContext>>(),
+                NullLogger<VectorEmbeddingEnricher>.Instance);
             var dataStore = new SqlServerFhirDataStore(
                 model,
                 new SearchParameterToSearchValueTypeMap(),
@@ -447,7 +455,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
                 Substitute.For<RequestContextAccessor<IFhirRequestContext>>(),
                 Substitute.For<IImportErrorSerializer>(),
                 storeClient,
-                Substitute.For<IVectorSearchCapabilityProvider>());
+                vectorSearchCapabilityProvider,
+                vectorEmbeddingEnricher);
 
             return dataStore;
         }

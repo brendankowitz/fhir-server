@@ -70,6 +70,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
         private readonly IModelInfoProvider _modelInfoProvider;
         private readonly IImportErrorSerializer _importErrorSerializer;
         private readonly IVectorSearchCapabilityProvider _vectorSearchCapabilityProvider;
+        private readonly VectorEmbeddingEnricher _vectorEmbeddingEnricher;
         private static CachedParameter<SqlServerFhirDataStore> _ignoreInputLastUpdated;
         private static CachedParameter<SqlServerFhirDataStore> _ignoreInputVersion;
         private static CachedParameter<SqlServerFhirDataStore> _rawResourceDeduping;
@@ -90,7 +91,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
             RequestContextAccessor<IFhirRequestContext> requestContextAccessor,
             IImportErrorSerializer importErrorSerializer,
             SqlStoreClient storeClient,
-            IVectorSearchCapabilityProvider vectorSearchCapabilityProvider)
+            IVectorSearchCapabilityProvider vectorSearchCapabilityProvider,
+            VectorEmbeddingEnricher vectorEmbeddingEnricher)
         {
             _model = EnsureArg.IsNotNull(model, nameof(model));
             _searchParameterTypeMap = EnsureArg.IsNotNull(searchParameterTypeMap, nameof(searchParameterTypeMap));
@@ -107,6 +109,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
             _requestContextAccessor = EnsureArg.IsNotNull(requestContextAccessor, nameof(requestContextAccessor));
             _importErrorSerializer = EnsureArg.IsNotNull(importErrorSerializer, nameof(importErrorSerializer));
             _vectorSearchCapabilityProvider = EnsureArg.IsNotNull(vectorSearchCapabilityProvider, nameof(vectorSearchCapabilityProvider));
+            _vectorEmbeddingEnricher = EnsureArg.IsNotNull(vectorEmbeddingEnricher, nameof(vectorEmbeddingEnricher));
 
             _memoryStreamManager = new RecyclableMemoryStreamManager();
 
@@ -153,6 +156,9 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
         {
             const int maxRetries = 30;
             const int defaultRetryDelayInMilliseconds = 1000;
+
+            // Task 5.3 consumes this result for Preference-Applied. $import bypasses this path via MergeInternalAsync.
+            _ = await _vectorEmbeddingEnricher.EnrichAsync(resources, cancellationToken);
 
             var retries = 0;
             while (true)

@@ -30,6 +30,7 @@ using Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers;
 using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
 using Microsoft.Health.Fhir.Core.Features.Search.Registry;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
+using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Core.UnitTests.Extensions;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema;
@@ -243,6 +244,13 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
 
             var importErrorSerializer = new Shared.Core.Features.Operations.Import.ImportErrorSerializer(new Hl7.Fhir.Serialization.FhirJsonSerializer());
 
+            var vectorSearchCapabilityProvider = Substitute.For<IVectorSearchCapabilityProvider>();
+            var vectorEmbeddingEnricher = new VectorEmbeddingEnricher(
+                Substitute.For<IEmbeddingClient>(),
+                vectorSearchCapabilityProvider,
+                Options.Create(new VectorSearchConfiguration()),
+                _fhirRequestContextAccessor,
+                NullLogger<VectorEmbeddingEnricher>.Instance);
             _fhirDataStore = new SqlServerFhirDataStore(
                 sqlServerFhirModel,
                 searchParameterToSearchValueTypeMap,
@@ -258,7 +266,8 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
                 _fhirRequestContextAccessor,
                 importErrorSerializer,
                 new SqlStoreClient(SqlRetryService, NullLogger<SqlStoreClient>.Instance, SchemaInformation),
-                Substitute.For<IVectorSearchCapabilityProvider>());
+                vectorSearchCapabilityProvider,
+                vectorEmbeddingEnricher);
 
             // Create operation data store with real SqlQueueClient for reindex tests
             _sqlServerFhirOperationDataStore = new SqlServerFhirOperationDataStore(sqlQueueClient, NullLoggerFactory.Instance);
