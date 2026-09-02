@@ -26,6 +26,7 @@ CREATE PROCEDURE dbo.MergeResources
    ,@TokenQuantityCompositeSearchParams dbo.TokenQuantityCompositeSearchParamList READONLY
    ,@TokenStringCompositeSearchParams dbo.TokenStringCompositeSearchParamList READONLY
    ,@TokenNumberNumberCompositeSearchParams dbo.TokenNumberNumberCompositeSearchParamList READONLY
+   ,@VectorSearchParams dbo.VectorSearchParamList READONLY
 AS
 set nocount on
 DECLARE @st datetime = getUTCdate()
@@ -135,6 +136,8 @@ BEGIN TRY
       SET @AffectedRows += @@rowcount
       DELETE FROM dbo.StringSearchParam WHERE EXISTS (SELECT * FROM @PreviousSurrogateIds WHERE TypeId = ResourceTypeId AND SurrogateId = ResourceSurrogateId)
       SET @AffectedRows += @@rowcount
+      DELETE FROM dbo.VectorSearchParam WHERE EXISTS (SELECT * FROM @PreviousSurrogateIds WHERE TypeId = ResourceTypeId AND SurrogateId = ResourceSurrogateId)
+      SET @AffectedRows += @@rowcount
       DELETE FROM dbo.UriSearchParam WHERE EXISTS (SELECT * FROM @PreviousSurrogateIds WHERE TypeId = ResourceTypeId AND SurrogateId = ResourceSurrogateId)
       SET @AffectedRows += @@rowcount
       DELETE FROM dbo.NumberSearchParam WHERE EXISTS (SELECT * FROM @PreviousSurrogateIds WHERE TypeId = ResourceTypeId AND SurrogateId = ResourceSurrogateId)
@@ -193,6 +196,12 @@ BEGIN TRY
            ( ResourceTypeId, ResourceSurrogateId, SearchParamId, Text, TextOverflow, IsMin, IsMax )
       SELECT ResourceTypeId, ResourceSurrogateId, SearchParamId, Text, TextOverflow, IsMin, IsMax
         FROM @StringSearchParams
+    SET @AffectedRows += @@rowcount
+
+    INSERT INTO dbo.VectorSearchParam 
+           ( ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, Embedding )
+      SELECT ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, CAST(Embedding AS VECTOR(1536))
+        FROM @VectorSearchParams
     SET @AffectedRows += @@rowcount
 
     INSERT INTO dbo.UriSearchParam 
@@ -299,6 +308,15 @@ BEGIN TRY
         FROM (SELECT TOP (@DummyTop) * FROM @StringSearchParams) A
         WHERE EXISTS (SELECT * FROM @Existing B WHERE B.ResourceTypeId = A.ResourceTypeId AND B.SurrogateId = A.ResourceSurrogateId)
           AND NOT EXISTS (SELECT * FROM dbo.StringSearchParam C WHERE C.ResourceTypeId = A.ResourceTypeId AND C.ResourceSurrogateId = A.ResourceSurrogateId)
+        OPTION (MAXDOP 1, OPTIMIZE FOR (@DummyTop = 1))
+    SET @AffectedRows += @@rowcount
+
+    INSERT INTO dbo.VectorSearchParam 
+           ( ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, Embedding )
+      SELECT ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, CAST(Embedding AS VECTOR(1536))
+        FROM (SELECT TOP (@DummyTop) * FROM @VectorSearchParams) A
+        WHERE EXISTS (SELECT * FROM @Existing B WHERE B.ResourceTypeId = A.ResourceTypeId AND B.SurrogateId = A.ResourceSurrogateId)
+          AND NOT EXISTS (SELECT * FROM dbo.VectorSearchParam C WHERE C.ResourceTypeId = A.ResourceTypeId AND C.ResourceSurrogateId = A.ResourceSurrogateId)
         OPTION (MAXDOP 1, OPTIMIZE FOR (@DummyTop = 1))
     SET @AffectedRows += @@rowcount
 

@@ -19,6 +19,7 @@
     ,@TokenQuantityCompositeSearchParams dbo.TokenQuantityCompositeSearchParamList READONLY
     ,@TokenStringCompositeSearchParams dbo.TokenStringCompositeSearchParamList READONLY
     ,@TokenNumberNumberCompositeSearchParams dbo.TokenNumberNumberCompositeSearchParamList READONLY
+    ,@VectorSearchParams dbo.VectorSearchParamList READONLY
 AS
 set nocount on
 DECLARE @SP varchar(100) = object_name(@@procid)
@@ -55,7 +56,8 @@ BEGIN TRY
             ,@TokenDateTimeCompositeSearchParams = @TokenDateTimeCompositeSearchParams
             ,@TokenQuantityCompositeSearchParams = @TokenQuantityCompositeSearchParams
             ,@TokenStringCompositeSearchParams = @TokenStringCompositeSearchParams
-            ,@TokenNumberNumberCompositeSearchParams = @TokenNumberNumberCompositeSearchParams;
+            ,@TokenNumberNumberCompositeSearchParams = @TokenNumberNumberCompositeSearchParams
+            ,@VectorSearchParams = @VectorSearchParams;
   ELSE
     IF @TransactionId IS NOT NULL
       EXECUTE dbo.MergeResourcesCommitTransaction @TransactionId
