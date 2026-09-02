@@ -13,6 +13,8 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Health.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Configs;
+using Microsoft.Health.Fhir.Core.Extensions;
+using Microsoft.Health.Fhir.Core.Features;
 using Microsoft.Health.Fhir.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
@@ -26,11 +28,6 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
     /// </summary>
     public sealed class VectorEmbeddingEnricher
     {
-        /// <summary>
-        /// The request-context property indicating that synchronous embedding was preferred.
-        /// </summary>
-        public const string SynchronousEmbeddingPreferenceKey = "EmbeddingPersistenceSynchronous";
-
         private readonly IEmbeddingClient _embeddingClient;
         private readonly IVectorSearchCapabilityProvider _capabilityProvider;
         private readonly VectorSearchConfiguration _vectorSearchConfiguration;
@@ -84,7 +81,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
             }
 
             bool syncMode = _vectorSearchConfiguration.EmbeddingPersistenceMode == EmbeddingPersistenceMode.Synchronous;
-            if (!syncMode && !RequestPrefersSynchronous())
+            bool prefersSynchronous = RequestPrefersSynchronous();
+            if (!syncMode && !prefersSynchronous)
             {
                 return false;
             }
@@ -98,6 +96,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
 
             if (pending.Count == 0)
             {
+                ApplySynchronousEmbeddingPreference(prefersSynchronous);
                 return true;
             }
 
@@ -123,6 +122,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                     pending[i].SetEmbedding(embeddings[i]);
                 }
 
+                ApplySynchronousEmbeddingPreference(prefersSynchronous);
                 return true;
             }
             catch (Exception exception) when (!syncMode && !(exception is OperationCanceledException && cancellationToken.IsCancellationRequested))
@@ -134,13 +134,32 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
             }
         }
 
-        private bool RequestPrefersSynchronous()
+        private bool RequestPrefersSynchronous() => _requestContextAccessor.GetPrefersSynchronousEmbedding();
+
+        private void ApplySynchronousEmbeddingPreference(bool prefersSynchronous)
         {
-            // Task 5.3 populates this property from the Prefer header.
-            return _requestContextAccessor.RequestContext?.Properties
-                .TryGetValue(SynchronousEmbeddingPreferenceKey, out object preference) == true
-                && preference is bool prefersSynchronous
-                && prefersSynchronous;
+            if (!prefersSynchronous)
+            {
+                return;
+            }
+
+            IFhirRequestContext fhirRequestContext = _requestContextAccessor.RequestContext;
+            if (fhirRequestContext?.ResponseHeaders == null)
+            {
+                return;
+            }
+
+            try
+            {
+                lock (fhirRequestContext.ResponseHeaders)
+                {
+                    fhirRequestContext.ResponseHeaders[KnownHeaders.PreferenceApplied] = "embedding-persistence=synchronous";
+                }
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(exception, "Error setting the applied embedding persistence preference in response headers.");
+            }
         }
     }
 }

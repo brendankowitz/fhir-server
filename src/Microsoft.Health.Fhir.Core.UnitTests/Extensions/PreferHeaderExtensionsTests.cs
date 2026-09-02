@@ -94,5 +94,79 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Extensions
                 Assert.True(throwException);
             }
         }
+
+        [Theory]
+        [InlineData("embedding-persistence=synchronous")]
+        [InlineData("embedding-persistence=Synchronous")]
+        public void GivenSynchronousEmbeddingPreference_WhenCheckingHeader_ThenReturnsTrue(string preferHeaderValue)
+        {
+            RequestContextAccessor<IFhirRequestContext> requestContextAccessor = CreateAccessor(preferHeaderValue);
+
+            Assert.True(requestContextAccessor.GetPrefersSynchronousEmbedding());
+        }
+
+        [Theory]
+        [InlineData("embedding-persistence=asynchronous")]
+        [InlineData("embedding-persistence=banana")]
+        [InlineData("embedding-persistence=")]
+        public void GivenUnhonoredEmbeddingPreference_WhenCheckingHeader_ThenReturnsFalseWithoutThrowing(string preferHeaderValue)
+        {
+            RequestContextAccessor<IFhirRequestContext> requestContextAccessor = CreateAccessor(preferHeaderValue);
+
+            Assert.False(requestContextAccessor.GetPrefersSynchronousEmbedding());
+        }
+
+        [Fact]
+        public void GivenNoPreferHeader_WhenCheckingSynchronousEmbeddingPreference_ThenReturnsFalse()
+        {
+            RequestContextAccessor<IFhirRequestContext> requestContextAccessor = CreateAccessor(null);
+
+            Assert.False(requestContextAccessor.GetPrefersSynchronousEmbedding());
+        }
+
+        [Fact]
+        public void GivenNoRequestContext_WhenCheckingSynchronousEmbeddingPreference_ThenReturnsFalse()
+        {
+            var requestContextAccessor = Substitute.For<RequestContextAccessor<IFhirRequestContext>>();
+            requestContextAccessor.RequestContext.Returns((IFhirRequestContext)null);
+
+            Assert.False(requestContextAccessor.GetPrefersSynchronousEmbedding());
+        }
+
+        [Fact]
+        public void GivenCoexistingPreferTokens_WhenCheckingHeader_ThenAllPreferencesAreRead()
+        {
+            RequestContextAccessor<IFhirRequestContext> requestContextAccessor = CreateAccessor(
+                "return=representation, handling=strict, embedding-persistence=synchronous");
+
+            Assert.True(requestContextAccessor.GetPrefersSynchronousEmbedding());
+            Assert.Equal(ReturnPreference.Representation, requestContextAccessor.GetReturnPreferenceValue());
+            Assert.Equal(SearchParameterHandling.Strict, requestContextAccessor.GetHandlingHeader());
+        }
+
+        [Fact]
+        public void GivenOnlyUnknownEmbeddingPreference_WhenCheckingOtherPreferences_ThenTheyRemainAbsentWithoutThrowing()
+        {
+            RequestContextAccessor<IFhirRequestContext> requestContextAccessor = CreateAccessor("embedding-persistence=banana");
+
+            Assert.Null(requestContextAccessor.GetReturnPreferenceValue());
+            Assert.Null(requestContextAccessor.GetHandlingHeader());
+        }
+
+        private static RequestContextAccessor<IFhirRequestContext> CreateAccessor(string preferHeaderValue)
+        {
+            var headers = new Dictionary<string, StringValues>();
+            if (preferHeaderValue != null)
+            {
+                headers.Add(KnownHeaders.Prefer, preferHeaderValue);
+            }
+
+            var fhirRequestContext = Substitute.For<IFhirRequestContext>();
+            fhirRequestContext.RequestHeaders.Returns(headers);
+
+            var requestContextAccessor = Substitute.For<RequestContextAccessor<IFhirRequestContext>>();
+            requestContextAccessor.RequestContext.Returns(fhirRequestContext);
+            return requestContextAccessor;
+        }
     }
 }

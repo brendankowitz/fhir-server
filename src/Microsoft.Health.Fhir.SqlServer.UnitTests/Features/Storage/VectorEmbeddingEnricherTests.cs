@@ -10,8 +10,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Primitives;
 using Microsoft.Health.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Configs;
+using Microsoft.Health.Fhir.Core.Features;
 using Microsoft.Health.Fhir.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
@@ -35,11 +37,15 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
         private readonly IVectorSearchCapabilityProvider _capabilityProvider = Substitute.For<IVectorSearchCapabilityProvider>();
         private readonly RequestContextAccessor<IFhirRequestContext> _requestContextAccessor = Substitute.For<RequestContextAccessor<IFhirRequestContext>>();
         private readonly ILogger<VectorEmbeddingEnricher> _logger = Substitute.For<ILogger<VectorEmbeddingEnricher>>();
+        private readonly Dictionary<string, StringValues> _requestHeaders = new();
+        private readonly Dictionary<string, StringValues> _responseHeaders = new();
 
         public VectorEmbeddingEnricherTests()
         {
             _capabilityProvider.IsVectorSearchAvailable.Returns(true);
             _capabilityProvider.EnsureInitializedAsync(Arg.Any<CancellationToken>()).Returns(Task.CompletedTask);
+            _requestContextAccessor.RequestContext.RequestHeaders.Returns(_requestHeaders);
+            _requestContextAccessor.RequestContext.ResponseHeaders.Returns(_responseHeaders);
         }
 
         [Fact]
@@ -153,6 +159,87 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
                 Arg.Is<IReadOnlyList<string>>(inputs => inputs.SequenceEqual(new[] { "first" })),
                 true,
                 CancellationToken.None);
+        }
+
+        [Fact]
+        public async Task GivenSynchronousPreference_WhenEmbeddingsAreApplied_ThenPreferenceAppliedHeaderIsSet()
+        {
+            // Arrange
+            SetSynchronousPreference();
+            _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), true, Arg.Any<CancellationToken>())
+                .Returns(new[] { new[] { 0.1f } });
+            VectorEmbeddingEnricher enricher = CreateEnricher(EmbeddingPersistenceMode.Asynchronous);
+
+            // Act
+            bool result = await enricher.EnrichAsync(CreateOperations(new VectorSearchValue("first", 0)), CancellationToken.None);
+
+            // Assert
+            Assert.True(result);
+            Assert.Equal("embedding-persistence=synchronous", _responseHeaders[KnownHeaders.PreferenceApplied]);
+        }
+
+        [Fact]
+        public async Task GivenSynchronousPreferenceAndDisabledFeature_WhenEnriching_ThenPreferenceAppliedHeaderIsNotSet()
+        {
+            // Arrange
+            SetSynchronousPreference();
+            VectorEmbeddingEnricher enricher = CreateEnricher(EmbeddingPersistenceMode.Asynchronous, enabled: false);
+
+            // Act
+            bool result = await enricher.EnrichAsync(CreateOperations(new VectorSearchValue("first", 0)), CancellationToken.None);
+
+            // Assert
+            Assert.False(result);
+            Assert.DoesNotContain(KnownHeaders.PreferenceApplied, _responseHeaders);
+        }
+
+        [Fact]
+        public async Task GivenSynchronousPreferenceAndClientFailure_WhenEnrichingAsynchronously_ThenReturnsFalseWithoutHeaderOrException()
+        {
+            // Arrange
+            SetSynchronousPreference();
+            _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), true, Arg.Any<CancellationToken>())
+                .Returns<Task<IReadOnlyList<float[]>>>(_ => throw new EmbeddingUnavailableException());
+            VectorEmbeddingEnricher enricher = CreateEnricher(EmbeddingPersistenceMode.Asynchronous);
+
+            // Act
+            bool result = await enricher.EnrichAsync(CreateOperations(new VectorSearchValue("first", 0)), CancellationToken.None);
+
+            // Assert
+            Assert.False(result);
+            Assert.DoesNotContain(KnownHeaders.PreferenceApplied, _responseHeaders);
+        }
+
+        [Fact]
+        public async Task GivenNoPreferenceAndSynchronousMode_WhenEmbeddingsAreApplied_ThenPreferenceAppliedHeaderIsNotSet()
+        {
+            // Arrange
+            _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
+                .Returns(new[] { new[] { 0.1f } });
+            VectorEmbeddingEnricher enricher = CreateEnricher(EmbeddingPersistenceMode.Synchronous);
+
+            // Act
+            bool result = await enricher.EnrichAsync(CreateOperations(new VectorSearchValue("first", 0)), CancellationToken.None);
+
+            // Assert
+            Assert.True(result);
+            Assert.DoesNotContain(KnownHeaders.PreferenceApplied, _responseHeaders);
+        }
+
+        [Fact]
+        public async Task GivenNoRequestContextAndSynchronousMode_WhenEmbeddingsAreApplied_ThenDoesNotThrow()
+        {
+            // Arrange
+            _requestContextAccessor.RequestContext.Returns((IFhirRequestContext)null);
+            _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
+                .Returns(new[] { new[] { 0.1f } });
+            VectorEmbeddingEnricher enricher = CreateEnricher(EmbeddingPersistenceMode.Synchronous);
+
+            // Act
+            bool result = await enricher.EnrichAsync(CreateOperations(new VectorSearchValue("first", 0)), CancellationToken.None);
+
+            // Assert
+            Assert.True(result);
         }
 
         [Fact]
@@ -338,13 +425,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
 
         private void SetSynchronousPreference()
         {
-            var properties = new Dictionary<string, object>
-            {
-                [VectorEmbeddingEnricher.SynchronousEmbeddingPreferenceKey] = true,
-            };
-            var requestContext = Substitute.For<IFhirRequestContext>();
-            requestContext.Properties.Returns(properties);
-            _requestContextAccessor.RequestContext.Returns(requestContext);
+            _requestHeaders[KnownHeaders.Prefer] = "embedding-persistence=synchronous";
         }
 
         private static IReadOnlyList<ResourceWrapperOperation> CreateOperations(params VectorSearchValue[] values)

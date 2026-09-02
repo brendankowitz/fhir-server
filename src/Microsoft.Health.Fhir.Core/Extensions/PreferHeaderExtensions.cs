@@ -79,5 +79,23 @@ namespace Microsoft.Health.Fhir.Core.Extensions
 
             return null;
         }
+
+        internal static bool GetPrefersSynchronousEmbedding(this RequestContextAccessor<IFhirRequestContext> contextAccessor)
+        {
+            if (contextAccessor?.RequestContext?.RequestHeaders != null &&
+                contextAccessor.RequestContext.RequestHeaders.TryGetValue(KnownHeaders.Prefer, out StringValues values))
+            {
+                string preference = values
+                    .SelectMany(value => (value ?? string.Empty).Split(',', StringSplitOptions.TrimEntries))
+                    .FirstOrDefault(value => value.StartsWith("embedding-persistence=", StringComparison.OrdinalIgnoreCase));
+
+                return string.Equals(
+                    preference?["embedding-persistence=".Length..].Trim(),
+                    "synchronous",
+                    StringComparison.OrdinalIgnoreCase);
+            }
+
+            return false;
+        }
     }
 }

@@ -15,6 +15,7 @@ namespace Microsoft.Health.Fhir.Core.Features
         // HTTP Headers
         public const string RetryAfter = "Retry-After";
         public const string Prefer = "Prefer";
+        public const string PreferenceApplied = "Preference-Applied";
         public const string RequestId = "X-Request-Id";
         public const string CorrelationId = "X-Correlation-Id";
         public const string InstanceId = "X-Instance-Id";
