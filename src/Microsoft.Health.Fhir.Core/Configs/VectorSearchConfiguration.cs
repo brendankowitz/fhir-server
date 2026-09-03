@@ -82,9 +82,9 @@ namespace Microsoft.Health.Fhir.Core.Configs
         public int MaxQueryTextLength { get; set; } = 4096;
 
         /// <summary>
-        /// Gets or sets the maximum number of resources per embedding generation job definition.
+        /// Gets or sets the maximum number of transactions covered by a single embedding-generation job.
         /// </summary>
-        // Asynchronous-mode knob: max resources per EmbeddingGeneration job definition.
+        // Asynchronous-mode knob: max transactions per EmbeddingGeneration job definition.
         // Watchdog period/lease are tuned via the standard dbo.Parameters watchdog rows, not here.
         public int JobBatchSize { get; set; } = 500;
     }

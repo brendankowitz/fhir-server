@@ -27,32 +27,38 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Watchdogs
         private readonly CleanupEventLogWatchdog _cleanupEventLogWatchdog;
         private readonly IScoped<TransactionWatchdog> _transactionWatchdog;
         private readonly InvisibleHistoryCleanupWatchdog _invisibleHistoryCleanupWatchdog;
+        private readonly VectorizationWatchdog _vectorizationWatchdog;
         private readonly ExpiredResourceCleanupWatchdog _expiredResourceCleanupWatchdog;
         private readonly GeoReplicationLagWatchdog _geoReplicationLagWatchdog;
         private readonly JobMonitorWatchdog _jobMonitorWatchdog;
         private readonly CoreFeatureConfiguration _coreFeatureConfiguration;
         private readonly WatchdogConfiguration _watchdogConfiguration;
+        private readonly VectorSearchConfiguration _vectorSearchConfiguration;
 
         public WatchdogsBackgroundService(
             DefragWatchdog defragWatchdog,
             CleanupEventLogWatchdog cleanupEventLogWatchdog,
             IScopeProvider<TransactionWatchdog> transactionWatchdog,
             InvisibleHistoryCleanupWatchdog invisibleHistoryCleanupWatchdog,
+            VectorizationWatchdog vectorizationWatchdog,
             ExpiredResourceCleanupWatchdog expiredResourceCleanupWatchdog,
             GeoReplicationLagWatchdog geoReplicationLagWatchdog,
             JobMonitorWatchdog jobMonitorWatchdog,
             IOptions<CoreFeatureConfiguration> coreFeatureConfiguration,
-            IOptions<WatchdogConfiguration> watchdogConfiguration)
+            IOptions<WatchdogConfiguration> watchdogConfiguration,
+            IOptions<VectorSearchConfiguration> vectorSearchConfiguration)
         {
             _defragWatchdog = EnsureArg.IsNotNull(defragWatchdog, nameof(defragWatchdog));
             _cleanupEventLogWatchdog = EnsureArg.IsNotNull(cleanupEventLogWatchdog, nameof(cleanupEventLogWatchdog));
             _transactionWatchdog = EnsureArg.IsNotNull(transactionWatchdog, nameof(transactionWatchdog)).Invoke();
             _invisibleHistoryCleanupWatchdog = EnsureArg.IsNotNull(invisibleHistoryCleanupWatchdog, nameof(invisibleHistoryCleanupWatchdog));
+            _vectorizationWatchdog = EnsureArg.IsNotNull(vectorizationWatchdog, nameof(vectorizationWatchdog));
             _expiredResourceCleanupWatchdog = EnsureArg.IsNotNull(expiredResourceCleanupWatchdog, nameof(expiredResourceCleanupWatchdog));
             _geoReplicationLagWatchdog = geoReplicationLagWatchdog; // Can be null when feature is disabled
             _jobMonitorWatchdog = EnsureArg.IsNotNull(jobMonitorWatchdog, nameof(jobMonitorWatchdog));
             _coreFeatureConfiguration = EnsureArg.IsNotNull(coreFeatureConfiguration?.Value, nameof(coreFeatureConfiguration));
             _watchdogConfiguration = EnsureArg.IsNotNull(watchdogConfiguration?.Value, nameof(watchdogConfiguration));
+            _vectorSearchConfiguration = EnsureArg.IsNotNull(vectorSearchConfiguration?.Value, nameof(vectorSearchConfiguration));
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -88,6 +94,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Watchdogs
             if (_watchdogConfiguration.ExpiredResource.Enabled)
             {
                 tasks.Add(_expiredResourceCleanupWatchdog.ExecuteAsync(continuationTokenSource.Token));
+            }
+
+            if (_vectorSearchConfiguration.Enabled)
+            {
+                tasks.Add(_vectorizationWatchdog.ExecuteAsync(continuationTokenSource.Token));
             }
 
             await Task.WhenAny(tasks);

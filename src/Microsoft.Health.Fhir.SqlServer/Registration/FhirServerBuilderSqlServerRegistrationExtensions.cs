@@ -215,6 +215,7 @@ namespace Microsoft.Extensions.DependencyInjection
             services.Add<DefragWatchdog>().Singleton().AsSelf();
             services.Add<CleanupEventLogWatchdog>().Singleton().AsSelf();
             services.Add<InvisibleHistoryCleanupWatchdog>().Singleton().AsSelf();
+            services.Add<VectorizationWatchdog>().Singleton().AsSelf();
             services.Add<ExpiredResourceCleanupWatchdog>().Singleton().AsSelf();
             services.Add<GeoReplicationLagWatchdog>().Singleton().AsSelf();
             services.Add<JobMonitorWatchdog>().Singleton().AsSelf();
