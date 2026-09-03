@@ -139,6 +139,7 @@ namespace Microsoft.Health.Fhir.Api.Modules
                 .AsSelf()
                 .AsImplementedInterfaces();
 
+            services.AddSingleton<IVectorTextChunker, VectorTextChunker>();
             services.AddSingleton<ISearchIndexer, TypedElementSearchIndexer>();
 
             services.AddSingleton<ISearchParameterExpressionParser, SearchParameterExpressionParser>();

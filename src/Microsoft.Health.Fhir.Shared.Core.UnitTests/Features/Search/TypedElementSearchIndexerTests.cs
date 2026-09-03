@@ -10,6 +10,8 @@ using System.Threading.Tasks;
 using Hl7.Fhir.ElementModel;
 using Hl7.Fhir.Model;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Definition.BundleWrappers;
@@ -50,8 +52,9 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
             var referenceToElementResolver = Substitute.For<IReferenceToElementResolver>();
             var modelInfoProvider = ModelInfoProvider.Instance;
             var logger = Substitute.For<ILogger<TypedElementSearchIndexer>>();
+            var vectorSearchOptions = Options.Create(new VectorSearchConfiguration());
 
-            _searchIndexer = new TypedElementSearchIndexer(supportedSearchParameterDefinitionManager, typedElementToSearchValueConverterManager, referenceToElementResolver, modelInfoProvider, logger);
+            _searchIndexer = new TypedElementSearchIndexer(supportedSearchParameterDefinitionManager, typedElementToSearchValueConverterManager, referenceToElementResolver, modelInfoProvider, logger, new VectorTextChunker(vectorSearchOptions), vectorSearchOptions);
 
             List<string> baseResourceTypes = new List<string>() { "Resource" };
             List<string> targetResourceTypes = new List<string>() { "Coverage", "Observation", "Claim", "Patient" };
@@ -141,6 +144,31 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
         }
 
         [Fact]
+        public void GivenMultipleChunkedValuesAndPerValueRowVectorPolicy_WhenExtract_ThenChunkOrdinalsAreContiguousAndUnique()
+        {
+           var extraction = ExtractVectorSearchEntries(VectorTextExtractionPolicy.PerValueRow, 100, 2, 1, "abcdefghijkl", "mnopqrstuvwx");
+
+           var ordinals = extraction.Entries
+               .Select(entry => Assert.IsType<VectorSearchValue>(entry.Value).ChunkOrdinal)
+               .ToList();
+
+           Assert.Equal(Enumerable.Range(0, ordinals.Count), ordinals);
+           Assert.Equal(ordinals.Count, ordinals.Distinct().Count());
+        }
+
+        [Fact]
+        public void GivenMultipleChunkedValuesAndPerValueRowVectorPolicy_WhenChunkCapIsReached_ThenCapAppliesAcrossValues()
+        {
+           var extraction = ExtractVectorSearchEntries(VectorTextExtractionPolicy.PerValueRow, 100, 2, 1, 3, "abcdefghijkl", "mnopqrstuvwx");
+
+           var ordinals = extraction.Entries
+               .Select(entry => Assert.IsType<VectorSearchValue>(entry.Value).ChunkOrdinal)
+               .ToList();
+
+           Assert.Equal(new[] { 0, 1, 2 }, ordinals);
+        }
+
+        [Fact]
         public void GivenObservationWithTwoNotesAndFirstValueVectorPolicy_WhenExtract_ThenCreatesVectorValueForFirstNoteOnly()
         {
            var extraction = ExtractVectorSearchEntries(VectorTextExtractionPolicy.FirstValue, 10, "first note", "second note");
@@ -203,6 +231,27 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
            int maxInputTokens,
            params string[] noteTexts)
         {
+           return ExtractVectorSearchEntries(extractionPolicy, maxInputTokens, 1000, 100, noteTexts);
+        }
+
+        private (IReadOnlyCollection<SearchIndexEntry> Entries, ITypedElementToSearchValueConverterManager ConverterManager) ExtractVectorSearchEntries(
+           VectorTextExtractionPolicy extractionPolicy,
+           int maxInputTokens,
+           int chunkSizeTokens,
+           int chunkOverlapTokens,
+           params string[] noteTexts)
+        {
+           return ExtractVectorSearchEntries(extractionPolicy, maxInputTokens, chunkSizeTokens, chunkOverlapTokens, 64, noteTexts);
+        }
+
+        private (IReadOnlyCollection<SearchIndexEntry> Entries, ITypedElementToSearchValueConverterManager ConverterManager) ExtractVectorSearchEntries(
+           VectorTextExtractionPolicy extractionPolicy,
+           int maxInputTokens,
+           int chunkSizeTokens,
+           int chunkOverlapTokens,
+           int maxChunks,
+           params string[] noteTexts)
+        {
            var supportedSearchParameterDefinitionManager = Substitute.For<ISupportedSearchParameterDefinitionManager>();
            var typedElementToSearchValueConverterManager = Substitute.For<ITypedElementToSearchValueConverterManager>();
            var referenceToElementResolver = Substitute.For<IReferenceToElementResolver>();
@@ -224,12 +273,20 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
            };
            supportedSearchParameterDefinitionManager.GetSearchParameters("Observation").Returns(new[] { searchParameter });
 
+           var vectorSearchOptions = Options.Create(new VectorSearchConfiguration
+           {
+               ChunkSizeTokens = chunkSizeTokens,
+               ChunkOverlapTokens = chunkOverlapTokens,
+               MaxChunksPerSearchParameter = maxChunks,
+           });
            var indexer = new TypedElementSearchIndexer(
                supportedSearchParameterDefinitionManager,
                typedElementToSearchValueConverterManager,
                referenceToElementResolver,
                ModelInfoProvider.Instance,
-               logger);
+               logger,
+               new VectorTextChunker(vectorSearchOptions),
+               vectorSearchOptions);
            var observationResource = new Observation
            {
                Note = noteTexts.Select(text => new Annotation { Text = text }).ToList(),

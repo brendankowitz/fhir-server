@@ -12,6 +12,8 @@ using EnsureThat;
 using Hl7.Fhir.ElementModel;
 using Hl7.FhirPath;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search.Converters;
@@ -31,6 +33,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         private readonly IReferenceToElementResolver _referenceToElementResolver;
         private readonly IModelInfoProvider _modelInfoProvider;
         private readonly ILogger<TypedElementSearchIndexer> _logger;
+        private readonly IVectorTextChunker _vectorTextChunker;
+        private readonly int _maxChunksPerSearchParameter;
         private readonly ConcurrentDictionary<string, List<string>> _targetTypesLookup = new();
         private static readonly FhirPathCompiler _compiler = new();
         private readonly ConcurrentDictionary<string, CompiledExpression> _expressions = new();
@@ -43,24 +47,32 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         /// <param name="referenceToElementResolver">Used for parsing reference strings</param>
         /// <param name="modelInfoProvider">Model info provider</param>
         /// <param name="logger">The logger.</param>
+        /// <param name="vectorTextChunker">The vector text chunker.</param>
+        /// <param name="vectorSearchOptions">The vector search configuration.</param>
         public TypedElementSearchIndexer(
             ISupportedSearchParameterDefinitionManager searchParameterDefinitionManager,
             ITypedElementToSearchValueConverterManager fhirElementTypeConverterManager,
             IReferenceToElementResolver referenceToElementResolver,
             IModelInfoProvider modelInfoProvider,
-            ILogger<TypedElementSearchIndexer> logger)
+            ILogger<TypedElementSearchIndexer> logger,
+            IVectorTextChunker vectorTextChunker,
+            IOptions<VectorSearchConfiguration> vectorSearchOptions)
         {
             EnsureArg.IsNotNull(searchParameterDefinitionManager, nameof(searchParameterDefinitionManager));
             EnsureArg.IsNotNull(fhirElementTypeConverterManager, nameof(fhirElementTypeConverterManager));
             EnsureArg.IsNotNull(referenceToElementResolver, nameof(referenceToElementResolver));
             EnsureArg.IsNotNull(modelInfoProvider, nameof(modelInfoProvider));
             EnsureArg.IsNotNull(logger, nameof(logger));
+            EnsureArg.IsNotNull(vectorTextChunker, nameof(vectorTextChunker));
+            EnsureArg.IsNotNull(vectorSearchOptions, nameof(vectorSearchOptions));
 
             _searchParameterDefinitionManager = searchParameterDefinitionManager;
             _fhirElementTypeConverterManager = fhirElementTypeConverterManager;
             _referenceToElementResolver = referenceToElementResolver;
             _modelInfoProvider = modelInfoProvider;
             _logger = logger;
+            _vectorTextChunker = vectorTextChunker;
+            _maxChunksPerSearchParameter = vectorSearchOptions.Value.MaxChunksPerSearchParameter;
         }
 
         /// <inheritdoc />
@@ -199,7 +211,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             }
         }
 
-        private static IEnumerable<SearchIndexEntry> ExtractVectorSearchValues(
+        private IEnumerable<SearchIndexEntry> ExtractVectorSearchValues(
             SearchParameterInfo searchParameter,
             ITypedElement resource,
             EvaluationContext context)
@@ -215,21 +227,26 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 yield break;
             }
 
-            switch (searchParameter.VectorConfig.ExtractionPolicy)
+            IEnumerable<string> inputs = searchParameter.VectorConfig.ExtractionPolicy switch
             {
-                case VectorTextExtractionPolicy.FirstValue:
-                    yield return new SearchIndexEntry(searchParameter, new VectorSearchValue(VectorSearchValue.Truncate(texts[0], searchParameter.VectorConfig.MaxInputTokens), 0));
-                    break;
-                case VectorTextExtractionPolicy.Concatenate:
-                    yield return new SearchIndexEntry(searchParameter, new VectorSearchValue(VectorSearchValue.Truncate(string.Join('\n', texts), searchParameter.VectorConfig.MaxInputTokens), 0));
-                    break;
-                case VectorTextExtractionPolicy.PerValueRow:
-                    for (int i = 0; i < texts.Count; i++)
+                VectorTextExtractionPolicy.FirstValue => new[] { texts[0] },
+                VectorTextExtractionPolicy.Concatenate => new[] { string.Join('\n', texts) },
+                VectorTextExtractionPolicy.PerValueRow => texts,
+                _ => Array.Empty<string>(),
+            };
+
+            int chunkOrdinal = 0;
+            foreach (string input in inputs)
+            {
+                foreach (string chunk in _vectorTextChunker.Chunk(input, searchParameter.VectorConfig.MaxInputTokens))
+                {
+                    if (chunkOrdinal >= _maxChunksPerSearchParameter)
                     {
-                        yield return new SearchIndexEntry(searchParameter, new VectorSearchValue(VectorSearchValue.Truncate(texts[i], searchParameter.VectorConfig.MaxInputTokens), i));
+                        yield break;
                     }
 
-                    break;
+                    yield return new SearchIndexEntry(searchParameter, new VectorSearchValue(chunk, chunkOrdinal++));
+                }
             }
         }
 

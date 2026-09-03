@@ -7,9 +7,11 @@ using Hl7.Fhir.ElementModel;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
 using Microsoft.Health.Core.Features.Context;
 using Microsoft.Health.Fhir.Core;
+using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Features.Definition;
@@ -48,7 +50,8 @@ namespace Microsoft.Health.Fhir.R4.ResourceParser
             var referenceToElementResolver = new LightweightReferenceToElementResolver(referenceSearchValueParser, modelInfoProvider);
 
             var logger = new NullLogger<TypedElementSearchIndexer>();
-            var searchIndexer = new TypedElementSearchIndexer(supportedSearchParameterDefinitionManager, fhirTypedElementToSearchValueConverterManager, referenceToElementResolver, modelInfoProvider, logger);
+            var vectorSearchOptions = Options.Create(new VectorSearchConfiguration());
+            var searchIndexer = new TypedElementSearchIndexer(supportedSearchParameterDefinitionManager, fhirTypedElementToSearchValueConverterManager, referenceToElementResolver, modelInfoProvider, logger, new VectorTextChunker(vectorSearchOptions), vectorSearchOptions);
 
             var compartmentDefinitionManager = new CompartmentDefinitionManager(modelInfoProvider);
 

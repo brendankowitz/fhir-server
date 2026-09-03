@@ -80,6 +80,12 @@ namespace Microsoft.Health.Fhir.Core.Configs
         public int ChunkOverlapTokens { get; set; } = 100;
 
         /// <summary>
+        /// Gets or sets the maximum number of chunks emitted for a single resource and search parameter pair.
+        /// When the cap is reached, remaining text is dropped to bound embedding calls, rate-limit usage, and spend.
+        /// </summary>
+        public int MaxChunksPerSearchParameter { get; set; } = 64;
+
+        /// <summary>
         /// Gets or sets the default number of nearest neighbors to return.
         /// </summary>
         public int DefaultK { get; set; } = 200;

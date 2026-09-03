@@ -13,7 +13,9 @@ using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
 using Hl7.FhirPath;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Microsoft.Health.Extensions.DependencyInjection;
+using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Features.Definition;
@@ -72,12 +74,15 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Features.Smart
                 Mock.TypeWithArguments<ReferenceSearchValueParser>(new FhirRequestContextAccessor()),
                 ModelInfoProvider.Instance);
 
+            var vectorSearchOptions = Options.Create(new VectorSearchConfiguration());
             _searchIndexer = new TypedElementSearchIndexer(
                 _fixture.SupportedSearchParameterDefinitionManager,
                 typedElementToSearchValueConverterManager,
                 referenceToElementResolver,
                 ModelInfoProvider.Instance,
-                NullLogger<TypedElementSearchIndexer>.Instance);
+                NullLogger<TypedElementSearchIndexer>.Instance,
+                new VectorTextChunker(vectorSearchOptions),
+                vectorSearchOptions);
             _searchParameterDefinitionManager = _fixture.SearchParameterDefinitionManager;
             _scopedDataStore = _fixture.DataStore.CreateMockScope();
 

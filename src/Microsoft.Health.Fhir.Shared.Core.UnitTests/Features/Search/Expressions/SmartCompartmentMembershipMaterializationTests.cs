@@ -14,6 +14,8 @@ using Hl7.Fhir.FhirPath;
 using Hl7.Fhir.Model;
 using Hl7.FhirPath;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Features.Definition;
@@ -145,12 +147,15 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Expressions
                 Mock.TypeWithArguments<ReferenceSearchValueParser>(new FhirRequestContextAccessor()),
                 ModelInfoProvider.Instance);
 
+            var vectorSearchOptions = Options.Create(new VectorSearchConfiguration());
             var indexer = new TypedElementSearchIndexer(
                 supported,
                 SearchParameterFixtureData.GetFhirTypedElementToSearchValueConverterManagerAsync().GetAwaiter().GetResult(),
                 resolver,
                 ModelInfoProvider.Instance,
-                NullLogger<TypedElementSearchIndexer>.Instance);
+                NullLogger<TypedElementSearchIndexer>.Instance,
+                new VectorTextChunker(vectorSearchOptions),
+                vectorSearchOptions);
 
             return indexer.Extract(resource.ToResourceElement())
                 .Where(entry => entry.Value is ReferenceSearchValue reference
