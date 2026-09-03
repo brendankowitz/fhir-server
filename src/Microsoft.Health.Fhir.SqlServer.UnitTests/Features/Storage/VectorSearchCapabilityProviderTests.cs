@@ -159,6 +159,27 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
         }
 
         [Fact]
+        public async Task GivenChunkConfiguration_WhenInitialized_ThenEmbeddingModelLookupConstrainsOnChunkConfiguration()
+        {
+            // Arrange
+            ConfigureSuccessfulInitialization(ExpectedEmbeddingModelId, persistedDimension: 1536);
+            using VectorSearchCapabilityProvider provider = CreateProvider();
+
+            // Act
+            await provider.EnsureInitializedAsync(CancellationToken.None);
+
+            // Assert
+            _ = _sqlRetryService.Received(1).ExecuteReaderAsync<(short EmbeddingModelId, int Dimension)>(
+                Arg.Is<SqlCommand>(command =>
+                    command.CommandText.Split("ChunkSizeTokens = @ChunkSizeTokens AND ChunkOverlapTokens = @ChunkOverlapTokens").Length == 3),
+                Arg.Any<Func<SqlDataReader, (short EmbeddingModelId, int Dimension)>>(),
+                Arg.Any<ILogger>(),
+                Arg.Any<string>(),
+                Arg.Any<CancellationToken>(),
+                isReadOnly: false);
+        }
+
+        [Fact]
         public async Task GivenProviderWasInitialized_WhenInitializedAgain_ThenSqlWorkIsNotRepeated()
         {
             // Arrange

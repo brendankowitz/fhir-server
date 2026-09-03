@@ -200,20 +200,24 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
         private async Task<(short EmbeddingModelId, int Dimension)> UpsertEmbeddingModelAsync(CancellationToken cancellationToken)
         {
             const string commandText = @"
-INSERT INTO dbo.EmbeddingModel (ModelName, ModelVersion, Dimension, DistanceMetric)
-    SELECT @ModelName, @ModelVersion, @Dimension, @DistanceMetric
+INSERT INTO dbo.EmbeddingModel (ModelName, ModelVersion, Dimension, DistanceMetric, ChunkSizeTokens, ChunkOverlapTokens)
+   SELECT @ModelName, @ModelVersion, @Dimension, @DistanceMetric, @ChunkSizeTokens, @ChunkOverlapTokens
     WHERE NOT EXISTS (
         SELECT 1
         FROM dbo.EmbeddingModel WITH (UPDLOCK, HOLDLOCK)
-        WHERE ModelName = @ModelName AND ModelVersion = @ModelVersion);
-
+       WHERE ModelName = @ModelName AND ModelVersion = @ModelVersion
+           AND ChunkSizeTokens = @ChunkSizeTokens AND ChunkOverlapTokens = @ChunkOverlapTokens);
+ 
 SELECT EmbeddingModelId, Dimension
 FROM dbo.EmbeddingModel
-WHERE ModelName = @ModelName AND ModelVersion = @ModelVersion;";
+WHERE ModelName = @ModelName AND ModelVersion = @ModelVersion
+   AND ChunkSizeTokens = @ChunkSizeTokens AND ChunkOverlapTokens = @ChunkOverlapTokens;";
 
             using var command = new SqlCommand(commandText);
             command.Parameters.Add("@ModelName", SqlDbType.VarChar, 128).Value = _configuration.EmbeddingDeploymentName;
             command.Parameters.Add("@ModelVersion", SqlDbType.VarChar, 64).Value = _configuration.EmbeddingModelVersion;
+            command.Parameters.Add("@ChunkSizeTokens", SqlDbType.Int).Value = _configuration.ChunkSizeTokens;
+            command.Parameters.Add("@ChunkOverlapTokens", SqlDbType.Int).Value = _configuration.ChunkOverlapTokens;
             command.Parameters.Add("@Dimension", SqlDbType.Int).Value = _configuration.EmbeddingDimensions;
             command.Parameters.Add("@DistanceMetric", SqlDbType.VarChar, 16).Value = DistanceMetric;
 

@@ -67,6 +67,19 @@ namespace Microsoft.Health.Fhir.Core.Configs
         public string EmbeddingModelVersion { get; set; } = "1";
 
         /// <summary>
+        /// Gets or sets the target size in tokens of each text chunk submitted for embedding. Changing this value
+        /// yields a new dbo.EmbeddingModel row and causes existing vectors to be re-embedded by the background job.
+        /// </summary>
+        public int ChunkSizeTokens { get; set; } = 1000;
+
+        /// <summary>
+        /// Gets or sets the number of tokens each chunk repeats from the previous chunk so that meaning spanning a
+        /// boundary is not lost. Changing this value yields a new dbo.EmbeddingModel row and causes existing vectors
+        /// to be re-embedded by the background job.
+        /// </summary>
+        public int ChunkOverlapTokens { get; set; } = 100;
+
+        /// <summary>
         /// Gets or sets the default number of nearest neighbors to return.
         /// </summary>
         public int DefaultK { get; set; } = 200;
