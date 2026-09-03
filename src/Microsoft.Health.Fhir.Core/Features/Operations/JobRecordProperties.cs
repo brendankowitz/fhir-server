@@ -37,6 +37,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations
 
         public const string ResourceType = "resourceType";
 
+        public const string ResourceTypeId = "resourceTypeId";
+
         public const string Progress = "progress";
 
         public const string Output = "output";
