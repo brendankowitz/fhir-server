@@ -48,6 +48,10 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors
                         return 10;
                     case CompartmentQueryGenerator _:
                         return 10;
+                    case VectorSearchQueryGenerator _:
+                        // Vector distance must be evaluated after all restricting predicates, including
+                        // authorization and compartment predicates, but before non-filtering include work.
+                        return -19;
                     case IncludeQueryGenerator _:
                         return -20;
                     default:

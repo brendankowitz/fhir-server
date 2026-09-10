@@ -21,18 +21,32 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors
     internal class SearchParamTableExpressionQueryGeneratorFactory : IExpressionVisitorWithInitialContext<object, SearchParamTableExpressionQueryGenerator>
     {
         private readonly SearchParameterToSearchValueTypeMap _searchParameterToSearchValueTypeMap;
+        private readonly IVectorSearchCapabilityProvider _vectorSearchCapabilityProvider;
         private readonly ConcurrentDictionary<Uri, SearchParamTableExpressionQueryGenerator> _cache = new ConcurrentDictionary<Uri, SearchParamTableExpressionQueryGenerator>();
 
         public SearchParamTableExpressionQueryGeneratorFactory(SearchParameterToSearchValueTypeMap searchParameterToSearchValueTypeMap)
+            : this(searchParameterToSearchValueTypeMap, null)
+        {
+        }
+
+        public SearchParamTableExpressionQueryGeneratorFactory(
+            SearchParameterToSearchValueTypeMap searchParameterToSearchValueTypeMap,
+            IVectorSearchCapabilityProvider vectorSearchCapabilityProvider)
         {
             EnsureArg.IsNotNull(searchParameterToSearchValueTypeMap, nameof(searchParameterToSearchValueTypeMap));
             _searchParameterToSearchValueTypeMap = searchParameterToSearchValueTypeMap;
+            _vectorSearchCapabilityProvider = vectorSearchCapabilityProvider;
         }
 
         public object InitialContext => null;
 
         public SearchParamTableExpressionQueryGenerator VisitSearchParameter(SearchParameterExpression expression, object context)
         {
+            if (expression.Expression is VectorSearchExpression vectorSearchExpression)
+            {
+                return VisitVectorSearch(vectorSearchExpression, context);
+            }
+
             return VisitSearchParameterExpressionBase(expression.Parameter, expression.Expression, context);
         }
 
@@ -135,7 +149,13 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors
 
         public SearchParamTableExpressionQueryGenerator VisitVectorSearch(VectorSearchExpression expression, object context)
         {
-            throw new NotImplementedException("Vector search SQL generation has not been implemented.");
+            if (_vectorSearchCapabilityProvider == null)
+            {
+                throw new InvalidOperationException(
+                    $"{nameof(IVectorSearchCapabilityProvider)} is required to generate vector search SQL.");
+            }
+
+            return new VectorSearchQueryGenerator(_vectorSearchCapabilityProvider);
         }
 
         public SearchParamTableExpressionQueryGenerator VisitChained(ChainedExpression expression, object context)

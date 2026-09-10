@@ -37,27 +37,30 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search;
 
 [Trait(Traits.OwningTeam, OwningTeam.Fhir)]
 [Trait(Traits.Category, Categories.Search)]
-public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>
+public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, IDisposable
 {
     private readonly ISqlServerFhirModel _fhirModel;
+    private readonly IVectorSearchCapabilityProvider _vectorSearchCapabilityProvider;
     private readonly SearchParamTableExpressionQueryGeneratorFactory _queryGeneratorFactory;
     private readonly SchemaInformation _schemaInformation = new(SchemaVersionConstants.Min, SchemaVersionConstants.Max);
     private readonly IndentedStringBuilder _strBuilder = new(new StringBuilder());
+    private readonly Data.SqlClient.SqlCommand _sqlCommand = new();
     private readonly SqlQueryGenerator _queryGenerator;
 
     public SqlQueryGeneratorTests(ModelInfoProviderFixture modelInfoProviderFixture)
     {
         _ = modelInfoProviderFixture;
         _fhirModel = Substitute.For<ISqlServerFhirModel>();
+        _vectorSearchCapabilityProvider = Substitute.For<IVectorSearchCapabilityProvider>();
+        _vectorSearchCapabilityProvider.EmbeddingModelId.Returns((short)17);
 
         // Create real instances instead of mocking since factory is internal
         var searchParameterToSearchValueTypeMap = new SearchParameterToSearchValueTypeMap();
-        _queryGeneratorFactory = new SearchParamTableExpressionQueryGeneratorFactory(searchParameterToSearchValueTypeMap);
+        _queryGeneratorFactory = new SearchParamTableExpressionQueryGeneratorFactory(searchParameterToSearchValueTypeMap, _vectorSearchCapabilityProvider);
 
         _schemaInformation.Current = SchemaVersionConstants.Max;
 
-        using Data.SqlClient.SqlCommand command = new();
-        HashingSqlQueryParameterManager parameters = new(new SqlQueryParameterManager(command.Parameters));
+        HashingSqlQueryParameterManager parameters = new(new SqlQueryParameterManager(_sqlCommand.Parameters));
 
         _queryGenerator = new(
             _strBuilder,
@@ -67,6 +70,11 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>
             _queryGeneratorFactory,
             false,
             false);
+    }
+
+    public void Dispose()
+    {
+        _sqlCommand.Dispose();
     }
 
     [Fact]
@@ -619,6 +627,167 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>
         Assert.Contains("smartCompartmentMembership.ResourceSurrogateId = refTarget.ResourceSurrogateId", generatedSql);
         Assert.Contains("smartCompartmentMembership.BaseUri IS NULL", generatedSql);
         _fhirModel.Received(1).GetSearchParamId(membershipParameterUrl);
+    }
+
+    [Fact]
+    public void GivenVectorSearch_WhenSqlGenerated_ThenEmitsDistanceAndModelConstraints()
+    {
+        string generatedSql = GenerateVectorSearchSql();
+
+        Assert.Contains("VECTOR_DISTANCE('cosine', vectorSearch.Embedding, CAST(@", generatedSql);
+        Assert.Contains("AS VECTOR(1536)", generatedSql);
+        Assert.Contains("vectorSearch.SearchParamId = 41", generatedSql);
+        Assert.Contains("vectorSearch.EmbeddingModelId = @", generatedSql);
+        Assert.Contains("vectorSearch.Embedding IS NOT NULL", generatedSql);
+        Assert.DoesNotContain("[0.25,0.5]", generatedSql);
+        Assert.Contains(_sqlCommand.Parameters.Cast<Data.SqlClient.SqlParameter>(), parameter => Equals(parameter.Value, "[0.25,0.5]"));
+        Assert.Contains(_sqlCommand.Parameters.Cast<Data.SqlClient.SqlParameter>(), parameter => Equals(parameter.Value, (short)17));
+    }
+
+    [Fact]
+    public void GivenRestrictedVectorSearch_WhenSqlGenerated_ThenCandidateLimitIsAppliedAfterPredecessorJoin()
+    {
+        string generatedSql = GenerateVectorSearchSql(withCompartment: true, k: 5);
+        string vectorCte = GetCte(generatedSql, "cte1 AS", "cte2 AS");
+
+        Assert.Contains("TOP (", vectorCte);
+        Assert.Contains("FROM dbo.VectorSearchParam vectorSearch", vectorCte);
+        Assert.Contains("JOIN cte0 predecessor", vectorCte);
+        Assert.Contains("vectorSearch.ResourceTypeId = predecessor.T1", vectorCte);
+        Assert.Contains("vectorSearch.ResourceSurrogateId = predecessor.Sid1", vectorCte);
+        Assert.Equal(1, CountOccurrences(generatedSql, "FROM dbo.VectorSearchParam"));
+    }
+
+    [Fact]
+    public void GivenChunkedVectorSearch_WhenSqlGenerated_ThenBestChunkIsCollapsedPerResource()
+    {
+        string generatedSql = GenerateVectorSearchSql();
+
+        Assert.Contains("MIN(VECTOR_DISTANCE(", generatedSql);
+        Assert.Contains("GROUP BY vectorSearch.ResourceTypeId, vectorSearch.ResourceSurrogateId", generatedSql);
+    }
+
+    [Fact]
+    public void GivenVectorSearchWithMinScore_WhenSqlGenerated_ThenDistanceBoundIsApplied()
+    {
+        string generatedSql = GenerateVectorSearchSql(minScore: 0.75);
+
+        Assert.Contains("HAVING MIN(VECTOR_DISTANCE(", generatedSql);
+        Assert.Contains(")) <= @", generatedSql);
+        Assert.Contains(_sqlCommand.Parameters.Cast<Data.SqlClient.SqlParameter>(), parameter => Equals(parameter.Value, 0.5d));
+    }
+
+    [Fact]
+    public void GivenVectorSearch_WhenSqlGenerated_ThenBestMatchesAreOrderedDeterministically()
+    {
+        string generatedSql = GenerateVectorSearchSql(k: 5);
+
+        Assert.Contains("ORDER BY VectorDistance ASC, vectorSearch.ResourceSurrogateId ASC", generatedSql);
+        Assert.True(
+            CountOccurrences(generatedSql, "ORDER BY VectorDistance ASC") >= 2,
+            $"Expected both the vector candidate CTE and paging CTE to order by distance in:{Environment.NewLine}{generatedSql}");
+        Assert.Contains("ORDER BY t.SortValue ASC, t.ResourceSurrogateId ASC", generatedSql);
+    }
+
+    [Fact]
+    [Trait(Traits.Category, Categories.CompartmentSearch)]
+    public void GivenCompartmentRestrictedVectorSearch_WhenSqlGenerated_ThenCompartmentPrecedesVectorDistance()
+    {
+        string generatedSql = GenerateVectorSearchSql(withCompartment: true);
+        int compartmentCteIndex = generatedSql.IndexOf("cte0 AS", StringComparison.Ordinal);
+        int vectorCteIndex = generatedSql.IndexOf("cte1 AS", StringComparison.Ordinal);
+
+        Assert.True(compartmentCteIndex >= 0 && compartmentCteIndex < vectorCteIndex);
+        Assert.Contains("CompartmentTypeId = @", generatedSql);
+        Assert.Contains("ReferenceResourceId = @", generatedSql);
+        Assert.Contains("JOIN cte0 predecessor", generatedSql);
+    }
+
+    [Fact]
+    public void GivenVectorSearchWithoutPredecessor_WhenSqlGenerated_ThenVectorSeekIsResourceTypeScoped()
+    {
+        string generatedSql = GenerateVectorSearchSql();
+        string vectorCte = GetCte(generatedSql, "cte0 AS", "cte1 AS");
+
+        Assert.DoesNotContain("JOIN cte", vectorCte);
+        Assert.Contains("vectorSearch.ResourceTypeId = 3", vectorCte);
+    }
+
+    private string GenerateVectorSearchSql(bool withCompartment = false, int? k = null, double? minScore = null)
+    {
+        var vectorParameterUrl = new Uri("http://example.org/SearchParameter/Observation-clinical-text");
+        var vectorParameter = new SearchParameterInfo(
+            "clinical-text",
+            "clinical-text",
+            SearchParamType.String,
+            vectorParameterUrl,
+            expression: "Observation.note.text",
+            baseResourceTypes: ["Observation"])
+        {
+            VectorConfig = new VectorSearchParameterConfig(),
+        };
+        var vectorExpression = new VectorSearchExpression(vectorParameter, "chest pain", k, minScore);
+        vectorExpression.SetQueryEmbedding([0.25f, 0.5f]);
+        var searchParameterExpression = new SearchParameterExpression(vectorParameter, vectorExpression);
+
+        _fhirModel.GetSearchParamId(vectorParameterUrl).Returns((short)41);
+        _fhirModel.GetResourceTypeId("Observation").Returns((short)3);
+
+        var tableExpressions = new List<SearchParamTableExpression>();
+        if (withCompartment)
+        {
+            _fhirModel.GetCompartmentTypeId("Patient").Returns((byte)1);
+            tableExpressions.Add(new SearchParamTableExpression(
+                CompartmentQueryGenerator.Instance,
+                new CompartmentSearchExpression("Patient", "patient-a"),
+                SearchParamTableExpressionKind.Normal));
+        }
+
+        tableExpressions.Add(new SearchParamTableExpression(
+            searchParameterExpression.AcceptVisitor(_queryGeneratorFactory, null),
+            searchParameterExpression,
+            SearchParamTableExpressionKind.Normal));
+        tableExpressions.Add(new SearchParamTableExpression(null, null, SearchParamTableExpressionKind.Top));
+
+        var sqlExpression = new SqlRootExpression(tableExpressions, []);
+        var searchOptions = new SearchOptions
+        {
+            MaxItemCount = 10,
+            Sort =
+            [
+                (SearchParameterInfo.ResourceTypeSearchParameter, SortOrder.Ascending),
+                (new SearchParameterInfo(SearchParameterNames.LastUpdated, SearchParameterNames.LastUpdated), SortOrder.Ascending),
+            ],
+            ResourceVersionTypes = ResourceVersionType.Latest,
+        };
+
+        _queryGenerator.VisitSqlRoot(sqlExpression, searchOptions);
+
+        return _strBuilder.ToString();
+    }
+
+    private static string GetCte(string sql, string startMarker, string endMarker)
+    {
+        int start = sql.IndexOf(startMarker, StringComparison.Ordinal);
+        int end = sql.IndexOf(endMarker, start + startMarker.Length, StringComparison.Ordinal);
+
+        Assert.True(start >= 0, $"Could not find CTE marker '{startMarker}' in:{Environment.NewLine}{sql}");
+        Assert.True(end > start, $"Could not find CTE marker '{endMarker}' after '{startMarker}' in:{Environment.NewLine}{sql}");
+
+        return sql[start..end];
+    }
+
+    private static int CountOccurrences(string value, string expected)
+    {
+        int count = 0;
+        int index = 0;
+        while ((index = value.IndexOf(expected, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += expected.Length;
+        }
+
+        return count;
     }
 
     private void ConfigureResourceTypeIds()

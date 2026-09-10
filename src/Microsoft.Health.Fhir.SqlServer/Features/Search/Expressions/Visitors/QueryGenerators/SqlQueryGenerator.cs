@@ -142,13 +142,20 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                 var isSortValueNeeded = IsSortValueNeeded(context);
                 if (isSortValueNeeded)
                 {
-                    var sortContext = GetSortRelatedDetails(context);
-                    var dbType = sortContext.SortColumnName.Metadata.SqlDbType;
-                    var typeStr = dbType.ToString().ToLowerInvariant();
-                    StringBuilder.Append($", SortValue {typeStr}");
-                    if (dbType != System.Data.SqlDbType.DateTime2 && dbType != System.Data.SqlDbType.DateTime) // we support only date time and short string
+                    if (HasVectorSearch())
                     {
-                        StringBuilder.Append($"({sortContext.SortColumnName.Metadata.MaxLength})");
+                        StringBuilder.Append(", SortValue float");
+                    }
+                    else
+                    {
+                        var sortContext = GetSortRelatedDetails(context);
+                        var dbType = sortContext.SortColumnName.Metadata.SqlDbType;
+                        var typeStr = dbType.ToString().ToLowerInvariant();
+                        StringBuilder.Append($", SortValue {typeStr}");
+                        if (dbType != System.Data.SqlDbType.DateTime2 && dbType != System.Data.SqlDbType.DateTime) // we support only date time and short string
+                        {
+                            StringBuilder.Append($"({sortContext.SortColumnName.Metadata.MaxLength})");
+                        }
                     }
                 }
 
@@ -367,7 +374,13 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                         StringBuilder.Append("IsMatch DESC, ");
                     }
 
-                    if (IsPrimaryKeySort(searchOptions))
+                    if (HasVectorSearch())
+                    {
+                        StringBuilder
+                            .Append(orderTableAlias).Append(".SortValue ASC, ")
+                            .Append(VLatest.Resource.ResourceSurrogateId, orderTableAlias).AppendLine(" ASC ");
+                    }
+                    else if (IsPrimaryKeySort(searchOptions))
                     {
                         StringBuilder.AppendDelimited(", ", searchOptions.Sort, (sb, sort) =>
                         {
@@ -653,6 +666,16 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
 
         private void HandleTableKindNormal(SearchParamTableExpression searchParamTableExpression, SearchOptions context)
         {
+            if (searchParamTableExpression.QueryGenerator is VectorSearchQueryGenerator vectorSearchQueryGenerator)
+            {
+                int predecessorIndex = FindRestrictingPredecessorTableExpressionIndex();
+                vectorSearchQueryGenerator.Generate(
+                    GetVectorSearchExpression(searchParamTableExpression.Predicate),
+                    GetContext(),
+                    predecessorIndex >= 0 ? TableExpressionName(predecessorIndex) : null);
+                return;
+            }
+
             var specialCaseTableName = searchParamTableExpression.QueryGenerator.Table;
 
             if (searchParamTableExpression.ChainLevel == 0)
@@ -819,7 +842,10 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
         private void HandleTableKindTop(SearchOptions context)
         {
             var tableExpressionName = TableExpressionName(_tableExpressionCounter - 1);
-            var sortExpression = IsSortValueNeeded(context) ? $"{tableExpressionName}.SortValue" : null;
+            bool isVectorSearch = HasVectorSearch();
+            var sortExpression = isVectorSearch
+                ? $"{tableExpressionName}.VectorDistance AS SortValue"
+                : IsSortValueNeeded(context) ? $"{tableExpressionName}.SortValue" : null;
 
             bool hasIncludeExpression = _rootExpression.SearchParamTableExpressions.Any(t => t.Kind == SearchParamTableExpressionKind.Include);
 
@@ -857,7 +883,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
             void AppendOrderBy()
             {
                 StringBuilder.Append("ORDER BY ");
-                if (IsPrimaryKeySort(context))
+                if (isVectorSearch)
+                {
+                    StringBuilder.Append("VectorDistance ASC, Sid1 ASC");
+                }
+                else if (IsPrimaryKeySort(context))
                 {
                     StringBuilder.AppendDelimited(", ", context.Sort, (sb, sort) =>
                     {
@@ -1867,6 +1897,23 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
             }
         }
 
+        private bool HasVectorSearch()
+        {
+            return _rootExpression?.SearchParamTableExpressions.Any(
+                tableExpression => tableExpression.QueryGenerator is VectorSearchQueryGenerator) == true;
+        }
+
+        private static VectorSearchExpression GetVectorSearchExpression(Expression expression)
+        {
+            return expression switch
+            {
+                VectorSearchExpression vectorSearchExpression => vectorSearchExpression,
+                SearchParameterExpression { Expression: VectorSearchExpression vectorSearchExpression } => vectorSearchExpression,
+                _ => throw new InvalidOperationException(
+                    $"{nameof(VectorSearchQueryGenerator)} requires a {nameof(VectorSearchExpression)} predicate."),
+            };
+        }
+
         private void AppendIntersectionWithPredecessor(IndentedStringBuilder.DelimitedScope delimited, SearchParamTableExpression searchParamTableExpression, string tableAlias = null)
         {
             int predecessorIndex = FindRestrictingPredecessorTableExpressionIndex();
@@ -2032,6 +2079,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
 
         internal bool IsSortValueNeeded(SearchOptions context)
         {
+            if (HasVectorSearch())
+            {
+                return true;
+            }
+
             if (context.Sort.Count == 0)
             {
                 return false;
