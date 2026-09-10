@@ -84,8 +84,15 @@ BEGIN TRY
 
   INSERT INTO dbo.VectorSearchParam
          ( ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, SourceTextCompressed, Embedding )
-    SELECT ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, SourceTextCompressed, CAST(Embedding AS VECTOR(1536))
-      FROM @VectorSearchParams
+    SELECT VSP.ResourceTypeId, VSP.ResourceSurrogateId, VSP.SearchParamId, VSP.ChunkOrdinal, VSP.EmbeddingModelId, VSP.SourceTextHash, VSP.SourceTextCompressed, CAST(VSP.Embedding AS VECTOR(1536))
+      FROM @VectorSearchParams VSP
+      WHERE EXISTS (
+      SELECT *
+        FROM dbo.Resource R
+        WHERE R.ResourceTypeId = @ResourceTypeId
+          AND R.ResourceSurrogateId = VSP.ResourceSurrogateId
+          AND R.IsHistory = 0
+          AND R.IsDeleted = 0)
   SET @Rows += @@rowcount
 
   COMMIT TRANSACTION
