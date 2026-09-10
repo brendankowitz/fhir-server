@@ -133,6 +133,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors
             throw new InvalidOperationException("Not expecting a BinaryExpression under a Token search param.");
         }
 
+        public SearchParamTableExpressionQueryGenerator VisitVectorSearch(VectorSearchExpression expression, object context)
+        {
+            throw new NotImplementedException("Vector search SQL generation has not been implemented.");
+        }
+
         public SearchParamTableExpressionQueryGenerator VisitChained(ChainedExpression expression, object context)
         {
             return ChainLinkQueryGenerator.Instance;

@@ -30,6 +30,11 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions
             return expression;
         }
 
+        public virtual Expression VisitVectorSearch(VectorSearchExpression expression, TContext context)
+        {
+            return expression;
+        }
+
         public virtual Expression VisitChained(ChainedExpression expression, TContext context)
         {
             Expression visitedExpression = expression.Expression.AcceptVisitor(visitor: this, context: context);

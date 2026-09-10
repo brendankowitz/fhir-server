@@ -187,6 +187,11 @@ namespace Microsoft.Health.Fhir.CosmosDb.Features.Search.Queries
             return null;
         }
 
+        public object VisitVectorSearch(VectorSearchExpression expression, Context context)
+        {
+            throw new SearchOperationNotSupportedException("Vector search requires SQL Server persistence.");
+        }
+
         /// <summary>
         /// Implemented in <see cref="FhirCosmosSearchService"/>
         /// </summary>

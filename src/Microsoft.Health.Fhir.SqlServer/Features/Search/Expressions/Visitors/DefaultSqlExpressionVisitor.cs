@@ -19,6 +19,9 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors
         {
         }
 
+        public override TOutput VisitVectorSearch(VectorSearchExpression expression, TContext context)
+            => throw new NotImplementedException("Vector search SQL generation has not been implemented.");
+
         public virtual TOutput VisitSqlRoot(SqlRootExpression expression, TContext context) => default;
 
         public virtual TOutput VisitTable(SearchParamTableExpression searchParamTableExpression, TContext context) => default;

@@ -61,6 +61,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
             return context;
         }
 
+        public override SearchParameterQueryGeneratorContext VisitVectorSearch(VectorSearchExpression expression, SearchParameterQueryGeneratorContext context)
+        {
+            throw new NotImplementedException("Vector search SQL generation has not been implemented.");
+        }
+
         public override SearchParameterQueryGeneratorContext VisitMissingSearchParameter(MissingSearchParameterExpression expression, SearchParameterQueryGeneratorContext context)
         {
             SearchParameterQueryGenerator delegatedGenerator = GetSearchParameterQueryGeneratorIfResourceColumnSearchParameter(expression);
