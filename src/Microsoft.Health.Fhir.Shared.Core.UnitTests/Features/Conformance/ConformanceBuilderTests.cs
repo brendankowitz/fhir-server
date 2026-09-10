@@ -284,6 +284,36 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Conformance
         }
 
         [Fact]
+        public void GivenAVectorSearchParameter_WhenSyncSearchParameters_ThenItIsIncludedInTheCapabilityStatement()
+        {
+            var vectorSearchParameter = new SearchParameterInfo(
+                "clinical-note",
+                "clinical-note",
+                SearchParamType.Special,
+                new Uri("http://example.org/fhir/SearchParameter/Observation-clinical-note"),
+                expression: "Observation.note.text",
+                baseResourceTypes: new[] { KnownResourceTypes.Observation })
+            {
+                VectorConfig = new VectorSearchParameterConfig
+                {
+                    ExtractionPolicy = VectorTextExtractionPolicy.Concatenate,
+                    MaxInputTokens = 8000,
+                },
+            };
+            _searchParameterDefinitionManager.GetSearchParameters(KnownResourceTypes.Observation)
+                .Returns(new[] { vectorSearchParameter });
+
+            _builder.SyncSearchParameters();
+
+            ITypedElement statement = _builder.Build();
+            string searchParameterPath = $"{ResourceQuery(KnownResourceTypes.Observation)}.searchParam.where(name = 'clinical-note')";
+
+            Assert.Equal("clinical-note", statement.Scalar($"{searchParameterPath}.name"));
+            Assert.Equal("special", statement.Scalar($"{searchParameterPath}.type"));
+            Assert.Equal(vectorSearchParameter.Url.ToString(), statement.Scalar($"{searchParameterPath}.definition"));
+        }
+
+        [Fact]
         public void GivenAConformanceBuilder_WhenAddingDefaultInteractions_ThenAuditEventDoesntHaveUpdateDelete()
         {
             _builder.PopulateDefaultResourceInteractions();

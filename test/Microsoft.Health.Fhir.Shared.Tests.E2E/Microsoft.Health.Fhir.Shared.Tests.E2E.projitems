@@ -137,6 +137,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)Rest\Search\TokenSearchTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Rest\Search\UriSearchTestFixture.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Rest\Search\UriSearchTests.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Rest\Search\VectorSearchTests.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Rest\Export\StartupForExportTestProvider.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Rest\SuppressExecutionContextHandler.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Rest\AuthenticationWarmupException.cs" />
