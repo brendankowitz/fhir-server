@@ -1897,7 +1897,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
             }
         }
 
-        private bool HasVectorSearch()
+        internal bool HasVectorSearch()
         {
             return _rootExpression?.SearchParamTableExpressions.Any(
                 tableExpression => tableExpression.QueryGenerator is VectorSearchQueryGenerator) == true;

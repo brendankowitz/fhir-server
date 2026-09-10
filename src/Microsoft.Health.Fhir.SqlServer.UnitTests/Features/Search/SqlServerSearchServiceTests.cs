@@ -123,6 +123,19 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                 NullLogger<SqlServerSearchService>.Instance);
         }
 
+        [Theory]
+        [InlineData(0.0, 1.0)]
+        [InlineData(2.0, 0.0)]
+        [InlineData(1.0, 0.5)]
+        [InlineData(-1.0, 1.0)]
+        [InlineData(3.0, 0.0)]
+        public void GivenVectorDistance_WhenConvertingToScore_ThenExpectedClampedScoreIsReturned(double distance, double expectedScore)
+        {
+            decimal score = SqlServerSearchService.ConvertVectorDistanceToScore(distance);
+
+            Assert.Equal((decimal)expectedScore, score);
+        }
+
         [Fact]
         public void Constructor_WithNullSearchOptionsFactory_ThrowsArgumentNullException()
         {

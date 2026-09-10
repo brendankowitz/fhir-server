@@ -10,19 +10,22 @@ using Microsoft.Health.Fhir.ValueSets;
 
 namespace Microsoft.Health.Fhir.Core.Features.Search
 {
-    public struct SearchResultEntry : IEquatable<SearchResultEntry>
+    public readonly struct SearchResultEntry : IEquatable<SearchResultEntry>
     {
-        public SearchResultEntry(ResourceWrapper resourceWrapper, SearchEntryMode searchEntryMode = SearchEntryMode.Match)
+        public SearchResultEntry(ResourceWrapper resourceWrapper, SearchEntryMode searchEntryMode = SearchEntryMode.Match, decimal? score = null)
         {
             EnsureArg.IsNotNull(resourceWrapper, nameof(resourceWrapper));
 
             Resource = resourceWrapper;
             SearchEntryMode = searchEntryMode;
+            Score = score;
         }
 
         public ResourceWrapper Resource { get; }
 
         public SearchEntryMode SearchEntryMode { get; }
+
+        public decimal? Score { get; }
 
         public static bool operator ==(SearchResultEntry left, SearchResultEntry right)
         {
@@ -36,7 +39,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 
         public bool Equals(SearchResultEntry other)
         {
-            return Equals(Resource, other.Resource) && SearchEntryMode == other.SearchEntryMode;
+            return Equals(Resource, other.Resource) && SearchEntryMode == other.SearchEntryMode && Score == other.Score;
         }
 
         public override bool Equals(object obj)
@@ -48,7 +51,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         {
             unchecked
             {
-                return ((Resource != null ? Resource.GetHashCode() : 0) * 397) ^ (int)SearchEntryMode;
+                int hashCode = ((Resource != null ? Resource.GetHashCode() : 0) * 397) ^ (int)SearchEntryMode;
+                return (hashCode * 397) ^ Score.GetHashCode();
             }
         }
     }

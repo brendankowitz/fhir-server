@@ -589,6 +589,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                     {
                         sqlCommand.CommandTimeout = (int)_sqlServerDataStoreConfiguration.CommandTimeout.TotalSeconds;
                         var isSortValueNeeded = false;
+                        var isVectorSearch = false;
 
                         var exportTimeTravel = clonedSearchOptions.QueryHints != null && ContainsStartSurrogateId(clonedSearchOptions);
                         if (exportTimeTravel)
@@ -618,6 +619,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
 
                             expression.AcceptVisitor(queryGenerator, clonedSearchOptions);
                             isSortValueNeeded = queryGenerator.IsSortValueNeeded(clonedSearchOptions);
+                            isVectorSearch = queryGenerator.HasVectorSearch();
 
                             SqlCommandSimplifier.RemoveRedundantParameters(stringBuilder, sqlCommand.Parameters, _logger);
 
@@ -749,12 +751,17 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                                             matchedResourceSurrogateIdStart = resourceSurrogateId;
                                         }
 
+                                        object currentSortValue = null;
+                                        if (isVectorSearch || (matchCount == clonedSearchOptions.MaxItemCount - 1 && isSortValueNeeded))
+                                        {
+                                            currentSortValue = reader.GetValue(SortValueColumnName);
+                                        }
+
                                         // If sort value needed, that means we have an extra column tracking sort value.
                                         // Keep track of sort value if this is the last row.
                                         if (matchCount == clonedSearchOptions.MaxItemCount - 1 && isSortValueNeeded)
                                         {
-                                            var tempSortValue = reader.GetValue(SortValueColumnName);
-                                            sortValue = (tempSortValue as DateTime?) != null ? (tempSortValue as DateTime?).Value.ToString("o") : tempSortValue.ToString();
+                                            sortValue = (currentSortValue as DateTime?) != null ? (currentSortValue as DateTime?).Value.ToString("o") : currentSortValue.ToString();
                                         }
 
                                         matchCount++;
@@ -775,7 +782,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                                             {
                                                 IsHistory = isHistory,
                                             },
-                                            SearchEntryMode.Match));
+                                            SearchEntryMode.Match,
+                                            isVectorSearch ? ConvertVectorDistanceToScore(Convert.ToDouble(currentSortValue, CultureInfo.InvariantCulture)) : null));
                                     }
                                     else
                                     {
@@ -2489,6 +2497,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
             }
 
             return results.Count == 0 ? new SearchResult(0, searchOptions.UnsupportedSearchParams) : new SearchResult(results, null, null, searchOptions.UnsupportedSearchParams);
+        }
+
+        internal static decimal ConvertVectorDistanceToScore(double distance)
+        {
+            return Math.Clamp(1m - ((decimal)distance / 2m), 0m, 1m);
         }
 
         private static bool TryExtractResourceKeys(SqlRootExpression expression, SearchOptions searchOptions, out IReadOnlyList<ResourceKey> resourceKeys)

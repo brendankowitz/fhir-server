@@ -103,6 +103,59 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Formatters
             await Run(false, raw, query);
         }
 
+        [Fact]
+        public async Task GivenRawBundleEntryWithSearchScore_WhenWritingResponseBody_ThenSerializedOutputContainsScore()
+        {
+            (string standardOutput, string rawOutput) = await SerializeRawSearchBundleAsync(0.75m);
+
+            Assert.NotEmpty(standardOutput);
+            Assert.Empty(rawOutput);
+            var serializedBundle = JObject.Parse(standardOutput);
+            Assert.Equal(0.75m, serializedBundle["entry"][0]["search"]["score"].Value<decimal>());
+        }
+
+        [Fact]
+        public async Task GivenRawBundleEntryWithoutSearchScore_WhenWritingResponseBody_ThenOptimizedSerializerIsUsed()
+        {
+            (string standardOutput, string rawOutput) = await SerializeRawSearchBundleAsync(score: null);
+
+            Assert.Empty(standardOutput);
+            Assert.NotEmpty(rawOutput);
+            Hl7.Fhir.Model.Bundle serializedBundle = Parser.Parse<Hl7.Fhir.Model.Bundle>(rawOutput);
+            Assert.Equal(SearchEntryMode.Match, Assert.Single(serializedBundle.Entry).Search.Mode);
+            Assert.Null(serializedBundle.Entry[0].Search.Score);
+        }
+
+        private static async System.Threading.Tasks.Task<(string StandardOutput, string RawOutput)> SerializeRawSearchBundleAsync(decimal? score)
+        {
+            using var writer = new StringWriter(new StringBuilder());
+            using var body = new MemoryStream();
+            var httpContext = new DefaultHttpContext();
+            httpContext.Response.Body = body;
+            var bundle = (Hl7.Fhir.Model.Bundle)CreateObject(bundle: true, raw: true);
+            bundle.Type = BundleType.Searchset;
+            bundle.Entry[0].Search = new SearchComponent
+            {
+                Mode = SearchEntryMode.Match,
+                Score = score,
+            };
+            var writeContext = new OutputFormatterWriteContext(
+                httpContext,
+                (_, _) => writer,
+                typeof(Hl7.Fhir.Model.Bundle),
+                bundle);
+            var formatter = new FhirJsonOutputFormatter(
+                new FhirJsonSerializer(),
+                Deserializers.ResourceDeserializer,
+                ArrayPool<char>.Shared,
+                new BundleSerializer(),
+                ModelInfoProvider.Instance);
+
+            await formatter.WriteResponseBodyAsync(writeContext, Encoding.UTF8);
+
+            return (writer.ToString(), Encoding.UTF8.GetString(body.ToArray()));
+        }
+
         private static async Task Run(
             bool bundle,
             bool raw,

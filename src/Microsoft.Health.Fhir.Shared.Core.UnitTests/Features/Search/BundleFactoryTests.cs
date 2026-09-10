@@ -20,6 +20,7 @@ using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Shared.Core.Features.Search;
 using Microsoft.Health.Fhir.Tests.Common;
+using Microsoft.Health.Fhir.ValueSets;
 using Microsoft.Health.Test.Utilities;
 using NSubstitute;
 using Xunit;
@@ -139,6 +140,40 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
                     Assert.Equal(Bundle.SearchEntryMode.Match, raw.Search.Mode);
                 }
             }
+        }
+
+        [Fact]
+        public void GivenASearchResultEntryWithScore_WhenCreateSearchBundle_ThenScoreShouldBeSet()
+        {
+            _urlResolver.ResolveResourceWrapperUrl(Arg.Any<ResourceWrapper>()).Returns(_selfUrl);
+            _urlResolver.ResolveRouteUrl(_unsupportedSearchParameters).Returns(_selfUrl);
+            var resultEntry = new SearchResultEntry(
+                CreateResourceWrapper(Samples.GetDefaultObservation().UpdateId("123"), HttpMethod.Post),
+                SearchEntryMode.Match,
+                0.75m);
+
+            ResourceElement actual = _bundleFactory.CreateSearchBundle(
+                new SearchResult(new[] { resultEntry }, null, null, _unsupportedSearchParameters));
+
+            Bundle.EntryComponent entry = Assert.Single(actual.ToPoco<Bundle>().Entry);
+            Assert.Equal(Bundle.SearchEntryMode.Match, entry.Search.Mode);
+            Assert.Equal(0.75m, entry.Search.Score);
+        }
+
+        [Fact]
+        public void GivenASearchResultEntryWithoutScore_WhenCreateSearchBundle_ThenScoreShouldBeOmitted()
+        {
+            _urlResolver.ResolveResourceWrapperUrl(Arg.Any<ResourceWrapper>()).Returns(_selfUrl);
+            _urlResolver.ResolveRouteUrl(_unsupportedSearchParameters).Returns(_selfUrl);
+            var resultEntry = new SearchResultEntry(
+                CreateResourceWrapper(Samples.GetDefaultObservation().UpdateId("123"), HttpMethod.Post));
+
+            ResourceElement actual = _bundleFactory.CreateSearchBundle(
+                new SearchResult(new[] { resultEntry }, null, null, _unsupportedSearchParameters));
+
+            Bundle.EntryComponent entry = Assert.Single(actual.ToPoco<Bundle>().Entry);
+            Assert.Equal(Bundle.SearchEntryMode.Match, entry.Search.Mode);
+            Assert.Null(entry.Search.Score);
         }
 
         private ResourceWrapper CreateResourceWrapper(ResourceElement resourceElement, HttpMethod httpMethod)
