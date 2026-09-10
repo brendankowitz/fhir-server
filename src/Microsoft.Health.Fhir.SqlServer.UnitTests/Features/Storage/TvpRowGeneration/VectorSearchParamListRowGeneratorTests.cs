@@ -33,6 +33,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage.TvpRowGener
     {
         private readonly SqlServerFhirModel _model;
         private readonly SearchParameterToSearchValueTypeMap _searchParameterTypeMap = new SearchParameterToSearchValueTypeMap();
+        private readonly CompressedRawResourceConverter _compressedRawResourceConverter = new CompressedRawResourceConverter();
 
         public VectorSearchParamListRowGeneratorTests()
         {
@@ -99,6 +100,22 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage.TvpRowGener
         }
 
         [Fact]
+        public void GivenEmbedding_WhenTryGenerateRow_ThenCompressedSourceTextRoundTrips()
+        {
+            // Arrange
+            var generator = CreateGenerator(CreateAvailableCapabilityProvider(1));
+            VectorSearchValue searchValue = CreateSearchValue("source text with unicode \u00E9vidence", 0, new[] { 0.5f });
+
+            // Act
+            bool generated = generator.TryGenerateRow(1, 2, 3, searchValue, new HashSet<VectorSearchParamListRow>(), out VectorSearchParamListRow row);
+
+            // Assert
+            Assert.True(generated);
+            Assert.Equal(0, row.SourceTextCompressed.Position);
+            Assert.Equal(searchValue.SourceText, _compressedRawResourceConverter.ReadCompressedRawResource(row.SourceTextCompressed));
+        }
+
+        [Fact]
         public void GivenMissingEmbedding_WhenTryGenerateRow_ThenDoesNotGenerateRow()
         {
             // Arrange
@@ -150,7 +167,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage.TvpRowGener
         }
 
         [Fact]
-        public void GivenDuplicateKeyAndDifferentEmbeddingAndHash_WhenTryGenerateRow_ThenDoesNotGenerateSecondRow()
+        public void GivenDuplicateKeyAndDifferentEmbeddingHashAndSourceText_WhenTryGenerateRow_ThenDoesNotGenerateSecondRow()
         {
             // Arrange
             var generator = CreateGenerator(CreateAvailableCapabilityProvider(1));
@@ -189,7 +206,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage.TvpRowGener
 
         private VectorSearchParamListRowGenerator CreateGenerator(IVectorSearchCapabilityProvider capabilityProvider)
         {
-            return new VectorSearchParamListRowGenerator(_model, _searchParameterTypeMap, capabilityProvider);
+            return new VectorSearchParamListRowGenerator(_model, _searchParameterTypeMap, capabilityProvider, _compressedRawResourceConverter);
         }
 
         private static IVectorSearchCapabilityProvider CreateAvailableCapabilityProvider(short embeddingModelId)

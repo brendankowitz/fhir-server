@@ -142,6 +142,44 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
         }
 
         [Fact]
+        public async Task GivenZeroMaxChunksPerSearchParameter_WhenInitialized_ThenThrowsBeforeExecutingSql()
+        {
+            // Arrange
+            using VectorSearchCapabilityProvider provider = CreateProvider(
+                configure: configuration => configuration.MaxChunksPerSearchParameter = 0);
+
+            // Act
+            InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => provider.EnsureInitializedAsync(CancellationToken.None));
+
+            // Assert
+            Assert.Contains("VectorSearch:MaxChunksPerSearchParameter", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("0", exception.Message, StringComparison.Ordinal);
+            Assert.Empty(_sqlRetryService.ReceivedCalls());
+        }
+
+        [Fact]
+        public async Task GivenChunkOverlapIsNotLessThanChunkSize_WhenInitialized_ThenThrowsBeforeExecutingSql()
+        {
+            // Arrange
+            using VectorSearchCapabilityProvider provider = CreateProvider(
+                configure: configuration =>
+                {
+                    configuration.ChunkSizeTokens = 100;
+                    configuration.ChunkOverlapTokens = 100;
+                });
+
+            // Act
+            InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => provider.EnsureInitializedAsync(CancellationToken.None));
+
+            // Assert
+            Assert.Contains("VectorSearch:ChunkOverlapTokens", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("100", exception.Message, StringComparison.Ordinal);
+            Assert.Empty(_sqlRetryService.ReceivedCalls());
+        }
+
+        [Fact]
         public async Task GivenPersistedModelHasDifferentDimension_WhenInitialized_ThenThrowsInvalidOperationException()
         {
             // Arrange
@@ -216,16 +254,20 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
 
         private VectorSearchCapabilityProvider CreateProvider(
             bool enabled = true,
-            int? currentSchemaVersion = SchemaVersionConstants.VectorSearch)
+            int? currentSchemaVersion = SchemaVersionConstants.VectorSearch,
+            Action<VectorSearchConfiguration> configure = null)
         {
             var schemaInformation = new SchemaInformation(SchemaVersionConstants.Min, SchemaVersionConstants.Max)
             {
                 Current = currentSchemaVersion,
             };
-            return CreateProvider(schemaInformation, enabled);
+            return CreateProvider(schemaInformation, enabled, configure);
         }
 
-        private VectorSearchCapabilityProvider CreateProvider(SchemaInformation schemaInformation, bool enabled = true)
+        private VectorSearchCapabilityProvider CreateProvider(
+            SchemaInformation schemaInformation,
+            bool enabled = true,
+            Action<VectorSearchConfiguration> configure = null)
         {
             var configuration = new VectorSearchConfiguration
             {
@@ -234,6 +276,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
                 EmbeddingDimensions = 1536,
                 EmbeddingModelVersion = "test-version",
             };
+            configure?.Invoke(configuration);
 
             return new VectorSearchCapabilityProvider(
                 _sqlRetryService,

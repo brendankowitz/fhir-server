@@ -199,8 +199,8 @@ BEGIN TRY
     SET @AffectedRows += @@rowcount
 
     INSERT INTO dbo.VectorSearchParam 
-           ( ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, Embedding )
-      SELECT ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, CAST(Embedding AS VECTOR(1536))
+           ( ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, SourceTextCompressed, Embedding )
+      SELECT ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, SourceTextCompressed, CAST(Embedding AS VECTOR(1536))
         FROM @VectorSearchParams
     SET @AffectedRows += @@rowcount
 
@@ -312,8 +312,8 @@ BEGIN TRY
     SET @AffectedRows += @@rowcount
 
     INSERT INTO dbo.VectorSearchParam 
-           ( ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, Embedding )
-      SELECT ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, CAST(Embedding AS VECTOR(1536))
+           ( ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, SourceTextCompressed, Embedding )
+      SELECT ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal, EmbeddingModelId, SourceTextHash, SourceTextCompressed, CAST(Embedding AS VECTOR(1536))
         FROM (SELECT TOP (@DummyTop) * FROM @VectorSearchParams) A
         WHERE EXISTS (SELECT * FROM @Existing B WHERE B.ResourceTypeId = A.ResourceTypeId AND B.SurrogateId = A.ResourceSurrogateId)
           AND NOT EXISTS (SELECT * FROM dbo.VectorSearchParam C WHERE C.ResourceTypeId = A.ResourceTypeId AND C.ResourceSurrogateId = A.ResourceSurrogateId)

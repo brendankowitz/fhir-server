@@ -100,6 +100,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                 return;
             }
 
+            ValidateConfiguration();
+
             await _initializationLock.WaitAsync(cancellationToken);
 
             try
@@ -152,6 +154,34 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
             finally
             {
                 _initializationLock.Release();
+            }
+        }
+
+        private void ValidateConfiguration()
+        {
+            // The chunker estimates four characters per token; 2048 leaves a 4x margin below the client's exact 8192-token limit.
+            if (_configuration.ChunkSizeTokens < 1 || _configuration.ChunkSizeTokens > 2048)
+            {
+                throw new InvalidOperationException(
+                    $"VectorSearch:ChunkSizeTokens must be between 1 and 2048, but was {_configuration.ChunkSizeTokens}.");
+            }
+
+            if (_configuration.ChunkOverlapTokens < 0 || _configuration.ChunkOverlapTokens >= _configuration.ChunkSizeTokens)
+            {
+                throw new InvalidOperationException(
+                    $"VectorSearch:ChunkOverlapTokens must be between 0 and one less than VectorSearch:ChunkSizeTokens ({_configuration.ChunkSizeTokens}), but was {_configuration.ChunkOverlapTokens}.");
+            }
+
+            if (_configuration.MaxChunksPerSearchParameter < 1)
+            {
+                throw new InvalidOperationException(
+                    $"VectorSearch:MaxChunksPerSearchParameter must be at least 1, but was {_configuration.MaxChunksPerSearchParameter}.");
+            }
+
+            if (_configuration.EmbeddingDimensions < 1)
+            {
+                throw new InvalidOperationException(
+                    $"VectorSearch:EmbeddingDimensions must be at least 1, but was {_configuration.EmbeddingDimensions}.");
             }
         }
 

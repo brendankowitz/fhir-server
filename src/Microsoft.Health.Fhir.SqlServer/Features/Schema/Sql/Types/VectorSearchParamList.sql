@@ -9,5 +9,6 @@ CREATE TYPE dbo.VectorSearchParamList AS TABLE
    ,Embedding                varchar(max)  NOT NULL
    ,EmbeddingModelId         smallint      NOT NULL
    ,SourceTextHash           varbinary(32) NULL
+   ,SourceTextCompressed     varbinary(max) NULL
 )
 GO

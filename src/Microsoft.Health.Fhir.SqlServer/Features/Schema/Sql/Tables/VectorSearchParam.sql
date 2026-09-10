@@ -5,7 +5,8 @@ CREATE TABLE dbo.VectorSearchParam
     SearchParamId       smallint   NOT NULL,
     ChunkOrdinal        smallint   NOT NULL CONSTRAINT DF_VectorSearchParam_ChunkOrdinal DEFAULT 0,
     EmbeddingModelId    smallint   NOT NULL,
-    SourceTextHash      varbinary(32) NULL,
+    SourceTextHash        varbinary(32)  NULL,
+    SourceTextCompressed  varbinary(max) NULL,
 
     CONSTRAINT PKC_VectorSearchParam PRIMARY KEY CLUSTERED (ResourceTypeId, ResourceSurrogateId, SearchParamId, ChunkOrdinal)
     WITH (DATA_COMPRESSION = PAGE)
