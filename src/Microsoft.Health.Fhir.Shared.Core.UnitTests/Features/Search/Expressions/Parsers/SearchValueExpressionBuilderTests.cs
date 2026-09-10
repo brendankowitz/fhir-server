@@ -89,6 +89,47 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Expressions.Parse
                 () => _parser.Parse(CreateSearchParameter(SearchParamType.String), new SearchModifier(SearchModifierCode.Missing), "test"));
         }
 
+        [Theory]
+        [InlineData("chest pain")]
+        [InlineData("chest pain, radiating to left arm")]
+        public void GivenAVectorSearchParameter_WhenBuilt_ThenQueryTextIsPreserved(string queryText)
+        {
+            SearchParameterInfo searchParameter = CreateVectorSearchParameter();
+
+            Expression expression = _parser.Parse(searchParameter, modifier: null, queryText);
+
+            ValidateSearchParameterExpression(
+                expression,
+                DefaultParamName,
+                inner =>
+                {
+                    VectorSearchExpression vector = Assert.IsType<VectorSearchExpression>(inner);
+                    Assert.Same(searchParameter, vector.Parameter);
+                    Assert.Equal(queryText, vector.QueryText);
+                    Assert.Null(vector.K);
+                    Assert.Null(vector.MinScore);
+                });
+        }
+
+        [Fact]
+        public void GivenAVectorSearchParameterWithModifier_WhenBuilt_ThenInvalidSearchOperationExceptionShouldBeThrown()
+        {
+            Assert.Throws<InvalidSearchOperationException>(
+                () => _parser.Parse(CreateVectorSearchParameter(), new SearchModifier(SearchModifierCode.Exact), "chest pain"));
+        }
+
+        [Fact]
+        public void GivenAVectorSearchParameterWithMissingModifier_WhenBuilt_ThenMissingExpressionShouldBeCreated()
+        {
+            Expression expression = _parser.Parse(
+                CreateVectorSearchParameter(),
+                new SearchModifier(SearchModifierCode.Missing),
+                "true");
+
+            ValidateMissingParamExpression(expression, DefaultParamName, expectedIsMissing: true);
+            Assert.IsNotType<VectorSearchExpression>(expression);
+        }
+
         [Fact]
         public void GivenMultipleValues_WhenBuilding_ThenCorrectExpressionShouldBeCreated()
         {
@@ -941,6 +982,13 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search.Expressions.Parse
                 Code = DefaultParamName,
                 Type = searchParameterType,
             }.ToInfo();
+        }
+
+        private SearchParameterInfo CreateVectorSearchParameter()
+        {
+            SearchParameterInfo searchParameter = CreateSearchParameter(SearchParamType.String);
+            searchParameter.VectorConfig = new VectorSearchParameterConfig();
+            return searchParameter;
         }
 
         private void Validate(

@@ -52,6 +52,10 @@ namespace Microsoft.Health.Fhir.Core.Features
         /// <remarks>Specifies if the total number of matching search results should be included in the returned Bundle.</remarks>
         public const string Total = "_total";
 
+        public const string VectorK = "_vectorK";
+
+        public const string VectorMinScore = "_vectorMinScore";
+
         public const string List = "_list";
 
         public const string Id = "_id";

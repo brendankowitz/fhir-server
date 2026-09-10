@@ -68,6 +68,17 @@ namespace Microsoft.Health.Fhir.Core.Features.Search.Expressions.Parsers
                 return Expression.MissingSearchParameter(searchParameter, isMissing);
             }
 
+            if (searchParameter.VectorConfig != null)
+            {
+                if (modifier != null)
+                {
+                    throw new InvalidSearchOperationException(
+                        string.Format(CultureInfo.InvariantCulture, Core.Resources.ModifierNotSupported, modifier, searchParameter.Code));
+                }
+
+                return Expression.SearchParameter(searchParameter, new VectorSearchExpression(searchParameter, value, k: null, minScore: null));
+            }
+
             if (modifier?.SearchModifierCode == SearchModifierCode.Text)
             {
                 // We have to handle :text modifier specially because if :text modifier is supplied for token search param,

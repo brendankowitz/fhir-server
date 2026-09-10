@@ -120,6 +120,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 
             string continuationToken = null;
             string feedRange = null;
+            int? vectorK = null;
+            double? vectorMinScore = null;
 
             // $includes related parameters
             string includesContinuationToken = null;
@@ -188,6 +190,40 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                     {
                         searchParams.Add(KnownQueryParameterNames.Type, query.Item2);
                     }
+                }
+                else if (string.Equals(query.Item1, KnownQueryParameterNames.VectorK, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!int.TryParse(query.Item2, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsedK) ||
+                        parsedK <= 0 ||
+                        parsedK > _featureConfiguration.VectorSearch.MaxK)
+                    {
+                        throw new BadRequestException(
+                            string.Format(
+                                CultureInfo.InvariantCulture,
+                                "The value '{0}' for query parameter '{1}' must be a positive integer no greater than {2}.",
+                                query.Item2,
+                                KnownQueryParameterNames.VectorK,
+                                _featureConfiguration.VectorSearch.MaxK));
+                    }
+
+                    vectorK = parsedK;
+                }
+                else if (string.Equals(query.Item1, KnownQueryParameterNames.VectorMinScore, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!double.TryParse(query.Item2, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedMinScore) ||
+                        !double.IsFinite(parsedMinScore) ||
+                        parsedMinScore < 0 ||
+                        parsedMinScore > 1)
+                    {
+                        throw new BadRequestException(
+                            string.Format(
+                                CultureInfo.InvariantCulture,
+                                "The value '{0}' for query parameter '{1}' must be a number between 0 and 1, inclusive.",
+                                query.Item2,
+                                KnownQueryParameterNames.VectorMinScore));
+                    }
+
+                    vectorMinScore = parsedMinScore;
                 }
                 else if (string.IsNullOrWhiteSpace(query.Item1) || string.IsNullOrWhiteSpace(query.Item2))
                 {
@@ -413,6 +449,12 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             searchExpressions.AddRange(searchParams.Parameters.Distinct().Select(
             q =>
             {
+                if (IsDisabledVectorSearchParameter(resourceTypesString, q.Item1))
+                {
+                    unsupportedSearchParameters.Add(q);
+                    return null;
+                }
+
                 try
                 {
                     var parsed = _expressionParser.Parse(resourceTypesString, q.Item1, q.Item2);
@@ -531,6 +573,25 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                 searchOptions.Expression = Expression.And(searchExpressions.ToArray());
             }
 
+            if (searchOptions.Expression != null)
+            {
+                var vectorSearchRewriter = new VectorSearchOptionsRewriter(
+                    vectorK,
+                    vectorMinScore,
+                    _featureConfiguration.VectorSearch.MaxQueryTextLength);
+
+                searchOptions.Expression = searchOptions.Expression.AcceptVisitor(vectorSearchRewriter, context: null);
+
+                if ((vectorK.HasValue || vectorMinScore.HasValue) && !vectorSearchRewriter.FoundVectorSearch)
+                {
+                    throw CreateVectorTuningWithoutVectorException();
+                }
+            }
+            else if (vectorK.HasValue || vectorMinScore.HasValue)
+            {
+                throw CreateVectorTuningWithoutVectorException();
+            }
+
             invalidSearchParameters.AddRange(unsupportedSearchParameters);
             searchOptions.UnsupportedSearchParams = invalidSearchParameters;
 
@@ -635,6 +696,31 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             }
 
             return searchOptions;
+        }
+
+        private bool IsDisabledVectorSearchParameter(string[] resourceTypes, string key)
+        {
+            if (_featureConfiguration.VectorSearch.Enabled || string.IsNullOrWhiteSpace(key))
+            {
+                return false;
+            }
+
+            int modifierSeparator = key.IndexOf(':', StringComparison.Ordinal);
+            string parameterCode = modifierSeparator < 0 ? key : key.Substring(0, modifierSeparator);
+
+            return resourceTypes.Any(resourceType =>
+                _searchParameterDefinitionManager.TryGetSearchParameter(resourceType, parameterCode, out SearchParameterInfo parameter) &&
+                parameter.VectorConfig != null);
+        }
+
+        private static BadRequestException CreateVectorTuningWithoutVectorException()
+        {
+            return new BadRequestException(
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Query parameters '{0}' and '{1}' require a vector search parameter.",
+                    KnownQueryParameterNames.VectorK,
+                    KnownQueryParameterNames.VectorMinScore));
         }
 
         private IEnumerable<IncludeExpression> ParseIncludeIterateExpressions(IList<(string query, IncludeModifier modifier)> includes, string[] typesString, bool isReversed)
@@ -951,6 +1037,43 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                         }
                     }
                 }
+            }
+        }
+
+        private sealed class VectorSearchOptionsRewriter : ExpressionRewriter<object>
+        {
+            private readonly int? _k;
+            private readonly double? _minScore;
+            private readonly int _maxQueryTextLength;
+
+            public VectorSearchOptionsRewriter(int? k, double? minScore, int maxQueryTextLength)
+            {
+                _k = k;
+                _minScore = minScore;
+                _maxQueryTextLength = maxQueryTextLength;
+            }
+
+            public bool FoundVectorSearch { get; private set; }
+
+            public override Expression VisitVectorSearch(VectorSearchExpression expression, object context)
+            {
+                FoundVectorSearch = true;
+
+                if (expression.QueryText.Length > _maxQueryTextLength)
+                {
+                    throw new BadRequestException(
+                        string.Format(
+                            CultureInfo.InvariantCulture,
+                            "The vector query text cannot exceed {0} characters.",
+                            _maxQueryTextLength));
+                }
+
+                if (expression.K == _k && expression.MinScore == _minScore)
+                {
+                    return expression;
+                }
+
+                return new VectorSearchExpression(expression.Parameter, expression.QueryText, _k, _minScore);
             }
         }
     }

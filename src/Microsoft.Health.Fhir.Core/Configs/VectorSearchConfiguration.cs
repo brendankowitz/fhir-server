@@ -91,6 +91,11 @@ namespace Microsoft.Health.Fhir.Core.Configs
         public int DefaultK { get; set; } = 200;
 
         /// <summary>
+        /// Gets or sets the maximum number of nearest neighbors that can be requested.
+        /// </summary>
+        public int MaxK { get; set; } = 1000;
+
+        /// <summary>
         /// Gets or sets the vector query oversampling factor.
         /// </summary>
         public double OversamplingFactor { get; set; } = 2.0;

@@ -31,6 +31,7 @@ using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Xunit;
 using static Microsoft.Health.Fhir.Core.UnitTests.Features.Search.SearchExpressionTestHelper;
+using Expression = Microsoft.Health.Fhir.Core.Features.Search.Expressions.Expression;
 using SortOrder = Microsoft.Health.Fhir.Core.Features.Search.SortOrder;
 
 namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
@@ -47,6 +48,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
 
         private readonly IExpressionParser _expressionParser = Substitute.For<IExpressionParser>();
         private readonly SearchOptionsFactory _factory;
+        private readonly ISearchParameterDefinitionManager _searchParameterDefinitionManager;
         private readonly SearchParameterInfo _resourceTypeSearchParameterInfo;
         private readonly SearchParameterInfo _lastUpdatedSearchParameterInfo;
         private readonly CoreFeatureConfiguration _coreFeatures;
@@ -55,12 +57,12 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
 
         public SearchOptionsFactoryTests()
         {
-            var searchParameterDefinitionManager = Substitute.For<ISearchParameterDefinitionManager>();
+            _searchParameterDefinitionManager = Substitute.For<ISearchParameterDefinitionManager>();
             _resourceTypeSearchParameterInfo = new SearchParameter { Name = SearchParameterNames.ResourceType, Code = SearchParameterNames.ResourceType, Type = SearchParamType.String, Url = SearchParameterNames.ResourceTypeUri.AbsoluteUri }.ToInfo();
             _lastUpdatedSearchParameterInfo = new SearchParameter { Name = SearchParameterNames.LastUpdated, Code = SearchParameterNames.LastUpdated, Type = SearchParamType.String }.ToInfo();
-            searchParameterDefinitionManager.GetSearchParameter(Arg.Any<string>(), Arg.Any<string>()).Throws(ci => new SearchParameterNotSupportedException(ci.ArgAt<string>(0), ci.ArgAt<string>(1)));
-            searchParameterDefinitionManager.GetSearchParameter(Arg.Any<string>(), SearchParameterNames.ResourceType).Returns(_resourceTypeSearchParameterInfo);
-            searchParameterDefinitionManager.GetSearchParameter(Arg.Any<string>(), SearchParameterNames.LastUpdated).Returns(_lastUpdatedSearchParameterInfo);
+            _searchParameterDefinitionManager.GetSearchParameter(Arg.Any<string>(), Arg.Any<string>()).Throws(ci => new SearchParameterNotSupportedException(ci.ArgAt<string>(0), ci.ArgAt<string>(1)));
+            _searchParameterDefinitionManager.GetSearchParameter(Arg.Any<string>(), SearchParameterNames.ResourceType).Returns(_resourceTypeSearchParameterInfo);
+            _searchParameterDefinitionManager.GetSearchParameter(Arg.Any<string>(), SearchParameterNames.LastUpdated).Returns(_lastUpdatedSearchParameterInfo);
             _coreFeatures = new CoreFeatureConfiguration();
             _defaultFhirRequestContext = new DefaultFhirRequestContext();
 
@@ -69,7 +71,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
             RequestContextAccessor<IFhirRequestContext> contextAccessor = _defaultFhirRequestContext.SetupAccessor();
             _factory = new SearchOptionsFactory(
                 _expressionParser,
-                () => searchParameterDefinitionManager,
+                () => _searchParameterDefinitionManager,
                 new OptionsWrapper<CoreFeatureConfiguration>(_coreFeatures),
                 contextAccessor,
                 _sortingValidator,
@@ -703,6 +705,81 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
             Assert.Single(options.UnsupportedSearchParams);
         }
 
+        [Fact]
+        public void GivenVectorK_WhenCreated_ThenVectorExpressionContainsK()
+        {
+            VectorSearchExpression vector = CreateVectorSearchOptions(
+                Tuple.Create("clinical-text", "chest pain"),
+                Tuple.Create(KnownQueryParameterNames.VectorK, "50"));
+
+            Assert.Equal(50, vector.K);
+            Assert.Null(vector.MinScore);
+        }
+
+        [Fact]
+        public void GivenVectorMinScore_WhenCreated_ThenVectorExpressionContainsMinScore()
+        {
+            VectorSearchExpression vector = CreateVectorSearchOptions(
+                Tuple.Create("clinical-text", "chest pain"),
+                Tuple.Create(KnownQueryParameterNames.VectorMinScore, "0.5"));
+
+            Assert.Null(vector.K);
+            Assert.Equal(0.5, vector.MinScore);
+        }
+
+        [Fact]
+        public void GivenVectorTuningWithoutVectorSearchParameter_WhenCreated_ThenBadRequestExceptionIsThrown()
+        {
+            Assert.Throws<BadRequestException>(() => CreateSearchOptions(
+                queryParameters: new[] { Tuple.Create(KnownQueryParameterNames.VectorK, "50") }));
+        }
+
+        [Theory]
+        [InlineData("0")]
+        [InlineData("-1")]
+        [InlineData("1001")]
+        public void GivenInvalidVectorK_WhenCreated_ThenBadRequestExceptionIsThrown(string value)
+        {
+            _coreFeatures.VectorSearch.MaxK = 1000;
+
+            Assert.Throws<BadRequestException>(() => CreateVectorSearchOptions(
+                Tuple.Create("clinical-text", "chest pain"),
+                Tuple.Create(KnownQueryParameterNames.VectorK, value)));
+        }
+
+        [Theory]
+        [InlineData("-0.1")]
+        [InlineData("1.1")]
+        [InlineData("NaN")]
+        public void GivenInvalidVectorMinScore_WhenCreated_ThenBadRequestExceptionIsThrown(string value)
+        {
+            Assert.Throws<BadRequestException>(() => CreateVectorSearchOptions(
+                Tuple.Create("clinical-text", "chest pain"),
+                Tuple.Create(KnownQueryParameterNames.VectorMinScore, value)));
+        }
+
+        [Fact]
+        public void GivenVectorQueryTextAboveMaximumLength_WhenCreated_ThenBadRequestExceptionIsThrown()
+        {
+            _coreFeatures.VectorSearch.MaxQueryTextLength = 10;
+
+            Assert.Throws<BadRequestException>(() => CreateVectorSearchOptions(
+                Tuple.Create("clinical-text", new string('x', 11))));
+        }
+
+        [Fact]
+        public void GivenDisabledVectorSearch_WhenCreated_ThenVectorParameterIsUnsupported()
+        {
+            ConfigureVectorSearchParameter("clinical-text");
+            _coreFeatures.VectorSearch.Enabled = false;
+
+            SearchOptions options = CreateSearchOptions(
+                queryParameters: new[] { Tuple.Create("clinical-text", "chest pain") });
+
+            Assert.Contains(Tuple.Create("clinical-text", "chest pain"), options.UnsupportedSearchParams);
+            _expressionParser.DidNotReceive().Parse(Arg.Any<string[]>(), "clinical-text", Arg.Any<string>());
+        }
+
         [Theory]
         [InlineData(ResourceVersionType.Latest)]
         [InlineData(ResourceVersionType.History)]
@@ -875,6 +952,61 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
             return _factory.Create(compartmentType, compartmentId, resourceType, queryParameters, resourceVersionTypes: resourceVersionTypes, isIncludesOperation: isIncludesOperation);
         }
 
+        private VectorSearchExpression CreateVectorSearchOptions(params Tuple<string, string>[] queryParameters)
+        {
+            SearchParameterInfo searchParameter = ConfigureVectorSearchParameter("clinical-text");
+            _coreFeatures.VectorSearch.Enabled = true;
+            _expressionParser.Parse(Arg.Any<string[]>(), "clinical-text", Arg.Any<string>())
+                .Returns(call => Expression.SearchParameter(
+                    searchParameter,
+                    new VectorSearchExpression(searchParameter, call.ArgAt<string>(2), k: null, minScore: null)));
+
+            SearchOptions options = CreateSearchOptions(queryParameters: queryParameters);
+
+            return FindVectorSearchExpression(options.Expression);
+        }
+
+        private SearchParameterInfo ConfigureVectorSearchParameter(string code)
+        {
+            var searchParameter = new SearchParameterInfo(
+                code,
+                code,
+                Microsoft.Health.Fhir.ValueSets.SearchParamType.String,
+                new Uri($"http://example.org/SearchParameter/{code}"))
+            {
+                VectorConfig = new VectorSearchParameterConfig(),
+            };
+
+            _searchParameterDefinitionManager.TryGetSearchParameter(Arg.Any<string>(), code, out Arg.Any<SearchParameterInfo>())
+                .Returns(call =>
+                {
+                    call[2] = searchParameter;
+                    return true;
+                });
+
+            return searchParameter;
+        }
+
+        private static VectorSearchExpression FindVectorSearchExpression(Expression expression)
+        {
+            if (expression is VectorSearchExpression vector)
+            {
+                return vector;
+            }
+
+            if (expression is SearchParameterExpression searchParameter)
+            {
+                return FindVectorSearchExpression(searchParameter.Expression);
+            }
+
+            if (expression is MultiaryExpression multiary)
+            {
+                return multiary.Expressions.Select(FindVectorSearchExpression).SingleOrDefault(found => found != null);
+            }
+
+            return null;
+        }
+
         // A simple stub implementation for Expression used in our test.
         private class StubExpression : Microsoft.Health.Fhir.Core.Features.Search.Expressions.Expression
         {
@@ -897,7 +1029,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
 
             public override TOutput AcceptVisitor<TContext, TOutput>(IExpressionVisitor<TContext, TOutput> visitor, TContext context)
             {
-                throw new NotImplementedException();
+                return (TOutput)(object)this;
             }
         }
 

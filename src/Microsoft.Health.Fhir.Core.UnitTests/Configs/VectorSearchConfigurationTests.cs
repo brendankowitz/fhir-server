@@ -28,6 +28,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Configs
             Assert.Equal(EmbeddingPersistenceMode.Synchronous, config.VectorSearch.EmbeddingPersistenceMode);
             Assert.Equal(1536, config.VectorSearch.EmbeddingDimensions);
             Assert.Equal(200, config.VectorSearch.DefaultK);
+            Assert.Equal(1000, config.VectorSearch.MaxK);
             Assert.Equal(2.0, config.VectorSearch.OversamplingFactor);
             Assert.Equal(4096, config.VectorSearch.MaxQueryTextLength);
             Assert.Equal(500, config.VectorSearch.JobBatchSize);
