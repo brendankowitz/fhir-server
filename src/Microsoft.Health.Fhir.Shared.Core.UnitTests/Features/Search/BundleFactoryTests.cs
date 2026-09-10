@@ -176,6 +176,42 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
             Assert.Null(entry.Search.Score);
         }
 
+        [Fact]
+        public void GivenASearchResultEntryWithEvidence_WhenCreateSearchBundle_ThenOneEvidenceExtensionShouldBeSet()
+        {
+            _urlResolver.ResolveResourceWrapperUrl(Arg.Any<ResourceWrapper>()).Returns(_selfUrl);
+            _urlResolver.ResolveRouteUrl(_unsupportedSearchParameters).Returns(_selfUrl);
+            var resultEntry = new SearchResultEntry(
+                CreateResourceWrapper(Samples.GetDefaultObservation().UpdateId("123"), HttpMethod.Post),
+                SearchEntryMode.Match,
+                0.75m,
+                new SearchResultEntryEvidence("original chunk text", 2));
+
+            ResourceElement actual = _bundleFactory.CreateSearchBundle(
+                new SearchResult(new[] { resultEntry }, null, null, _unsupportedSearchParameters));
+
+            Bundle.EntryComponent entry = Assert.Single(actual.ToPoco<Bundle>().Entry);
+            Extension evidence = Assert.Single(entry.Search.Extension);
+            Assert.Equal("http://microsoft.com/fhir/StructureDefinition/semantic-search-evidence", evidence.Url);
+            Assert.Collection(
+                evidence.Extension,
+                nested =>
+                {
+                    Assert.Equal("text", nested.Url);
+                    Assert.Equal("original chunk text", Assert.IsType<FhirString>(nested.Value).Value);
+                },
+                nested =>
+                {
+                    Assert.Equal("chunkOrdinal", nested.Url);
+                    Assert.Equal(2, Assert.IsType<Integer>(nested.Value).Value);
+                },
+                nested =>
+                {
+                    Assert.Equal("score", nested.Url);
+                    Assert.Equal(0.75m, Assert.IsType<FhirDecimal>(nested.Value).Value);
+                });
+        }
+
         private ResourceWrapper CreateResourceWrapper(ResourceElement resourceElement, HttpMethod httpMethod)
         {
             return new ResourceWrapper(

@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using EnsureThat;
 using Microsoft.Data.SqlClient;
 using Microsoft.Health.Fhir.Api.Features.Filters;
@@ -318,6 +319,13 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                     StringBuilder.Append(", ").Append(TableExpressionName(_tableExpressionCounter)).Append(".SortValue");
                 }
 
+                if (HasVectorSearch() && !context.IsIncludesOperation)
+                {
+                    StringBuilder
+                        .Append(", vectorEvidence.ChunkOrdinal AS EvidenceChunkOrdinal")
+                        .Append(", vectorEvidence.SourceTextCompressed AS EvidenceSourceTextCompressed");
+                }
+
                 StringBuilder.AppendLine();
             }
 
@@ -346,6 +354,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                     StringBuilder.Append(" ON ")
                         .Append(VLatest.Resource.ResourceTypeId, resourceTableAlias).Append(" = ").Append(TableExpressionName(_tableExpressionCounter)).Append(".T1 AND ")
                         .Append(VLatest.Resource.ResourceSurrogateId, resourceTableAlias).Append(" = ").Append(TableExpressionName(_tableExpressionCounter)).AppendLine(".Sid1");
+                }
+
+                if (HasVectorSearch() && !context.IsIncludesOperation)
+                {
+                    AppendVectorEvidenceApply(TableExpressionName(_tableExpressionCounter), context.MaxItemCount);
                 }
 
                 using (var delimitedClause = StringBuilder.BeginDelimitedWhereClause())
@@ -378,6 +391,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                     {
                         StringBuilder
                             .Append(orderTableAlias).Append(".SortValue ASC, ")
+                            .Append(VLatest.Resource.ResourceTypeId, orderTableAlias).Append(" ASC, ")
                             .Append(VLatest.Resource.ResourceSurrogateId, orderTableAlias).AppendLine(" ASC ");
                     }
                     else if (IsPrimaryKeySort(searchOptions))
@@ -672,7 +686,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                 vectorSearchQueryGenerator.Generate(
                     GetVectorSearchExpression(searchParamTableExpression.Predicate),
                     GetContext(),
-                    predecessorIndex >= 0 ? TableExpressionName(predecessorIndex) : null);
+                    predecessorIndex >= 0 ? TableExpressionName(predecessorIndex) : null,
+                    context);
                 return;
             }
 
@@ -848,11 +863,13 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                 : IsSortValueNeeded(context) ? $"{tableExpressionName}.SortValue" : null;
 
             bool hasIncludeExpression = _rootExpression.SearchParamTableExpressions.Any(t => t.Kind == SearchParamTableExpressionKind.Include);
+            bool addRowNumber = hasIncludeExpression || isVectorSearch;
 
             IndentedStringBuilder.IndentedScope indentedScope = default;
-            if (hasIncludeExpression)
+            if (addRowNumber)
             {
-                // a subsequent _include will need to join with the top context.MaxItemCount of this resultset, so we include a Row column
+                // A subsequent _include needs Row for its join limit. Vector evidence also uses Row so the
+                // MaxItemCount + 1 sentinel can prove another page exists without reading its evidence LOB.
                 StringBuilder.Append("SELECT row_number() OVER (");
                 AppendOrderBy();
                 StringBuilder.AppendLine(") AS Row, *")
@@ -871,7 +888,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
             AppendOrderBy();
             StringBuilder.AppendLine();
 
-            if (hasIncludeExpression)
+            if (addRowNumber)
             {
                 indentedScope.Dispose();
                 StringBuilder.AppendLine(") t");
@@ -885,7 +902,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                 StringBuilder.Append("ORDER BY ");
                 if (isVectorSearch)
                 {
-                    StringBuilder.Append("VectorDistance ASC, Sid1 ASC");
+                    StringBuilder.Append("VectorDistance ASC, T1 ASC, Sid1 ASC");
                 }
                 else if (IsPrimaryKeySort(context))
                 {
@@ -1901,6 +1918,42 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
         {
             return _rootExpression?.SearchParamTableExpressions.Any(
                 tableExpression => tableExpression.QueryGenerator is VectorSearchQueryGenerator) == true;
+        }
+
+        private void AppendVectorEvidenceApply(string pageTableExpressionName, int maxItemCount)
+        {
+            SearchParamTableExpression vectorTableExpression = _rootExpression.SearchParamTableExpressions.Single(
+                tableExpression => tableExpression.QueryGenerator is VectorSearchQueryGenerator);
+            var vectorSearchQueryGenerator = (VectorSearchQueryGenerator)vectorTableExpression.QueryGenerator;
+            VectorSearchExpression vectorExpression = GetVectorSearchExpression(vectorTableExpression.Predicate);
+            object embeddingParameter = Parameters.AddParameter(
+                JsonSerializer.Serialize(vectorExpression.QueryEmbedding),
+                includeInHash: true);
+            object embeddingModelIdParameter = Parameters.AddParameter(
+                VLatest.VectorSearchParam.EmbeddingModelId,
+                vectorSearchQueryGenerator.EmbeddingModelId,
+                includeInHash: true);
+
+            StringBuilder
+                .AppendLine("     OUTER APPLY (")
+                .Append("         SELECT TOP (1) ")
+                .Append(VLatest.VectorSearchParam.ChunkOrdinal, "vectorEvidence").Append(", ")
+                .Append(VLatest.VectorSearchParam.SourceTextCompressed, "vectorEvidence").AppendLine()
+                .Append("         FROM ").Append(VLatest.VectorSearchParam).AppendLine(" vectorEvidence")
+                .Append("         WHERE ").Append(VLatest.VectorSearchParam.ResourceTypeId, "vectorEvidence")
+                .Append(" = ").Append(pageTableExpressionName).AppendLine(".T1")
+                .Append("             AND ").Append(VLatest.VectorSearchParam.ResourceSurrogateId, "vectorEvidence")
+                .Append(" = ").Append(pageTableExpressionName).AppendLine(".Sid1")
+                .Append("             AND ").Append(pageTableExpressionName).Append(".Row <= ")
+                .Append(Parameters.AddParameter(maxItemCount, includeInHash: false)).AppendLine()
+                .Append("             AND ").Append(VLatest.VectorSearchParam.SearchParamId, "vectorEvidence")
+                .Append(" = ").Append(Model.GetSearchParamId(vectorExpression.Parameter.Url)).AppendLine()
+                .Append("             AND ").Append(VLatest.VectorSearchParam.EmbeddingModelId, "vectorEvidence")
+                .Append(" = ").Append(embeddingModelIdParameter).AppendLine()
+                .Append("         ORDER BY VECTOR_DISTANCE('cosine', vectorEvidence.Embedding, CAST(")
+                .Append(embeddingParameter).Append(" AS VECTOR(1536))) ASC, ")
+                .Append(VLatest.VectorSearchParam.ChunkOrdinal, "vectorEvidence").AppendLine(" ASC")
+                .AppendLine("     ) vectorEvidence");
         }
 
         private static VectorSearchExpression GetVectorSearchExpression(Expression expression)

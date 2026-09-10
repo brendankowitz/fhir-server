@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -134,6 +135,45 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
             decimal score = SqlServerSearchService.ConvertVectorDistanceToScore(distance);
 
             Assert.Equal((decimal)expectedScore, score);
+        }
+
+        [Fact]
+        public void GivenVectorPageBoundary_WhenCreatingContinuationToken_ThenDistanceTypeAndSurrogateIdAreRetained()
+        {
+            ContinuationToken token = SqlServerSearchService.CreateVectorContinuationToken("0.25", 3, 200);
+
+            Assert.Equal("0.25", token.SortValue);
+            Assert.Equal((short)3, token.ResourceTypeId);
+            Assert.Equal(200, token.ResourceSurrogateId);
+        }
+
+        [Fact]
+        public void GivenCompressedVectorEvidence_WhenCreatingEvidence_ThenOriginalTextAndOrdinalAreRetained()
+        {
+            const string sourceText = "The patient has chest pain.";
+            var converter = new CompressedRawResourceConverter();
+            using var compressed = new MemoryStream();
+            converter.WriteCompressedRawResource(compressed, sourceText);
+
+            SearchResultEntryEvidence? evidence = SqlServerSearchService.CreateVectorSearchEvidence(
+                compressed.ToArray(),
+                4,
+                converter);
+
+            Assert.Equal(sourceText, evidence?.Text);
+            Assert.Equal(4, evidence?.ChunkOrdinal);
+        }
+
+        [Fact]
+        public void GivenNullCompressedVectorEvidence_WhenCreatingEvidence_ThenNoEvidenceIsReturned()
+        {
+            SearchResultEntryEvidence? evidence = SqlServerSearchService.CreateVectorSearchEvidence(
+                null,
+                null,
+                _compressedRawResourceConverter);
+
+            Assert.Null(evidence);
+            _compressedRawResourceConverter.DidNotReceiveWithAnyArgs().ReadCompressedRawResource(default);
         }
 
         [Fact]

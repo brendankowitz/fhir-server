@@ -659,7 +659,8 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
         Assert.Contains("JOIN cte0 predecessor", vectorCte);
         Assert.Contains("vectorSearch.ResourceTypeId = predecessor.T1", vectorCte);
         Assert.Contains("vectorSearch.ResourceSurrogateId = predecessor.Sid1", vectorCte);
-        Assert.Equal(1, CountOccurrences(generatedSql, "FROM dbo.VectorSearchParam"));
+        Assert.Equal(1, CountOccurrences(vectorCte, "FROM dbo.VectorSearchParam"));
+        Assert.Equal(2, CountOccurrences(generatedSql, "FROM dbo.VectorSearchParam"));
     }
 
     [Fact]
@@ -686,11 +687,67 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
     {
         string generatedSql = GenerateVectorSearchSql(k: 5);
 
-        Assert.Contains("ORDER BY VectorDistance ASC, vectorSearch.ResourceSurrogateId ASC", generatedSql);
+        Assert.Contains("ORDER BY VectorDistance ASC, vectorSearch.ResourceTypeId ASC, vectorSearch.ResourceSurrogateId ASC", generatedSql);
         Assert.True(
             CountOccurrences(generatedSql, "ORDER BY VectorDistance ASC") >= 2,
             $"Expected both the vector candidate CTE and paging CTE to order by distance in:{Environment.NewLine}{generatedSql}");
-        Assert.Contains("ORDER BY t.SortValue ASC, t.ResourceSurrogateId ASC", generatedSql);
+        Assert.Contains("ORDER BY t.SortValue ASC, t.ResourceTypeId ASC, t.ResourceSurrogateId ASC", generatedSql);
+    }
+
+    [Fact]
+    public void GivenVectorSearch_WhenSqlGenerated_ThenEvidenceLobIsReadOnlyAfterPageSelection()
+    {
+        string generatedSql = GenerateVectorSearchSql(k: 5);
+        string vectorCte = GetCte(generatedSql, "cte0 AS", "cte1 AS");
+        string evidenceApply = generatedSql[
+            generatedSql.IndexOf("OUTER APPLY", StringComparison.Ordinal)..
+            generatedSql.LastIndexOf(") vectorEvidence", StringComparison.Ordinal)];
+
+        Assert.DoesNotContain("SourceTextCompressed", vectorCte);
+        Assert.Contains("SELECT TOP (1)", evidenceApply);
+        Assert.Contains("vectorEvidence.ChunkOrdinal", evidenceApply);
+        Assert.Contains("vectorEvidence.SourceTextCompressed", evidenceApply);
+        Assert.Contains("vectorEvidence.ResourceTypeId = cte1.T1", evidenceApply);
+        Assert.Contains("vectorEvidence.ResourceSurrogateId = cte1.Sid1", evidenceApply);
+        Assert.Contains("cte1.Row <= @", evidenceApply);
+        Assert.DoesNotContain(".SortValue", evidenceApply);
+        Assert.Contains("ORDER BY VECTOR_DISTANCE('cosine', vectorEvidence.Embedding", evidenceApply);
+        Assert.Contains("AS VECTOR(1536))) ASC, vectorEvidence.ChunkOrdinal ASC", evidenceApply);
+        Assert.True(
+            generatedSql.IndexOf("OUTER APPLY", StringComparison.Ordinal) > generatedSql.IndexOf("TOP (", StringComparison.Ordinal),
+            $"Evidence must be fetched after the paging TOP:{Environment.NewLine}{generatedSql}");
+    }
+
+    [Fact]
+    public void GivenVectorContinuationToken_WhenSqlGenerated_ThenResumePredicateUsesDistanceTypeAndSurrogateId()
+    {
+        string generatedSql = GenerateVectorSearchSql(
+            k: 5,
+            continuationToken: new ContinuationToken(new object[] { "0.25", (short)3, 200L }).ToJson());
+
+        Assert.Contains("MIN(VECTOR_DISTANCE(", generatedSql);
+        Assert.Contains(" > @", generatedSql);
+        Assert.Contains("vectorSearch.ResourceTypeId > @", generatedSql);
+        Assert.Contains("vectorSearch.ResourceSurrogateId > @", generatedSql);
+        Assert.Contains(_sqlCommand.Parameters.Cast<Data.SqlClient.SqlParameter>(), parameter => Equals(parameter.Value, 0.25d));
+        Assert.Contains(_sqlCommand.Parameters.Cast<Data.SqlClient.SqlParameter>(), parameter => Equals(parameter.Value, (short)3));
+        Assert.Contains(_sqlCommand.Parameters.Cast<Data.SqlClient.SqlParameter>(), parameter => Equals(parameter.Value, 200L));
+    }
+
+    [Fact]
+    public void GivenEqualVectorDistances_WhenSqlGenerated_ThenPagingAndOrderingUseStableTiebreak()
+    {
+        string generatedSql = GenerateVectorSearchSql(
+            k: 5,
+            continuationToken: new ContinuationToken(new object[] { "0.25", (short)3, 200L }).ToJson());
+
+        Assert.Contains("MIN(VECTOR_DISTANCE(", generatedSql);
+        Assert.Contains(" = @", generatedSql);
+        Assert.Contains("vectorSearch.ResourceTypeId = @", generatedSql);
+        Assert.Contains("vectorSearch.ResourceSurrogateId > @", generatedSql);
+        Assert.Contains("ORDER BY VectorDistance ASC, vectorSearch.ResourceTypeId ASC, vectorSearch.ResourceSurrogateId ASC", generatedSql);
+        Assert.Contains("ORDER BY VectorDistance ASC, T1 ASC, Sid1 ASC", generatedSql);
+        Assert.Contains("ORDER BY t.SortValue ASC, t.ResourceTypeId ASC, t.ResourceSurrogateId ASC", generatedSql);
     }
 
     [Fact]
@@ -752,6 +809,9 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
         Assert.Contains("MIN(vectorSearch.distance) AS VectorDistance", vectorCte);
         Assert.Contains("GROUP BY vectorSearch.ResourceTypeId, vectorSearch.ResourceSurrogateId", vectorCte);
         Assert.Contains("HAVING MIN(vectorSearch.distance) <= @", vectorCte);
+        Assert.DoesNotContain("SourceTextCompressed", vectorCte);
+        Assert.Contains("OUTER APPLY", generatedSql);
+        Assert.Contains("vectorEvidence.SourceTextCompressed", generatedSql);
 
         IReadOnlyList<string> topParameters = GetTopParameterNames(vectorCte);
         Assert.Equal(2, topParameters.Count);
@@ -825,7 +885,7 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
         Assert.DoesNotContain("VECTOR_SEARCH(", vectorCte);
     }
 
-    private string GenerateVectorSearchSql(bool withCompartment = false, int? k = null, double? minScore = null)
+    private string GenerateVectorSearchSql(bool withCompartment = false, int? k = null, double? minScore = null, string continuationToken = null)
     {
         var vectorParameterUrl = new Uri("http://example.org/SearchParameter/Observation-clinical-text");
         var vectorParameter = new SearchParameterInfo(
@@ -865,6 +925,7 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
         var searchOptions = new SearchOptions
         {
             MaxItemCount = 10,
+            ContinuationToken = continuationToken,
             Sort =
             [
                 (SearchParameterInfo.ResourceTypeSearchParameter, SortOrder.Ascending),

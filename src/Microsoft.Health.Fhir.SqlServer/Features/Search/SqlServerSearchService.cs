@@ -70,6 +70,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
         /// </summary>
         internal const string ReferenceResourceTypeFilteredStatsParameterId = "Search.ReferenceResourceTypeFilteredStats.IsEnabled";
         private const string SortValueColumnName = "SortValue";
+        private const string EvidenceChunkOrdinalColumnName = "EvidenceChunkOrdinal";
+        private const string EvidenceSourceTextCompressedColumnName = "EvidenceSourceTextCompressed";
 
         private readonly ISqlServerFhirModel _model;
         private readonly SqlRootExpressionRewriter _sqlRootExpressionRewriter;
@@ -761,10 +763,23 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                                         // Keep track of sort value if this is the last row.
                                         if (matchCount == clonedSearchOptions.MaxItemCount - 1 && isSortValueNeeded)
                                         {
-                                            sortValue = (currentSortValue as DateTime?) != null ? (currentSortValue as DateTime?).Value.ToString("o") : currentSortValue.ToString();
+                                            sortValue = (currentSortValue as DateTime?) != null
+                                                ? (currentSortValue as DateTime?).Value.ToString("o")
+                                                : Convert.ToString(currentSortValue, CultureInfo.InvariantCulture);
                                         }
 
                                         matchCount++;
+                                        SearchResultEntryEvidence? evidence = null;
+                                        if (isVectorSearch)
+                                        {
+                                            int chunkOrdinalIndex = reader.GetOrdinal(EvidenceChunkOrdinalColumnName);
+                                            int sourceTextIndex = reader.GetOrdinal(EvidenceSourceTextCompressedColumnName);
+                                            evidence = CreateVectorSearchEvidence(
+                                                await reader.IsDBNullAsync(sourceTextIndex, cancellationToken) ? null : await reader.GetFieldValueAsync<byte[]>(sourceTextIndex, cancellationToken),
+                                                await reader.IsDBNullAsync(chunkOrdinalIndex, cancellationToken) ? null : await reader.GetFieldValueAsync<int>(chunkOrdinalIndex, cancellationToken),
+                                                _compressedRawResourceConverter);
+                                        }
+
                                         matchedResources.Add(new SearchResultEntry(
                                             new ResourceWrapper(
                                                 resourceId,
@@ -783,7 +798,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                                                 IsHistory = isHistory,
                                             },
                                             SearchEntryMode.Match,
-                                            isVectorSearch ? ConvertVectorDistanceToScore(Convert.ToDouble(currentSortValue, CultureInfo.InvariantCulture)) : null));
+                                            isVectorSearch ? ConvertVectorDistanceToScore(Convert.ToDouble(currentSortValue, CultureInfo.InvariantCulture)) : null,
+                                            evidence));
                                     }
                                     else
                                     {
@@ -821,7 +837,9 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                                 await reader.NextResultAsync(cancellationToken);
 
                                 ContinuationToken continuationToken = moreResults
-                                        ? new ContinuationToken(
+                                        ? isVectorSearch
+                                            ? CreateVectorContinuationToken(sortValue, newContinuationType.Value, newContinuationId.Value)
+                                            : new ContinuationToken(
                                             clonedSearchOptions.Sort.Select(s =>
                                                 s.searchParameterInfo.Name switch
                                                 {
@@ -2502,6 +2520,27 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
         internal static decimal ConvertVectorDistanceToScore(double distance)
         {
             return Math.Clamp(1m - ((decimal)distance / 2m), 0m, 1m);
+        }
+
+        internal static ContinuationToken CreateVectorContinuationToken(string sortValue, short resourceTypeId, long resourceSurrogateId)
+        {
+            return new ContinuationToken(new object[] { sortValue, resourceTypeId, resourceSurrogateId });
+        }
+
+        internal static SearchResultEntryEvidence? CreateVectorSearchEvidence(
+            byte[] sourceTextCompressed,
+            int? chunkOrdinal,
+            ICompressedRawResourceConverter compressedRawResourceConverter)
+        {
+            if (sourceTextCompressed == null || !chunkOrdinal.HasValue)
+            {
+                return null;
+            }
+
+            using var sourceTextStream = new MemoryStream(sourceTextCompressed);
+            return new SearchResultEntryEvidence(
+                compressedRawResourceConverter.ReadCompressedRawResource(sourceTextStream),
+                chunkOrdinal.Value);
         }
 
         private static bool TryExtractResourceKeys(SqlRootExpression expression, SearchOptions searchOptions, out IReadOnlyList<ResourceKey> resourceKeys)

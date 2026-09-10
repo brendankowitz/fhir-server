@@ -25,6 +25,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 {
     public class BundleFactory : IBundleFactory
     {
+        private const string SemanticSearchEvidenceExtensionUrl = "http://microsoft.com/fhir/StructureDefinition/semantic-search-evidence";
         private readonly IUrlResolver _urlResolver;
         private readonly RequestContextAccessor<IFhirRequestContext> _fhirRequestContextAccessor;
         private readonly ILogger<BundleFactory> _logger;
@@ -52,6 +53,20 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
                     Mode = r.SearchEntryMode == SearchEntryMode.Match ? Bundle.SearchEntryMode.Match : Bundle.SearchEntryMode.Include,
                     Score = r.Score,
                 };
+
+                if (r.Evidence.HasValue && r.Score.HasValue)
+                {
+                    resource.Search.Extension.Add(new Extension
+                    {
+                        Url = SemanticSearchEvidenceExtensionUrl,
+                        Extension =
+                        [
+                            new Extension("text", new FhirString(r.Evidence.Value.Text)),
+                            new Extension("chunkOrdinal", new Integer(r.Evidence.Value.ChunkOrdinal)),
+                            new Extension("score", new FhirDecimal(r.Score.Value)),
+                        ],
+                    });
+                }
 
                 return resource;
             });

@@ -126,7 +126,35 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Formatters
             Assert.Null(serializedBundle.Entry[0].Search.Score);
         }
 
-        private static async System.Threading.Tasks.Task<(string StandardOutput, string RawOutput)> SerializeRawSearchBundleAsync(decimal? score)
+        [Fact]
+        public async Task GivenRawBundleEntryWithSearchEvidence_WhenWritingResponseBody_ThenSerializedOutputContainsEvidence()
+        {
+            (string standardOutput, string rawOutput) = await SerializeRawSearchBundleAsync(
+                0.75m,
+                new Extension
+                {
+                    Url = "http://microsoft.com/fhir/StructureDefinition/semantic-search-evidence",
+                    Extension =
+                    [
+                        new Extension("text", new FhirString("original chunk text")),
+                        new Extension("chunkOrdinal", new Integer(2)),
+                        new Extension("score", new FhirDecimal(0.75m)),
+                    ],
+                });
+
+            Assert.NotEmpty(standardOutput);
+            Assert.Empty(rawOutput);
+            var serializedBundle = JObject.Parse(standardOutput);
+            JToken evidence = serializedBundle["entry"][0]["search"]["extension"][0];
+            Assert.Equal("http://microsoft.com/fhir/StructureDefinition/semantic-search-evidence", evidence["url"].Value<string>());
+            Assert.Equal("original chunk text", evidence["extension"][0]["valueString"].Value<string>());
+            Assert.Equal(2, evidence["extension"][1]["valueInteger"].Value<int>());
+            Assert.Equal(0.75m, evidence["extension"][2]["valueDecimal"].Value<decimal>());
+        }
+
+        private static async System.Threading.Tasks.Task<(string StandardOutput, string RawOutput)> SerializeRawSearchBundleAsync(
+            decimal? score,
+            Extension searchExtension = null)
         {
             using var writer = new StringWriter(new StringBuilder());
             using var body = new MemoryStream();
@@ -139,6 +167,11 @@ namespace Microsoft.Health.Fhir.Api.UnitTests.Features.Formatters
                 Mode = SearchEntryMode.Match,
                 Score = score,
             };
+            if (searchExtension != null)
+            {
+                bundle.Entry[0].Search.Extension.Add(searchExtension);
+            }
+
             var writeContext = new OutputFormatterWriteContext(
                 httpContext,
                 (_, _) => writer,

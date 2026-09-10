@@ -12,13 +12,18 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 {
     public readonly struct SearchResultEntry : IEquatable<SearchResultEntry>
     {
-        public SearchResultEntry(ResourceWrapper resourceWrapper, SearchEntryMode searchEntryMode = SearchEntryMode.Match, decimal? score = null)
+        public SearchResultEntry(
+            ResourceWrapper resourceWrapper,
+            SearchEntryMode searchEntryMode = SearchEntryMode.Match,
+            decimal? score = null,
+            SearchResultEntryEvidence? evidence = null)
         {
             EnsureArg.IsNotNull(resourceWrapper, nameof(resourceWrapper));
 
             Resource = resourceWrapper;
             SearchEntryMode = searchEntryMode;
             Score = score;
+            Evidence = evidence;
         }
 
         public ResourceWrapper Resource { get; }
@@ -26,6 +31,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
         public SearchEntryMode SearchEntryMode { get; }
 
         public decimal? Score { get; }
+
+        public SearchResultEntryEvidence? Evidence { get; }
 
         public static bool operator ==(SearchResultEntry left, SearchResultEntry right)
         {
@@ -39,7 +46,10 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
 
         public bool Equals(SearchResultEntry other)
         {
-            return Equals(Resource, other.Resource) && SearchEntryMode == other.SearchEntryMode && Score == other.Score;
+            return Equals(Resource, other.Resource) &&
+                SearchEntryMode == other.SearchEntryMode &&
+                Score == other.Score &&
+                Nullable.Equals(Evidence, other.Evidence);
         }
 
         public override bool Equals(object obj)
@@ -52,7 +62,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Search
             unchecked
             {
                 int hashCode = ((Resource != null ? Resource.GetHashCode() : 0) * 397) ^ (int)SearchEntryMode;
-                return (hashCode * 397) ^ Score.GetHashCode();
+                hashCode = (hashCode * 397) ^ Score.GetHashCode();
+                return (hashCode * 397) ^ Evidence.GetHashCode();
             }
         }
     }

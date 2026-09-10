@@ -4,9 +4,11 @@
 // -------------------------------------------------------------------------------------------------
 
 using System;
+using System.Globalization;
 using System.Text.Json;
 using EnsureThat;
 using Microsoft.Health.Fhir.Core.Configs;
+using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema.Model;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage;
@@ -36,6 +38,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
 
         public override Table Table => VLatest.VectorSearchParam;
 
+        internal short EmbeddingModelId => _capabilityProvider.EmbeddingModelId;
+
         public override SearchParameterQueryGeneratorContext VisitVectorSearch(
             VectorSearchExpression expression,
             SearchParameterQueryGeneratorContext context)
@@ -47,7 +51,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
         internal void Generate(
             VectorSearchExpression expression,
             SearchParameterQueryGeneratorContext context,
-            string predecessorTableExpressionName)
+            string predecessorTableExpressionName,
+            SearchOptions searchOptions)
         {
             EnsureArg.IsNotNull(expression, nameof(expression));
 
@@ -68,7 +73,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                 _capabilityProvider.SupportsApproximateVectorIndex &&
                 predecessorTableExpressionName == null)
             {
-                GenerateApproximate(expression, context, embeddingParameter, embeddingModelIdParameter);
+                GenerateApproximate(expression, context, embeddingParameter, embeddingModelIdParameter, searchOptions);
                 return;
             }
 
@@ -134,19 +139,18 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                 .Append(VLatest.VectorSearchParam.ResourceTypeId, TableAlias).Append(", ")
                 .Append(VLatest.VectorSearchParam.ResourceSurrogateId, TableAlias).AppendLine();
 
-            if (expression.MinScore.HasValue)
-            {
-                double maximumDistance = 2.0 * (1.0 - expression.MinScore.Value);
-                context.StringBuilder
-                    .Append("HAVING MIN(").Append(distanceExpression).Append(") <= ")
-                    .Append(context.Parameters.AddParameter(maximumDistance, includeInHash: true))
-                    .AppendLine();
-            }
+            AppendHavingClause(
+                expression,
+                context,
+                searchOptions,
+                $"MIN({distanceExpression})",
+                TableAlias);
 
             if (expression.K.HasValue)
             {
                 context.StringBuilder
                     .Append("ORDER BY VectorDistance ASC, ")
+                    .Append(VLatest.VectorSearchParam.ResourceTypeId, TableAlias).Append(" ASC, ")
                     .Append(VLatest.VectorSearchParam.ResourceSurrogateId, TableAlias)
                     .AppendLine(" ASC");
             }
@@ -156,7 +160,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
             VectorSearchExpression expression,
             SearchParameterQueryGeneratorContext context,
             object embeddingParameter,
-            object embeddingModelIdParameter)
+            object embeddingModelIdParameter,
+            SearchOptions searchOptions)
         {
             if (expression.Parameter.BaseResourceTypes?.Count != 1)
             {
@@ -223,19 +228,70 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                 .Append(VLatest.VectorSearchParam.ResourceTypeId, TableAlias).Append(", ")
                 .Append(VLatest.VectorSearchParam.ResourceSurrogateId, TableAlias).AppendLine();
 
+            AppendHavingClause(expression, context, searchOptions, $"MIN({TableAlias}.distance)", TableAlias);
+
+            context.StringBuilder
+                .Append("ORDER BY VectorDistance ASC, ")
+                .Append(VLatest.VectorSearchParam.ResourceTypeId, TableAlias).Append(" ASC, ")
+                .Append(VLatest.VectorSearchParam.ResourceSurrogateId, TableAlias)
+                .AppendLine(" ASC");
+        }
+
+        private static void AppendHavingClause(
+            VectorSearchExpression expression,
+            SearchParameterQueryGeneratorContext context,
+            SearchOptions searchOptions,
+            string distanceExpression,
+            string tableAlias)
+        {
+            ContinuationToken continuationToken = ContinuationToken.FromString(searchOptions.ContinuationToken);
+            bool hasContinuationToken = continuationToken?.SortValue != null;
+            if (!expression.MinScore.HasValue && !hasContinuationToken)
+            {
+                return;
+            }
+
+            context.StringBuilder.Append("HAVING ");
+            bool appendAnd = false;
             if (expression.MinScore.HasValue)
             {
                 double maximumDistance = 2.0 * (1.0 - expression.MinScore.Value);
                 context.StringBuilder
-                    .Append("HAVING MIN(").Append(TableAlias).Append(".distance) <= ")
-                    .Append(context.Parameters.AddParameter(maximumDistance, includeInHash: true))
-                    .AppendLine();
+                    .Append(distanceExpression).Append(" <= ")
+                    .Append(context.Parameters.AddParameter(maximumDistance, includeInHash: true));
+                appendAnd = true;
             }
 
-            context.StringBuilder
-                .Append("ORDER BY VectorDistance ASC, ")
-                .Append(VLatest.VectorSearchParam.ResourceSurrogateId, TableAlias)
-                .AppendLine(" ASC");
+            if (hasContinuationToken)
+            {
+                if (!double.TryParse(continuationToken.SortValue, NumberStyles.Float, CultureInfo.InvariantCulture, out double distance) ||
+                    !continuationToken.ResourceTypeId.HasValue)
+                {
+                    throw new InvalidOperationException("The vector search continuation token is invalid.");
+                }
+
+                object distanceParameter = context.Parameters.AddParameter(distance, includeInHash: false);
+                object resourceTypeIdParameter = context.Parameters.AddParameter(continuationToken.ResourceTypeId.Value, includeInHash: false);
+                object resourceSurrogateIdParameter = context.Parameters.AddParameter(continuationToken.ResourceSurrogateId, includeInHash: false);
+
+                if (appendAnd)
+                {
+                    context.StringBuilder.Append(" AND ");
+                }
+
+                context.StringBuilder
+                    .Append("(").Append(distanceExpression).Append(" > ").Append(distanceParameter)
+                    .Append(" OR (").Append(distanceExpression).Append(" = ").Append(distanceParameter)
+                    .Append(" AND (")
+                    .Append(VLatest.VectorSearchParam.ResourceTypeId, tableAlias).Append(" > ").Append(resourceTypeIdParameter)
+                    .Append(" OR (")
+                    .Append(VLatest.VectorSearchParam.ResourceTypeId, tableAlias).Append(" = ").Append(resourceTypeIdParameter)
+                    .Append(" AND ")
+                    .Append(VLatest.VectorSearchParam.ResourceSurrogateId, tableAlias).Append(" > ").Append(resourceSurrogateIdParameter)
+                    .Append("))))");
+            }
+
+            context.StringBuilder.AppendLine();
         }
 
         private int GetApproximateCandidateLimit(int resourceLimit)

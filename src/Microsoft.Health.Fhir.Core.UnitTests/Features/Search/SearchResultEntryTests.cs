@@ -54,5 +54,16 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Search
             Assert.True(left != right);
             Assert.NotEqual(left.GetHashCode(), right.GetHashCode());
         }
+
+        [Fact]
+        public void GivenEvidence_WhenCreatingSearchResultEntry_ThenEvidenceIsRetained()
+        {
+            var evidence = new SearchResultEntryEvidence("original chunk text", 2);
+
+            var entry = new SearchResultEntry(Resource, SearchEntryMode.Match, 0.75m, evidence);
+
+            Assert.Equal("original chunk text", entry.Evidence?.Text);
+            Assert.Equal(2, entry.Evidence?.ChunkOrdinal);
+        }
     }
 }
