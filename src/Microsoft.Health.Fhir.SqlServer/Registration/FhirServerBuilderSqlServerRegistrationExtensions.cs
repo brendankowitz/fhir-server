@@ -204,6 +204,10 @@ namespace Microsoft.Extensions.DependencyInjection
                 .Singleton()
                 .AsSelf();
 
+            services.Add<SqlVectorSearchParamStore>()
+                .Scoped()
+                .AsService<IVectorSearchParamStore>();
+
             services.AddSingleton<ValueCache<CustomerKeyHealth>>();
 
             services.Add<SqlStatusReporter>()
