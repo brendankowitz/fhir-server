@@ -142,6 +142,28 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
         }
 
         [Fact]
+        public async Task GivenApproximateIndexIsEnabledButUnavailable_WhenInitializedTwice_ThenFallbackWarningIsLoggedOnce()
+        {
+            // Arrange
+            ConfigureSuccessfulInitialization(ExpectedEmbeddingModelId, persistedDimension: 1536, supportsApproximateVectorIndex: false);
+            using VectorSearchCapabilityProvider provider = CreateProvider(
+                configure: configuration => configuration.EnableApproximateVectorIndex = true);
+
+            // Act
+            await provider.EnsureInitializedAsync(CancellationToken.None);
+            await provider.EnsureInitializedAsync(CancellationToken.None);
+
+            // Assert
+            Assert.False(provider.SupportsApproximateVectorIndex);
+            Assert.Single(
+                _logger.ReceivedCalls(),
+                call =>
+                    call.GetMethodInfo().Name == nameof(ILogger.Log) &&
+                    Equals(call.GetArguments()[0], LogLevel.Warning) &&
+                    call.GetArguments()[2]?.ToString()?.Contains("approximate vector indexing", StringComparison.OrdinalIgnoreCase) == true);
+        }
+
+        [Fact]
         public async Task GivenZeroMaxChunksPerSearchParameter_WhenInitialized_ThenThrowsBeforeExecutingSql()
         {
             // Arrange
@@ -230,7 +252,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
 
             // Assert
             Assert.Equal(3, _sqlRetryService.ReceivedCalls().Count());
-            _ = _sqlRetryService.Received(1).ExecuteReaderAsync<bool>(
+            _ = _sqlRetryService.Received(2).ExecuteReaderAsync<bool>(
                 Arg.Any<SqlCommand>(),
                 Arg.Any<Func<SqlDataReader, bool>>(),
                 Arg.Any<ILogger>(),
@@ -285,18 +307,24 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
                 _logger);
         }
 
-        private void ConfigureSuccessfulInitialization(short embeddingModelId, int persistedDimension)
+        private void ConfigureSuccessfulInitialization(
+            short embeddingModelId,
+            int persistedDimension,
+            bool supportsApproximateVectorIndex = true)
         {
             ConfigureVectorTypeProbe(new[] { true });
 
-            _sqlRetryService.ExecuteReaderAsync<int?>(
-                    Arg.Is<SqlCommand>(command => command.CommandText.Contains("dm_db_vector_indexes", StringComparison.Ordinal)),
-                    Arg.Any<Func<SqlDataReader, int?>>(),
+            _sqlRetryService.ExecuteReaderAsync<bool>(
+                    Arg.Is<SqlCommand>(command =>
+                        command.CommandText.Contains("dm_db_vector_indexes", StringComparison.Ordinal) &&
+                        command.CommandText.Contains("dbo.VectorSearchParam", StringComparison.Ordinal)),
+                    Arg.Any<Func<SqlDataReader, bool>>(),
                     Arg.Any<ILogger>(),
                     Arg.Any<string>(),
                     Arg.Any<CancellationToken>(),
                     isReadOnly: true)
-                .Returns(Task.FromResult<IReadOnlyList<int?>>(new int?[] { 123 }));
+                .Returns(Task.FromResult<IReadOnlyList<bool>>(
+                    new[] { supportsApproximateVectorIndex }));
 
             _sqlRetryService.ExecuteReaderAsync<(short EmbeddingModelId, int Dimension)>(
                     Arg.Is<SqlCommand>(command => command.CommandText.Contains("dbo.EmbeddingModel", StringComparison.Ordinal)),

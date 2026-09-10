@@ -19,7 +19,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
         bool IsVectorSearchAvailable { get; }
 
         /// <summary>
-        /// Gets a value indicating whether the SQL engine supports approximate vector indexes.
+        /// Gets a value indicating whether an approximate vector index is available for dbo.VectorSearchParam.
         /// </summary>
         bool SupportsApproximateVectorIndex { get; }
 

@@ -41,6 +41,7 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
 {
     private readonly ISqlServerFhirModel _fhirModel;
     private readonly IVectorSearchCapabilityProvider _vectorSearchCapabilityProvider;
+    private readonly VectorSearchConfiguration _vectorSearchConfiguration = new();
     private readonly SearchParamTableExpressionQueryGeneratorFactory _queryGeneratorFactory;
     private readonly SchemaInformation _schemaInformation = new(SchemaVersionConstants.Min, SchemaVersionConstants.Max);
     private readonly IndentedStringBuilder _strBuilder = new(new StringBuilder());
@@ -56,7 +57,10 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
 
         // Create real instances instead of mocking since factory is internal
         var searchParameterToSearchValueTypeMap = new SearchParameterToSearchValueTypeMap();
-        _queryGeneratorFactory = new SearchParamTableExpressionQueryGeneratorFactory(searchParameterToSearchValueTypeMap, _vectorSearchCapabilityProvider);
+        _queryGeneratorFactory = new SearchParamTableExpressionQueryGeneratorFactory(
+            searchParameterToSearchValueTypeMap,
+            _vectorSearchCapabilityProvider,
+            Options.Create(_vectorSearchConfiguration));
 
         _schemaInformation.Current = SchemaVersionConstants.Max;
 
@@ -713,6 +717,114 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
         Assert.Contains("vectorSearch.ResourceTypeId = 3", vectorCte);
     }
 
+    [Fact]
+    public void GivenApproximateIndexIsDisabled_WhenSqlGenerated_ThenExactSqlIsUsed()
+    {
+        _vectorSearchCapabilityProvider.SupportsApproximateVectorIndex.Returns(true);
+
+        string generatedSql = GenerateVectorSearchSql(k: 5);
+        string vectorCte = GetCte(generatedSql, "cte0 AS", "cte1 AS");
+        IReadOnlyList<string> topParameters = GetTopParameterNames(vectorCte);
+
+        Assert.Contains("VECTOR_DISTANCE(", generatedSql);
+        Assert.DoesNotContain("WITH APPROXIMATE", generatedSql);
+        Assert.DoesNotContain("VECTOR_SEARCH(", generatedSql);
+        Assert.Single(topParameters);
+        Assert.Equal(5, Convert.ToInt32(_sqlCommand.Parameters[topParameters[0]].Value));
+    }
+
+    [Fact]
+    public void GivenApproximateIndexIsEnabledAndAvailable_WhenUnrestrictedSqlGenerated_ThenApproximateSqlIsUsed()
+    {
+        _vectorSearchConfiguration.EnableApproximateVectorIndex = true;
+        _vectorSearchCapabilityProvider.SupportsApproximateVectorIndex.Returns(true);
+
+        string generatedSql = GenerateVectorSearchSql(k: 5, minScore: 0.75);
+        string vectorCte = GetCte(generatedSql, "cte0 AS", "cte1 AS");
+
+        Assert.Contains("SELECT TOP (", vectorCte);
+        Assert.Contains("WITH APPROXIMATE", vectorCte);
+        Assert.Contains("FROM VECTOR_SEARCH(", vectorCte);
+        Assert.Contains("TABLE = dbo.VectorSearchParam AS vectorEntry", vectorCte);
+        Assert.Contains("ORDER BY vectorResult.distance ASC", vectorCte);
+        Assert.DoesNotContain("ORDER BY vectorResult.distance ASC,", vectorCte);
+        Assert.Contains("vectorEntry.EmbeddingModelId = @", vectorCte);
+        Assert.Contains("MIN(vectorSearch.distance) AS VectorDistance", vectorCte);
+        Assert.Contains("GROUP BY vectorSearch.ResourceTypeId, vectorSearch.ResourceSurrogateId", vectorCte);
+        Assert.Contains("HAVING MIN(vectorSearch.distance) <= @", vectorCte);
+
+        IReadOnlyList<string> topParameters = GetTopParameterNames(vectorCte);
+        Assert.Equal(2, topParameters.Count);
+        Assert.NotEqual(topParameters[0], topParameters[1]);
+        int outerTop = Convert.ToInt32(_sqlCommand.Parameters[topParameters[0]].Value);
+        int innerTop = Convert.ToInt32(_sqlCommand.Parameters[topParameters[1]].Value);
+        Assert.True(innerTop > outerTop, $"Expected inner ANN budget {innerTop} to exceed outer resource limit {outerTop}.");
+    }
+
+    [Theory]
+    [InlineData(1.0)]
+    [InlineData(0.5)]
+    public void GivenApproximateIndexAndNonIncreasingOversampling_WhenSqlGenerated_ThenInnerBudgetIsNotLessThanK(double oversamplingFactor)
+    {
+        _vectorSearchConfiguration.EnableApproximateVectorIndex = true;
+        _vectorSearchConfiguration.OversamplingFactor = oversamplingFactor;
+        _vectorSearchCapabilityProvider.SupportsApproximateVectorIndex.Returns(true);
+
+        string generatedSql = GenerateVectorSearchSql(k: 5);
+        string vectorCte = GetCte(generatedSql, "cte0 AS", "cte1 AS");
+        IReadOnlyList<string> topParameters = GetTopParameterNames(vectorCte);
+
+        Assert.Equal(2, topParameters.Count);
+        int outerTop = Convert.ToInt32(_sqlCommand.Parameters[topParameters[0]].Value);
+        int innerTop = Convert.ToInt32(_sqlCommand.Parameters[topParameters[1]].Value);
+        Assert.True(innerTop >= outerTop, $"Expected inner ANN budget {innerTop} to be at least outer resource limit {outerTop}.");
+    }
+
+    [Fact]
+    public void GivenApproximateIndexAndHugeOversampling_WhenSqlGenerated_ThenInnerBudgetIsClampedWithoutOverflow()
+    {
+        _vectorSearchConfiguration.EnableApproximateVectorIndex = true;
+        _vectorSearchConfiguration.OversamplingFactor = double.MaxValue;
+        _vectorSearchCapabilityProvider.SupportsApproximateVectorIndex.Returns(true);
+
+        string generatedSql = GenerateVectorSearchSql(k: int.MaxValue);
+        string vectorCte = GetCte(generatedSql, "cte0 AS", "cte1 AS");
+        IReadOnlyList<string> topParameters = GetTopParameterNames(vectorCte);
+
+        Assert.Equal(2, topParameters.Count);
+        Assert.Equal(int.MaxValue, Convert.ToInt32(_sqlCommand.Parameters[topParameters[0]].Value));
+        Assert.Equal(int.MaxValue, Convert.ToInt32(_sqlCommand.Parameters[topParameters[1]].Value));
+    }
+
+    [Fact]
+    public void GivenApproximateIndexIsEnabledButUnavailable_WhenSqlGenerated_ThenExactSqlIsUsed()
+    {
+        _vectorSearchConfiguration.EnableApproximateVectorIndex = true;
+        _vectorSearchCapabilityProvider.SupportsApproximateVectorIndex.Returns(false);
+
+        string generatedSql = GenerateVectorSearchSql(k: 5);
+
+        Assert.Contains("VECTOR_DISTANCE(", generatedSql);
+        Assert.DoesNotContain("WITH APPROXIMATE", generatedSql);
+        Assert.DoesNotContain("VECTOR_SEARCH(", generatedSql);
+    }
+
+    [Fact]
+    [Trait(Traits.Category, Categories.CompartmentSearch)]
+    public void GivenApproximateIndexIsEnabledAndAvailable_WhenPredecessorExists_ThenExactSqlIsUsed()
+    {
+        _vectorSearchConfiguration.EnableApproximateVectorIndex = true;
+        _vectorSearchCapabilityProvider.SupportsApproximateVectorIndex.Returns(true);
+
+        string generatedSql = GenerateVectorSearchSql(withCompartment: true, k: 5);
+        string vectorCte = GetCte(generatedSql, "cte1 AS", "cte2 AS");
+
+        Assert.Contains("JOIN cte0 predecessor", vectorCte);
+        Assert.Contains("VECTOR_DISTANCE(", vectorCte);
+        Assert.DoesNotContain("WITH APPROXIMATE", vectorCte);
+        Assert.DoesNotContain("VECTOR_SEARCH(", vectorCte);
+    }
+
     private string GenerateVectorSearchSql(bool withCompartment = false, int? k = null, double? minScore = null)
     {
         var vectorParameterUrl = new Uri("http://example.org/SearchParameter/Observation-clinical-text");
@@ -860,5 +972,23 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
             compartmentRewriter,
             new Lazy<ISearchParameterDefinitionManager>(() => searchParameterDefinitionManager),
             Options.Create(new CoreFeatureConfiguration { EnableSmartCompartmentDeviceRestriction = false }));
+    }
+
+    private static IReadOnlyList<string> GetTopParameterNames(string sql)
+    {
+        const string marker = "TOP (";
+        var parameterNames = new List<string>();
+        int searchStart = 0;
+
+        while ((searchStart = sql.IndexOf(marker, searchStart, StringComparison.Ordinal)) >= 0)
+        {
+            int parameterStart = searchStart + marker.Length;
+            int parameterEnd = sql.IndexOf(')', parameterStart);
+            Assert.True(parameterEnd > parameterStart, $"Could not parse TOP parameter in:{Environment.NewLine}{sql}");
+            parameterNames.Add(sql[parameterStart..parameterEnd]);
+            searchStart = parameterEnd + 1;
+        }
+
+        return parameterNames;
     }
 }

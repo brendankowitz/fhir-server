@@ -6,6 +6,8 @@
 using System;
 using System.Collections.Concurrent;
 using EnsureThat;
+using Microsoft.Extensions.Options;
+using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
 using Microsoft.Health.Fhir.Core.Models;
@@ -22,20 +24,30 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors
     {
         private readonly SearchParameterToSearchValueTypeMap _searchParameterToSearchValueTypeMap;
         private readonly IVectorSearchCapabilityProvider _vectorSearchCapabilityProvider;
+        private readonly VectorSearchConfiguration _vectorSearchConfiguration;
         private readonly ConcurrentDictionary<Uri, SearchParamTableExpressionQueryGenerator> _cache = new ConcurrentDictionary<Uri, SearchParamTableExpressionQueryGenerator>();
 
         public SearchParamTableExpressionQueryGeneratorFactory(SearchParameterToSearchValueTypeMap searchParameterToSearchValueTypeMap)
-            : this(searchParameterToSearchValueTypeMap, null)
+            : this(searchParameterToSearchValueTypeMap, null, Options.Create(new VectorSearchConfiguration()))
         {
         }
 
         public SearchParamTableExpressionQueryGeneratorFactory(
             SearchParameterToSearchValueTypeMap searchParameterToSearchValueTypeMap,
             IVectorSearchCapabilityProvider vectorSearchCapabilityProvider)
+            : this(searchParameterToSearchValueTypeMap, vectorSearchCapabilityProvider, Options.Create(new VectorSearchConfiguration()))
+        {
+        }
+
+        public SearchParamTableExpressionQueryGeneratorFactory(
+            SearchParameterToSearchValueTypeMap searchParameterToSearchValueTypeMap,
+            IVectorSearchCapabilityProvider vectorSearchCapabilityProvider,
+            IOptions<VectorSearchConfiguration> vectorSearchConfiguration)
         {
             EnsureArg.IsNotNull(searchParameterToSearchValueTypeMap, nameof(searchParameterToSearchValueTypeMap));
             _searchParameterToSearchValueTypeMap = searchParameterToSearchValueTypeMap;
             _vectorSearchCapabilityProvider = vectorSearchCapabilityProvider;
+            _vectorSearchConfiguration = EnsureArg.IsNotNull(vectorSearchConfiguration, nameof(vectorSearchConfiguration)).Value;
         }
 
         public object InitialContext => null;
@@ -155,7 +167,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors
                     $"{nameof(IVectorSearchCapabilityProvider)} is required to generate vector search SQL.");
             }
 
-            return new VectorSearchQueryGenerator(_vectorSearchCapabilityProvider);
+            return new VectorSearchQueryGenerator(_vectorSearchCapabilityProvider, _vectorSearchConfiguration);
         }
 
         public SearchParamTableExpressionQueryGenerator VisitChained(ChainedExpression expression, object context)

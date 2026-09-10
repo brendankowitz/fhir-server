@@ -40,6 +40,13 @@ namespace Microsoft.Health.Fhir.Core.Configs
         public bool Suspended { get; set; }
 
         /// <summary>
+        /// Gets or sets a value indicating whether the preview approximate vector index may be used. This requires
+        /// a vector index on dbo.VectorSearchParam and applies only to type-scoped vector searches with no other
+        /// restricting predicate.
+        /// </summary>
+        public bool EnableApproximateVectorIndex { get; set; }
+
+        /// <summary>
         /// Gets or sets the embedding persistence mode.
         /// </summary>
         public EmbeddingPersistenceMode EmbeddingPersistenceMode { get; set; } = EmbeddingPersistenceMode.Synchronous;

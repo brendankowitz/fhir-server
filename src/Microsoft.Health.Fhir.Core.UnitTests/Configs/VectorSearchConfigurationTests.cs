@@ -25,6 +25,7 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Configs
             Assert.NotNull(config.VectorSearch);
             Assert.False(config.VectorSearch.Enabled);
             Assert.False(config.VectorSearch.Suspended);
+            Assert.False(config.VectorSearch.EnableApproximateVectorIndex);
             Assert.Equal(EmbeddingPersistenceMode.Synchronous, config.VectorSearch.EmbeddingPersistenceMode);
             Assert.Equal(1536, config.VectorSearch.EmbeddingDimensions);
             Assert.Equal(200, config.VectorSearch.DefaultK);

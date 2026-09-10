@@ -32,6 +32,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
         private bool _initialized;
         private int _disabledLogged;
         private int _schemaGateLogged;
+        private int _approximateUnavailableLogged;
         private short _embeddingModelId;
 
         /// <summary>
@@ -127,6 +128,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
 
                 await EnsureVectorTypeSupportedAsync(cancellationToken);
                 await ProbeApproximateVectorIndexAsync(cancellationToken);
+                LogApproximateIndexFallbackIfNeeded();
                 (short embeddingModelId, int dimension) = await UpsertEmbeddingModelAsync(cancellationToken);
 
                 if (dimension != _configuration.EmbeddingDimensions)
@@ -187,7 +189,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
 
         private async Task EnsureVectorTypeSupportedAsync(CancellationToken cancellationToken)
         {
-            using var command = new SqlCommand("SELECT 1 FROM sys.types WHERE name = 'vector'");
+            using var command = new SqlCommand("SELECT 1 FROM sys.types WHERE name = 'vector' AND is_user_defined = 0");
             IReadOnlyList<bool> results = await _sqlRetryService.ExecuteReaderAsync(
                 command,
                 _ => true,
@@ -207,23 +209,45 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
         {
             try
             {
-                using var command = new SqlCommand("SELECT OBJECT_ID('sys.dm_db_vector_indexes')");
-                IReadOnlyList<int?> results = await _sqlRetryService.ExecuteReaderAsync<int?>(
+                const string commandText = @"
+IF OBJECT_ID(N'sys.dm_db_vector_indexes') IS NULL
+    SELECT CAST(0 AS bit);
+ELSE
+    EXEC(N'
+        SELECT CASE WHEN EXISTS (
+            SELECT 1
+            FROM sys.dm_db_vector_indexes
+            WHERE object_id = OBJECT_ID(N''dbo.VectorSearchParam'')
+        ) THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END;');";
+
+                using var command = new SqlCommand(commandText);
+                IReadOnlyList<bool> results = await _sqlRetryService.ExecuteReaderAsync(
                     command,
-                    reader => reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                    reader => reader.GetBoolean(0),
                     _logger,
                     "Probing SQL engine support for approximate vector indexes.",
                     cancellationToken,
                     isReadOnly: true);
 
-                SupportsApproximateVectorIndex = results.Count > 0 && results[0].HasValue;
+                SupportsApproximateVectorIndex = results.Count > 0 && results[0];
             }
-            catch (Exception exception)
+            catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
                 SupportsApproximateVectorIndex = false;
-                _logger.LogWarning(
+                _logger.LogDebug(
                     exception,
-                    "Unable to determine approximate vector index availability; vector search will use the exact search baseline.");
+                    "Unable to determine approximate vector index availability.");
+            }
+        }
+
+        private void LogApproximateIndexFallbackIfNeeded()
+        {
+            if (_configuration.EnableApproximateVectorIndex &&
+                !SupportsApproximateVectorIndex &&
+                Interlocked.Exchange(ref _approximateUnavailableLogged, 1) == 0)
+            {
+                _logger.LogWarning(
+                    "Approximate vector indexing is enabled but unavailable on the connected SQL engine; vector search will use the exact search baseline.");
             }
         }
 

@@ -6,6 +6,7 @@
 using System;
 using System.Text.Json;
 using EnsureThat;
+using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema.Model;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage;
@@ -18,10 +19,19 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
     {
         private const string TableAlias = "vectorSearch";
         private readonly IVectorSearchCapabilityProvider _capabilityProvider;
+        private readonly VectorSearchConfiguration _configuration;
 
         public VectorSearchQueryGenerator(IVectorSearchCapabilityProvider capabilityProvider)
+            : this(capabilityProvider, new VectorSearchConfiguration())
+        {
+        }
+
+        public VectorSearchQueryGenerator(
+            IVectorSearchCapabilityProvider capabilityProvider,
+            VectorSearchConfiguration configuration)
         {
             _capabilityProvider = EnsureArg.IsNotNull(capabilityProvider, nameof(capabilityProvider));
+            _configuration = EnsureArg.IsNotNull(configuration, nameof(configuration));
         }
 
         public override Table Table => VLatest.VectorSearchParam;
@@ -53,6 +63,14 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                 VLatest.VectorSearchParam.EmbeddingModelId,
                 _capabilityProvider.EmbeddingModelId,
                 includeInHash: true);
+
+            if (_configuration.EnableApproximateVectorIndex &&
+                _capabilityProvider.SupportsApproximateVectorIndex &&
+                predecessorTableExpressionName == null)
+            {
+                GenerateApproximate(expression, context, embeddingParameter, embeddingModelIdParameter);
+                return;
+            }
 
             string distanceExpression =
                 $"VECTOR_DISTANCE('cosine', {TableAlias}.Embedding, CAST({embeddingParameter} AS VECTOR(1536)))";
@@ -132,6 +150,109 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                     .Append(VLatest.VectorSearchParam.ResourceSurrogateId, TableAlias)
                     .AppendLine(" ASC");
             }
+        }
+
+        private void GenerateApproximate(
+            VectorSearchExpression expression,
+            SearchParameterQueryGeneratorContext context,
+            object embeddingParameter,
+            object embeddingModelIdParameter)
+        {
+            if (expression.Parameter.BaseResourceTypes?.Count != 1)
+            {
+                throw new InvalidOperationException(
+                    "An approximate vector search requires exactly one base resource type.");
+            }
+
+            int resourceLimit = expression.K ?? _configuration.DefaultK;
+            int approximateCandidateLimit = GetApproximateCandidateLimit(resourceLimit);
+            object resourceLimitParameter = context.Parameters.AddParameter(
+                resourceLimit,
+                includeInHash: false);
+            object approximateCandidateLimitParameter = context.Parameters.AddParameter(
+                approximateCandidateLimit,
+                includeInHash: false);
+
+            context.StringBuilder
+                .Append("SELECT TOP (").Append(resourceLimitParameter).Append(") ")
+                .Append(VLatest.VectorSearchParam.ResourceTypeId, TableAlias).Append(" AS T1, ")
+                .Append(VLatest.VectorSearchParam.ResourceSurrogateId, TableAlias).AppendLine(" AS Sid1,")
+                .Append("MIN(").Append(TableAlias).AppendLine(".distance) AS VectorDistance")
+                .AppendLine("FROM (")
+                .Append("    SELECT TOP (").Append(approximateCandidateLimitParameter).AppendLine(") WITH APPROXIMATE")
+                .Append("        ").Append(VLatest.VectorSearchParam.ResourceTypeId, "vectorEntry").AppendLine(",")
+                .Append("        ").Append(VLatest.VectorSearchParam.ResourceSurrogateId, "vectorEntry").AppendLine(",")
+                .AppendLine("        vectorResult.distance")
+                .AppendLine("    FROM VECTOR_SEARCH(")
+                .AppendLine("        TABLE = dbo.VectorSearchParam AS vectorEntry,")
+                .AppendLine("        COLUMN = Embedding,")
+                .Append("        SIMILAR_TO = CAST(").Append(embeddingParameter).AppendLine(" AS VECTOR(1536)),")
+                .AppendLine("        METRIC = 'cosine'")
+                .AppendLine("    ) AS vectorResult");
+
+            using (var where = context.StringBuilder.BeginDelimitedWhereClause())
+            {
+                where.BeginDelimitedElement()
+                    .Append(VLatest.VectorSearchParam.ResourceTypeId, "vectorEntry")
+                    .Append(" = ")
+                    .Append(context.Model.GetResourceTypeId(expression.Parameter.BaseResourceTypes[0]));
+
+                where.BeginDelimitedElement()
+                    .Append(VLatest.VectorSearchParam.SearchParamId, "vectorEntry")
+                    .Append(" = ")
+                    .Append(context.Model.GetSearchParamId(expression.Parameter.Url));
+
+                where.BeginDelimitedElement()
+                    .Append(VLatest.VectorSearchParam.EmbeddingModelId, "vectorEntry")
+                    .Append(" = ")
+                    .Append(embeddingModelIdParameter);
+
+                where.BeginDelimitedElement()
+                    .Append("vectorEntry.Embedding IS NOT NULL");
+            }
+
+            // Restricting predicates must remain inside VECTOR_SEARCH so iterative filtering finds K qualifying rows.
+            // Queries with a predecessor CTE use the exact path instead; intersecting that CTE after this TOP would
+            // truncate before authorization and other FHIR predicates are applied.
+            // Oversampling reduces chunk crowding before rows collapse by resource, but a pathological resource with
+            // many highly ranked chunks can still cause approximate search to return fewer than K unique resources.
+            context.StringBuilder
+                .AppendLine("    ORDER BY vectorResult.distance ASC")
+                .Append(") ").AppendLine(TableAlias)
+                .Append("GROUP BY ")
+                .Append(VLatest.VectorSearchParam.ResourceTypeId, TableAlias).Append(", ")
+                .Append(VLatest.VectorSearchParam.ResourceSurrogateId, TableAlias).AppendLine();
+
+            if (expression.MinScore.HasValue)
+            {
+                double maximumDistance = 2.0 * (1.0 - expression.MinScore.Value);
+                context.StringBuilder
+                    .Append("HAVING MIN(").Append(TableAlias).Append(".distance) <= ")
+                    .Append(context.Parameters.AddParameter(maximumDistance, includeInHash: true))
+                    .AppendLine();
+            }
+
+            context.StringBuilder
+                .Append("ORDER BY VectorDistance ASC, ")
+                .Append(VLatest.VectorSearchParam.ResourceSurrogateId, TableAlias)
+                .AppendLine(" ASC");
+        }
+
+        private int GetApproximateCandidateLimit(int resourceLimit)
+        {
+            double oversamplingFactor = _configuration.OversamplingFactor;
+            if (double.IsNaN(oversamplingFactor) || oversamplingFactor < 1.0)
+            {
+                oversamplingFactor = 1.0;
+            }
+
+            double candidateLimit = Math.Ceiling(resourceLimit * oversamplingFactor);
+            if (double.IsPositiveInfinity(candidateLimit) || candidateLimit >= int.MaxValue)
+            {
+                return int.MaxValue;
+            }
+
+            return Math.Max(resourceLimit, (int)candidateLimit);
         }
     }
 }
