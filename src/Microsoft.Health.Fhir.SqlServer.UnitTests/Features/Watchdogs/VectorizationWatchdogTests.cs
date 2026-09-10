@@ -198,6 +198,26 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
         }
 
         [Fact]
+        public async Task GivenWatchdogIsDisabled_WhenWatchdogRuns_ThenNothingIsInitializedReadEnqueuedOrAdvanced()
+        {
+            // Arrange
+            ConfigureResourceType("Patient", 1);
+            TestVectorizationWatchdog watchdog = CreateWatchdog(
+                new[] { CreateSearchParameter("patient-vector", true, "Patient") },
+                Transactions(20));
+            watchdog.IsEnabledValue = 0;
+
+            // Act
+            await watchdog.RunWorkForTestingAsync(CancellationToken.None);
+
+            // Assert
+            await _capabilityProvider.DidNotReceiveWithAnyArgs().EnsureInitializedAsync(default);
+            Assert.Equal(0, watchdog.VisibilityReadCount);
+            Assert.Empty(watchdog.EnqueueCalls);
+            Assert.Empty(watchdog.AdvancedWatermarks);
+        }
+
+        [Fact]
         public async Task GivenEnqueueFailure_WhenWatchdogRuns_ThenWatermarkIsNotAdvanced()
         {
             // Arrange
@@ -308,9 +328,16 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
 
             public Exception EnqueueException { get; set; }
 
+            public double IsEnabledValue { get; set; } = 1;
+
             public int VisibilityReadCount { get; private set; }
 
             public int TransactionFetchCount { get; private set; }
+
+            internal override Task<bool> IsEnabledAsync(CancellationToken cancellationToken)
+            {
+                return Task.FromResult(IsEnabledValue == 1);
+            }
 
             internal override Task<long> GetTransactionVisibilityAsync(CancellationToken cancellationToken)
             {

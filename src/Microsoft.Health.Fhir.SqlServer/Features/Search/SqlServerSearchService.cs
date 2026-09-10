@@ -241,7 +241,12 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
         public override async Task<SearchResult> SearchAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
         {
             SqlSearchOptions sqlSearchOptions = new SqlSearchOptions(searchOptions);
-            await VectorSearchQueryEmbeddingEnricher.EnrichAsync(sqlSearchOptions.Expression, _embeddingClient, _vectorSearchMetricHandler, cancellationToken);
+            await VectorSearchQueryEmbeddingEnricher.EnrichAsync(
+                sqlSearchOptions.Expression,
+                _embeddingClient,
+                _vectorSearchMetricHandler,
+                cancellationToken,
+                sqlSearchOptions.Sort);
 
             if (sqlSearchOptions.IsIncludesOperation)
             {
@@ -3123,7 +3128,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                 Expression expression,
                 IEmbeddingClient embeddingClient,
                 IVectorSearchMetricHandler metricHandler,
-                CancellationToken cancellationToken)
+                CancellationToken cancellationToken,
+                IReadOnlyList<(SearchParameterInfo searchParameterInfo, SortOrder sortOrder)> explicitSort = null)
             {
                 if (expression == null)
                 {
@@ -3139,8 +3145,26 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                     return;
                 }
 
-                var inputs = new List<string>(vectorSearchExpressions.Count);
-                foreach (VectorSearchExpression vectorSearchExpression in vectorSearchExpressions)
+                if (vectorSearchExpressions.Count > 1)
+                {
+                    throw new BadRequestException("Only one vector search parameter is supported per query.");
+                }
+
+                if (explicitSort?.Count > 0)
+                {
+                    throw new BadRequestException("Sorting is not supported with vector search because results are ordered by relevance.");
+                }
+
+                VectorSearchExpression[] pendingExpressions = vectorSearchExpressions
+                    .Where(vectorSearchExpression => vectorSearchExpression.QueryEmbedding == null)
+                    .ToArray();
+                if (pendingExpressions.Length == 0)
+                {
+                    return;
+                }
+
+                var inputs = new List<string>(pendingExpressions.Length);
+                foreach (VectorSearchExpression vectorSearchExpression in pendingExpressions)
                 {
                     inputs.Add(vectorSearchExpression.QueryText);
                 }
@@ -3150,15 +3174,24 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                 try
                 {
                     embeddings = await embeddingClient.EmbedAsync(inputs, tightBudget: false, cancellationToken);
-                    if (embeddings == null || embeddings.Count != vectorSearchExpressions.Count)
+                    if (embeddings == null || embeddings.Count != pendingExpressions.Length)
                     {
                         throw new InvalidOperationException(
-                            $"The embedding client returned {embeddings?.Count ?? 0} embeddings for {vectorSearchExpressions.Count} inputs.");
+                            $"The embedding client returned {embeddings?.Count ?? 0} embeddings for {pendingExpressions.Length} inputs.");
                     }
 
-                    for (int i = 0; i < vectorSearchExpressions.Count; i++)
+                    for (int i = 0; i < embeddings.Count; i++)
                     {
-                        vectorSearchExpressions[i].SetQueryEmbedding(embeddings[i]);
+                        if (embeddings[i]?.Length != VectorSearchCapabilityProvider.SchemaEmbeddingDimensions)
+                        {
+                            throw new InvalidOperationException(
+                                $"The embedding client returned an embedding with {embeddings[i]?.Length ?? 0} dimensions for input {i}; schema V117 requires exactly {VectorSearchCapabilityProvider.SchemaEmbeddingDimensions} dimensions.");
+                        }
+                    }
+
+                    for (int i = 0; i < pendingExpressions.Length; i++)
+                    {
+                        pendingExpressions[i].SetQueryEmbedding(embeddings[i]);
                     }
 
                     metricHandler.EmitEmbedding(new VectorEmbeddingMetricNotification
@@ -3188,10 +3221,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
 
                 public override Expression VisitVectorSearch(VectorSearchExpression expression, object context)
                 {
-                    if (expression.QueryEmbedding == null)
-                    {
-                        (_vectorSearchExpressions ??= new List<VectorSearchExpression>()).Add(expression);
-                    }
+                    (_vectorSearchExpressions ??= new List<VectorSearchExpression>()).Add(expression);
 
                     return expression;
                 }

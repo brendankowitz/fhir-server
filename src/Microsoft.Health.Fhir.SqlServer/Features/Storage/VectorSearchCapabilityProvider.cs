@@ -23,6 +23,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
     /// </summary>
     public sealed class VectorSearchCapabilityProvider : IVectorSearchCapabilityProvider, IDisposable
     {
+        internal const int SchemaEmbeddingDimensions = 1536;
+
         private const string DistanceMetric = "cosine";
         private readonly ISqlRetryService _sqlRetryService;
         private readonly SchemaInformation _schemaInformation;
@@ -134,7 +136,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                 if (dimension != _configuration.EmbeddingDimensions)
                 {
                     throw new InvalidOperationException(
-                        $"The configured embedding dimension {_configuration.EmbeddingDimensions} does not match the persisted dimension {dimension} for model '{_configuration.EmbeddingDeploymentName}' version '{_configuration.EmbeddingModelVersion}'. Persisted embeddings have a fixed dimension; update the configuration to match or use a new ModelVersion.");
+                        $"The persisted embedding dimension {dimension} for model '{_configuration.EmbeddingDeploymentName}' version '{_configuration.EmbeddingModelVersion}' does not match Schema V{SchemaVersionConstants.VectorSearch}, which stores vectors at a fixed {SchemaEmbeddingDimensions} dimensions. Use a model identity and deployment that produce {SchemaEmbeddingDimensions}-dimension embeddings.");
                 }
 
                 _embeddingModelId = embeddingModelId;
@@ -161,11 +163,13 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
 
         private void ValidateConfiguration()
         {
-            // The chunker estimates four characters per token; 2048 leaves a 4x margin below the client's exact 8192-token limit.
-            if (_configuration.ChunkSizeTokens < 1 || _configuration.ChunkSizeTokens > 2048)
+            // The chunker estimates four characters per token. The 1024 ceiling keeps the estimated
+            // 4096-character chunk below the embedding client's exact 8192-token truncation limit
+            // even when text approaches one token per character.
+            if (_configuration.ChunkSizeTokens < 1 || _configuration.ChunkSizeTokens > 1024)
             {
                 throw new InvalidOperationException(
-                    $"VectorSearch:ChunkSizeTokens must be between 1 and 2048, but was {_configuration.ChunkSizeTokens}.");
+                    $"VectorSearch:ChunkSizeTokens must be between 1 and 1024 because chunk sizing is estimated while the embedding service truncates at an exact token limit, but was {_configuration.ChunkSizeTokens}.");
             }
 
             if (_configuration.ChunkOverlapTokens < 0 || _configuration.ChunkOverlapTokens >= _configuration.ChunkSizeTokens)
@@ -180,10 +184,10 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
                     $"VectorSearch:MaxChunksPerSearchParameter must be at least 1, but was {_configuration.MaxChunksPerSearchParameter}.");
             }
 
-            if (_configuration.EmbeddingDimensions < 1)
+            if (_configuration.EmbeddingDimensions != SchemaEmbeddingDimensions)
             {
                 throw new InvalidOperationException(
-                    $"VectorSearch:EmbeddingDimensions must be at least 1, but was {_configuration.EmbeddingDimensions}.");
+                    $"VectorSearch:EmbeddingDimensions must be {SchemaEmbeddingDimensions} because Schema V{SchemaVersionConstants.VectorSearch} stores vectors at a fixed {SchemaEmbeddingDimensions} dimensions, but was {_configuration.EmbeddingDimensions}.");
             }
         }
 

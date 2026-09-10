@@ -121,7 +121,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Operations.Embeddin
             ResourceWrapper resource = CreateResource();
             VectorSearchValue value = ConfigureResource(resource, "new text", 0);
             ConfigureStoredState(resource, new VectorSearchParamState(SearchParamId, 0, new VectorSearchValue("old text", 0).SourceTextHash, EmbeddingModelId));
-            float[] embedding = { 0.1f, 0.2f };
+            float[] embedding = CreateEmbedding();
             _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
                 .Returns(new[] { embedding });
             EmbeddingGenerationJob job = CreateJob();
@@ -187,7 +187,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Operations.Embeddin
                         EmbeddingModelId))
                     .ToArray());
             _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
-                .Returns(extractedValues.Select(_ => new[] { 0.1f }).ToArray());
+                .Returns(extractedValues.Select(_ => CreateEmbedding()).ToArray());
             EmbeddingGenerationJob job = CreateJob();
 
             // Act
@@ -236,9 +236,9 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Operations.Embeddin
             ConfigureResource(secondResource, thirdChunk);
             ConfigureSearchResults(firstResource, secondResource);
             ConfigureStoredState();
-            float[] firstEmbedding = { 0.1f };
-            float[] secondEmbedding = { 0.2f };
-            float[] thirdEmbedding = { 0.3f };
+            float[] firstEmbedding = CreateEmbedding(0.1f);
+            float[] secondEmbedding = CreateEmbedding(0.2f);
+            float[] thirdEmbedding = CreateEmbedding(0.3f);
             _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
                 .Returns(new[] { firstEmbedding, secondEmbedding, thirdEmbedding });
             EmbeddingGenerationJob job = CreateJob();
@@ -275,6 +275,28 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Operations.Embeddin
                 () => job.ExecuteAsync(CreateJobInfo(), CancellationToken.None));
 
             // Assert
+            Assert.Equal(0, _vectorSearchParamStore.ReplaceCallCount);
+        }
+
+        [Fact]
+        public async Task GivenEmbeddingWithWrongDimension_WhenExecuted_ThenDoesNotReplaceResources()
+        {
+            // Arrange
+            ResourceWrapper resource = CreateResource();
+            VectorSearchValue value = ConfigureResource(resource, "new text", 0);
+            ConfigureStoredState();
+            _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
+                .Returns(new[] { new float[1535] });
+            EmbeddingGenerationJob job = CreateJob();
+
+            // Act
+            InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => job.ExecuteAsync(CreateJobInfo(), CancellationToken.None));
+
+            // Assert
+            Assert.Contains("1536", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("1535", exception.Message, StringComparison.Ordinal);
+            Assert.Null(value.Embedding);
             Assert.Equal(0, _vectorSearchParamStore.ReplaceCallCount);
         }
 
@@ -422,6 +444,11 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Operations.Embeddin
                         [resource.ResourceSurrogateId] = states,
                     };
             _vectorSearchParamStore.State = state;
+        }
+
+        private static float[] CreateEmbedding(float value = 0.1f)
+        {
+            return Enumerable.Repeat(value, VectorSearchCapabilityProvider.SchemaEmbeddingDimensions).ToArray();
         }
 
         private static SearchResult CreateSearchResult(params ResourceWrapper[] resources)

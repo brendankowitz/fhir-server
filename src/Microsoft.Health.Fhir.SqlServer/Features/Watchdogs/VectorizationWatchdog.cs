@@ -85,6 +85,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Watchdogs
         /// </summary>
         public string LastProcessedTransactionId => $"{Name}.LastProcessedTransactionId";
 
+        internal string IsEnabledId => $"{Name}.IsEnabled";
+
         /// <inheritdoc />
         public override double LeasePeriodSec { get; internal set; } = 2 * 3600;
 
@@ -98,6 +100,12 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Watchdogs
 
         protected override async Task RunWorkAsync(CancellationToken cancellationToken)
         {
+            if (!await IsEnabledAsync(cancellationToken))
+            {
+                _logger.LogInformation($"{Name} is not enabled. Exiting...");
+                return;
+            }
+
             await _vectorSearchCapabilityProvider.EnsureInitializedAsync(cancellationToken);
             if (!_vectorSearchCapabilityProvider.IsVectorSearchAvailable)
             {
@@ -177,9 +185,19 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Watchdogs
 
         protected override async Task InitAdditionalParamsAsync()
         {
-            await using var cmd = new SqlCommand("INSERT INTO dbo.Parameters (Id, Bigint) SELECT @Id, 5105975696064002770"); // surrogate id for the past. does not matter.
-            cmd.Parameters.AddWithValue("@Id", LastProcessedTransactionId);
+            await using var cmd = new SqlCommand(@"
+INSERT INTO dbo.Parameters (Id, Bigint) SELECT @LastProcessedTransactionId, 5105975696064002770
+INSERT INTO dbo.Parameters (Id, Number) SELECT @IsEnabledId, 1
+            "); // The initial surrogate id is in the past and only establishes the first sweep watermark.
+            cmd.Parameters.AddWithValue("@LastProcessedTransactionId", LastProcessedTransactionId);
+            cmd.Parameters.AddWithValue("@IsEnabledId", IsEnabledId);
             await cmd.ExecuteNonQueryAsync(_sqlRetryService, _logger, CancellationToken.None);
+        }
+
+        internal virtual async Task<bool> IsEnabledAsync(CancellationToken cancellationToken)
+        {
+            double value = await GetNumberParameterByIdAsync(IsEnabledId, cancellationToken);
+            return value == 1;
         }
 
         internal virtual Task<long> GetTransactionVisibilityAsync(CancellationToken cancellationToken)

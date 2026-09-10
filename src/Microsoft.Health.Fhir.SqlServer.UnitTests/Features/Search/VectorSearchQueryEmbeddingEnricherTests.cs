@@ -8,11 +8,14 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Health.Fhir.Core.Features.Persistence;
+using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
 using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer.Features.Search;
+using Microsoft.Health.Fhir.SqlServer.Features.Storage;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Fhir.ValueSets;
 using Microsoft.Health.Test.Utilities;
@@ -48,7 +51,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
         {
             // Arrange
             VectorSearchExpression vectorSearch = CreateVectorSearchExpression("first query");
-            float[] embedding = { 0.1f, 0.2f };
+            float[] embedding = CreateEmbedding();
             _embeddingClient.EmbedAsync(default, default, default)
                 .ReturnsForAnyArgs(new[] { embedding });
 
@@ -78,7 +81,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
             // Arrange
             VectorSearchExpression vectorSearch = CreateVectorSearchExpression("query");
             _embeddingClient.EmbedAsync(default, default, default)
-                .ReturnsForAnyArgs(new[] { new[] { 0.1f } });
+                .ReturnsForAnyArgs(new[] { CreateEmbedding() });
 
             // Act
             await SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(
@@ -95,29 +98,71 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
         }
 
         [Fact]
-        public async Task GivenTwoVectorSearchExpressions_WhenEnriching_ThenAppliesEachEmbeddingFromOneOrderedCall()
+        public async Task GivenTwoVectorSearchExpressions_WhenEnriching_ThenRejectsBeforeCallingEmbeddingClient()
         {
             // Arrange
             VectorSearchExpression first = CreateVectorSearchExpression("first query");
             VectorSearchExpression second = CreateVectorSearchExpression("second query");
-            float[] firstEmbedding = { 0.1f };
-            float[] secondEmbedding = { 0.2f };
-            _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
-                .Returns(new[] { firstEmbedding, secondEmbedding });
             Expression expression = Expression.And(
                 Expression.SearchParameter(first.Parameter, first),
                 Expression.SearchParameter(second.Parameter, second));
 
             // Act
-            await SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(expression, _embeddingClient, _metricHandler, CancellationToken.None);
+            Func<Task> act = () => SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(
+                expression,
+                _embeddingClient,
+                _metricHandler,
+                CancellationToken.None);
 
             // Assert
-            Assert.Same(firstEmbedding, first.QueryEmbedding);
-            Assert.Same(secondEmbedding, second.QueryEmbedding);
-            await _embeddingClient.Received(1).EmbedAsync(
-                Arg.Is<IReadOnlyList<string>>(inputs => inputs.SequenceEqual(new[] { "first query", "second query" })),
-                false,
+            BadRequestException exception = await Assert.ThrowsAsync<BadRequestException>(act);
+            Assert.Contains("only one vector search parameter", exception.Message, StringComparison.OrdinalIgnoreCase);
+            await _embeddingClient.DidNotReceiveWithAnyArgs().EmbedAsync(default, default, default);
+        }
+
+        [Fact]
+        public async Task GivenTwoVectorSearchExpressionsAndOneAlreadyEmbedded_WhenEnriching_ThenRejectsBeforeCallingEmbeddingClient()
+        {
+            // Arrange
+            VectorSearchExpression first = CreateVectorSearchExpression("first query");
+            first.SetQueryEmbedding(CreateEmbedding());
+            VectorSearchExpression second = CreateVectorSearchExpression("second query");
+            Expression expression = Expression.And(
+                Expression.SearchParameter(first.Parameter, first),
+                Expression.SearchParameter(second.Parameter, second));
+
+            // Act
+            Func<Task> act = () => SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(
+                expression,
+                _embeddingClient,
+                _metricHandler,
                 CancellationToken.None);
+
+            // Assert
+            await Assert.ThrowsAsync<BadRequestException>(act);
+            await _embeddingClient.DidNotReceiveWithAnyArgs().EmbedAsync(default, default, default);
+        }
+
+        [Fact]
+        public async Task GivenVectorSearchAndExplicitSort_WhenEnriching_ThenRejectsBeforeCallingEmbeddingClient()
+        {
+            // Arrange
+            VectorSearchExpression vectorSearch = CreateVectorSearchExpression("query");
+            var sort = new[] { (CreateParameter(), SortOrder.Ascending) };
+
+            // Act
+            Func<Task> act = () => SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(
+                Expression.SearchParameter(vectorSearch.Parameter, vectorSearch),
+                _embeddingClient,
+                _metricHandler,
+                CancellationToken.None,
+                sort);
+
+            // Assert
+            BadRequestException exception = await Assert.ThrowsAsync<BadRequestException>(act);
+            Assert.Contains("sorting is not supported with vector search", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("ordered by relevance", exception.Message, StringComparison.OrdinalIgnoreCase);
+            await _embeddingClient.DidNotReceiveWithAnyArgs().EmbedAsync(default, default, default);
         }
 
         [Fact]
@@ -148,26 +193,49 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
         public async Task GivenEmbeddingCountDoesNotMatchVectorExpressionCount_WhenEnriching_ThenThrows()
         {
             // Arrange
-            VectorSearchExpression first = CreateVectorSearchExpression("first query");
-            VectorSearchExpression second = CreateVectorSearchExpression("second query");
+            VectorSearchExpression vectorSearch = CreateVectorSearchExpression("query");
             _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
-                .Returns(new[] { new[] { 0.1f } });
-            Expression expression = Expression.And(
-                Expression.SearchParameter(first.Parameter, first),
-                Expression.SearchParameter(second.Parameter, second));
+                .Returns(Array.Empty<float[]>());
+            Expression expression = Expression.SearchParameter(vectorSearch.Parameter, vectorSearch);
 
             // Act
             Func<Task> act = () => SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(expression, _embeddingClient, _metricHandler, CancellationToken.None);
 
             // Assert
             await Assert.ThrowsAsync<InvalidOperationException>(act);
-            Assert.Null(first.QueryEmbedding);
-            Assert.Null(second.QueryEmbedding);
+            Assert.Null(vectorSearch.QueryEmbedding);
+        }
+
+        [Fact]
+        public async Task GivenEmbeddingWithWrongDimension_WhenEnriching_ThenThrowsWithoutApplyingEmbedding()
+        {
+            // Arrange
+            VectorSearchExpression vectorSearch = CreateVectorSearchExpression("query");
+            _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
+                .Returns(new[] { new float[1535] });
+
+            // Act
+            Func<Task> act = () => SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(
+                Expression.SearchParameter(vectorSearch.Parameter, vectorSearch),
+                _embeddingClient,
+                _metricHandler,
+                CancellationToken.None);
+
+            // Assert
+            InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(act);
+            Assert.Contains("1536", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("1535", exception.Message, StringComparison.Ordinal);
+            Assert.Null(vectorSearch.QueryEmbedding);
         }
 
         private static VectorSearchExpression CreateVectorSearchExpression(string queryText)
         {
             return new VectorSearchExpression(CreateParameter(), queryText, k: 10, minScore: null);
+        }
+
+        private static float[] CreateEmbedding(float value = 0.1f)
+        {
+            return Enumerable.Repeat(value, VectorSearchCapabilityProvider.SchemaEmbeddingDimensions).ToArray();
         }
 
         private static SearchParameterInfo CreateParameter()

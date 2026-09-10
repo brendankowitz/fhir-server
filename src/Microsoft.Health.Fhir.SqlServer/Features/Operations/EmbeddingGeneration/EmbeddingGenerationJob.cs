@@ -187,6 +187,15 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Operations.EmbeddingGeneratio
                             $"The embedding client returned {embeddings?.Count ?? 0} embeddings for {pendingValues.Count} inputs.");
                     }
 
+                    for (int i = 0; i < embeddings.Count; i++)
+                    {
+                        if (embeddings[i]?.Length != VectorSearchCapabilityProvider.SchemaEmbeddingDimensions)
+                        {
+                            throw new InvalidOperationException(
+                                $"The embedding client returned an embedding with {embeddings[i]?.Length ?? 0} dimensions for input {i}; schema V117 requires exactly {VectorSearchCapabilityProvider.SchemaEmbeddingDimensions} dimensions.");
+                        }
+                    }
+
                     for (int i = 0; i < pendingValues.Count; i++)
                     {
                         pendingValues[i].SetEmbedding(embeddings[i]);

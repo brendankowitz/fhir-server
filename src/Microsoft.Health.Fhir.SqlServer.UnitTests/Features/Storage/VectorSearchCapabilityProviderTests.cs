@@ -202,6 +202,41 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
         }
 
         [Fact]
+        public async Task GivenChunkSizeAboveSafeEstimateCeiling_WhenInitialized_ThenThrowsBeforeExecutingSql()
+        {
+            // Arrange
+            using VectorSearchCapabilityProvider provider = CreateProvider(
+                configure: configuration => configuration.ChunkSizeTokens = 1025);
+
+            // Act
+            InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => provider.EnsureInitializedAsync(CancellationToken.None));
+
+            // Assert
+            Assert.Contains("VectorSearch:ChunkSizeTokens", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("1025", exception.Message, StringComparison.Ordinal);
+            Assert.Empty(_sqlRetryService.ReceivedCalls());
+        }
+
+        [Fact]
+        public async Task GivenEmbeddingDimensionsDoNotMatchSchema_WhenInitialized_ThenThrowsBeforeExecutingSql()
+        {
+            // Arrange
+            using VectorSearchCapabilityProvider provider = CreateProvider(
+                configure: configuration => configuration.EmbeddingDimensions = 3072);
+
+            // Act
+            InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => provider.EnsureInitializedAsync(CancellationToken.None));
+
+            // Assert
+            Assert.Contains("VectorSearch:EmbeddingDimensions", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("Schema V117", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("3072", exception.Message, StringComparison.Ordinal);
+            Assert.Empty(_sqlRetryService.ReceivedCalls());
+        }
+
+        [Fact]
         public async Task GivenPersistedModelHasDifferentDimension_WhenInitialized_ThenThrowsInvalidOperationException()
         {
             // Arrange

@@ -85,7 +85,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
         {
             // Arrange
             VectorSearchValue value = new("first", 0);
-            float[] embedding = { 0.1f, 0.2f };
+            float[] embedding = CreateEmbedding();
             _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
                 .Returns(new[] { embedding });
             VectorEmbeddingEnricher enricher = CreateEnricher(EmbeddingPersistenceMode.Synchronous);
@@ -115,7 +115,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
             VectorSearchValue second = new("second", 0);
             VectorSearchValue third = new("third", 1);
             _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
-                .Returns(new[] { new[] { 0.1f }, new[] { 0.2f }, new[] { 0.3f } });
+                .Returns(new[] { CreateEmbedding(0.1f), CreateEmbedding(0.2f), CreateEmbedding(0.3f) });
             VectorEmbeddingEnricher enricher = CreateEnricher(EmbeddingPersistenceMode.Synchronous);
             IReadOnlyList<ResourceWrapperOperation> resources =
             [
@@ -154,7 +154,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
             // Arrange
             SetSynchronousPreference();
             _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), true, Arg.Any<CancellationToken>())
-                .Returns(new[] { new[] { 0.1f } });
+                .Returns(new[] { CreateEmbedding() });
             VectorEmbeddingEnricher enricher = CreateEnricher(EmbeddingPersistenceMode.Asynchronous);
 
             // Act
@@ -174,7 +174,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
             // Arrange
             SetSynchronousPreference();
             _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), true, Arg.Any<CancellationToken>())
-                .Returns(new[] { new[] { 0.1f } });
+                .Returns(new[] { CreateEmbedding() });
             VectorEmbeddingEnricher enricher = CreateEnricher(EmbeddingPersistenceMode.Asynchronous);
 
             // Act
@@ -222,7 +222,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
         {
             // Arrange
             _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
-                .Returns(new[] { new[] { 0.1f } });
+                .Returns(new[] { CreateEmbedding() });
             VectorEmbeddingEnricher enricher = CreateEnricher(EmbeddingPersistenceMode.Synchronous);
 
             // Act
@@ -239,7 +239,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
             // Arrange
             _requestContextAccessor.RequestContext.Returns((IFhirRequestContext)null);
             _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
-                .Returns(new[] { new[] { 0.1f } });
+                .Returns(new[] { CreateEmbedding() });
             VectorEmbeddingEnricher enricher = CreateEnricher(EmbeddingPersistenceMode.Synchronous);
 
             // Act
@@ -407,6 +407,25 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
         }
 
         [Fact]
+        public async Task GivenEmbeddingWithWrongDimension_WhenEnrichingSynchronously_ThenThrowsWithoutApplyingEmbedding()
+        {
+            // Arrange
+            VectorSearchValue value = new("first", 0);
+            _embeddingClient.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), false, Arg.Any<CancellationToken>())
+                .Returns(new[] { new float[1535] });
+            VectorEmbeddingEnricher enricher = CreateEnricher(EmbeddingPersistenceMode.Synchronous);
+
+            // Act
+            Func<Task> act = () => enricher.EnrichAsync(CreateOperations(value), CancellationToken.None);
+
+            // Assert
+            InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(act);
+            Assert.Contains("1536", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("1535", exception.Message, StringComparison.Ordinal);
+            Assert.Null(value.Embedding);
+        }
+
+        [Fact]
         public async Task GivenNoRequestContext_WhenEnrichingAsynchronously_ThenReturnsFalseWithoutCallingClient()
         {
             // Arrange
@@ -439,6 +458,11 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
         private void SetSynchronousPreference()
         {
             _requestHeaders[KnownHeaders.Prefer] = "embedding-persistence=synchronous";
+        }
+
+        private static float[] CreateEmbedding(float value = 0.1f)
+        {
+            return Enumerable.Repeat(value, VectorSearchCapabilityProvider.SchemaEmbeddingDimensions).ToArray();
         }
 
         private static IReadOnlyList<ResourceWrapperOperation> CreateOperations(params VectorSearchValue[] values)

@@ -23,9 +23,9 @@ Vector search settings are under `FhirServer:VectorSearch`. In environment-varia
 | `EmbeddingPersistenceMode` | `Synchronous` | `Synchronous` embeds during a resource write. `Asynchronous` relies on the background path. |
 | `EmbeddingEndpoint` | none | Azure AI Foundry endpoint URI. |
 | `EmbeddingDeploymentName` | none | Name of the embedding deployment. |
-| `EmbeddingDimensions` | `1536` | Number of values returned by the embedding model. This must match the deployment and persisted model. |
+| `EmbeddingDimensions` | `1536` | Fixed at 1536 because schema V117 stores `VECTOR(1536)`. Other values are rejected during initialization. |
 | `EmbeddingModelVersion` | `1` | Operator-controlled identity for the deployed model version. Change it when the model behind a deployment changes. |
-| `ChunkSizeTokens` | `1000` | Target size of each embedded text chunk. Valid values are 1 through 2048. |
+| `ChunkSizeTokens` | `1000` | Target size of each embedded text chunk. Valid values are 1 through 1024. This ceiling keeps the estimated character-based chunks below the embedding service's exact token truncation limit with a twofold margin. |
 | `ChunkOverlapTokens` | `100` | Tokens repeated between adjacent chunks. It must be less than `ChunkSizeTokens`. |
 | `MaxChunksPerSearchParameter` | `64` | Maximum chunks retained for one resource/search-parameter pair. Remaining text is dropped. |
 | `DefaultK` | `200` | Default nearest-neighbor count. |
@@ -102,7 +102,9 @@ Vector search parameters are ordinary FHIR `SearchParameter` resources of type `
 
 The server applies `MaxInputTokens` before chunking. `ChunkSizeTokens` and `ChunkOverlapTokens` improve matching around passage boundaries, but chunking alone does not provide whole-document coverage. Text beyond `MaxInputTokens`, and chunks beyond `MaxChunksPerSearchParameter`, are not embedded.
 
-The embedding model identity includes `EmbeddingDeploymentName`, `EmbeddingModelVersion`, `ChunkSizeTokens`, and `ChunkOverlapTokens`. `EmbeddingDimensions` must match the dimension already recorded for that identity or initialization fails. Changing the model version or either chunk setting creates a new model identity. A background job re-embeds a resource when it processes that resource and sees that the stored model identity is stale.
+The embedding model identity includes `EmbeddingDeploymentName`, `EmbeddingModelVersion`, `ChunkSizeTokens`, and `ChunkOverlapTokens`. `EmbeddingDimensions` is fixed at 1536 by schema V117 and must also match the dimension returned by the embedding deployment. Changing the model version or either chunk setting creates a new model identity. A background job re-embeds a resource when it processes that resource and sees that the stored model identity is stale.
+
+Chunk sizing uses an estimate of four characters per token, while the embedding service truncates inputs using an exact tokenizer. The `ChunkSizeTokens` ceiling of 1024 therefore limits an estimated chunk to 4096 characters, leaving a twofold margin below the service's 8192-token limit. This reduces, but does not mathematically eliminate, the possibility that unusually token-dense text is truncated by the service.
 
 Changing model identity does **not** currently reset the persisted watchdog transaction watermark or automatically enqueue a full historical sweep. Resources already behind the watermark are not re-embedded solely because the setting changed. Operators must arrange for those resources to be processed again if a complete migration is required. Such a migration is expensive in model calls, SQL work, and elapsed time, and should be planned and monitored instead of treating these settings as routine tuning knobs.
 
