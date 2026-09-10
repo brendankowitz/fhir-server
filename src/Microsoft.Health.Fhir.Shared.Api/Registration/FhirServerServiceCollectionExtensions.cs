@@ -193,6 +193,7 @@ namespace Microsoft.Extensions.DependencyInjection
             services.AddSingleton<IExceptionMetricEmissionFilter, AuthenticationFailureExceptionMetricEmissionFilter>();
             services.AddSingleton<IExceptionMetricEmissionFilter, SecurityAbuseExceptionMetricEmissionFilter>();
             services.TryAddSingleton<ISearchMetricHandler, DefaultSearchMetricHandler>();
+            services.TryAddSingleton<IVectorSearchMetricHandler, DefaultVectorSearchMetricHandler>();
 
             // Feature specific metric handlers.
             services.TryAddSingleton<IBundleMetricHandler, DefaultBundleMetricHandler>();

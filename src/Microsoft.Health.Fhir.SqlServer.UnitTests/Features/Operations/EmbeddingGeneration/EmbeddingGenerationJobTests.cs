@@ -23,6 +23,7 @@ using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
 using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer.Features.Operations.EmbeddingGeneration;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage;
@@ -56,6 +57,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Operations.Embeddin
         private readonly RequestContextAccessor<IFhirRequestContext> _contextAccessor = Substitute.For<RequestContextAccessor<IFhirRequestContext>>();
         private readonly ILoggerFactory _loggerFactory = NullLoggerFactory.Instance;
         private readonly IScoped<ISearchService> _searchServiceScope = Substitute.For<IScoped<ISearchService>>();
+        private readonly IVectorSearchMetricHandler _metricHandler = Substitute.For<IVectorSearchMetricHandler>();
 
         public EmbeddingGenerationJobTests()
         {
@@ -87,6 +89,10 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Operations.Embeddin
             Assert.Equal(0, parsedResult.RowsWritten);
             await _embeddingClient.DidNotReceiveWithAnyArgs().EmbedAsync(default, default, default);
             Assert.Equal(0, _vectorSearchParamStore.ReplaceCallCount);
+            _metricHandler.Received(1).EmitBackgroundJob(
+                Arg.Is<VectorBackgroundJobMetricNotification>(notification =>
+                    notification.RowsWritten == 0 &&
+                    notification.ResourcesSkipped == 1));
         }
 
         [Fact]
@@ -131,6 +137,15 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Operations.Embeddin
                 CancellationToken.None);
             Assert.Equal(1, _vectorSearchParamStore.ReplaceCallCount);
             Assert.Same(resource, Assert.Single(_vectorSearchParamStore.ReplacedResources));
+            _metricHandler.Received(1).EmitEmbedding(
+                Arg.Is<VectorEmbeddingMetricNotification>(notification =>
+                    notification.Operation == VectorEmbeddingOperation.BackgroundWrite &&
+                    notification.Outcome == VectorEmbeddingOutcome.Success &&
+                    notification.ElapsedMilliseconds >= 0));
+            _metricHandler.Received(1).EmitBackgroundJob(
+                Arg.Is<VectorBackgroundJobMetricNotification>(notification =>
+                    notification.RowsWritten == 1 &&
+                    notification.ResourcesSkipped == 0));
         }
 
         [Fact]
@@ -349,7 +364,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Operations.Embeddin
                 capabilityProvider ?? _capabilityProvider,
                 _model,
                 _contextAccessor,
-                _loggerFactory);
+                _loggerFactory,
+                _metricHandler);
         }
 
         private ResourceWrapper CreateResource(long resourceSurrogateId = ResourceSurrogateId)

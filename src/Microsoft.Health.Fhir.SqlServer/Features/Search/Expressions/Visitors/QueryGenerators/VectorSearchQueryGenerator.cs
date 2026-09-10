@@ -10,6 +10,7 @@ using EnsureThat;
 using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema.Model;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage;
 using Microsoft.Health.SqlServer;
@@ -22,6 +23,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
         private const string TableAlias = "vectorSearch";
         private readonly IVectorSearchCapabilityProvider _capabilityProvider;
         private readonly VectorSearchConfiguration _configuration;
+        private readonly IVectorSearchMetricHandler _metricHandler;
 
         public VectorSearchQueryGenerator(IVectorSearchCapabilityProvider capabilityProvider)
             : this(capabilityProvider, new VectorSearchConfiguration())
@@ -31,9 +33,18 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
         public VectorSearchQueryGenerator(
             IVectorSearchCapabilityProvider capabilityProvider,
             VectorSearchConfiguration configuration)
+            : this(capabilityProvider, configuration, null)
+        {
+        }
+
+        public VectorSearchQueryGenerator(
+            IVectorSearchCapabilityProvider capabilityProvider,
+            VectorSearchConfiguration configuration,
+            IVectorSearchMetricHandler metricHandler)
         {
             _capabilityProvider = EnsureArg.IsNotNull(capabilityProvider, nameof(capabilityProvider));
             _configuration = EnsureArg.IsNotNull(configuration, nameof(configuration));
+            _metricHandler = metricHandler;
         }
 
         public override Table Table => VLatest.VectorSearchParam;
@@ -74,6 +85,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                 predecessorTableExpressionName == null)
             {
                 GenerateApproximate(expression, context, embeddingParameter, embeddingModelIdParameter, searchOptions);
+                _metricHandler?.EmitQuery(new VectorSearchQueryMetricNotification { IsApproximate = true });
                 return;
             }
 
@@ -154,6 +166,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.Q
                     .Append(VLatest.VectorSearchParam.ResourceSurrogateId, TableAlias)
                     .AppendLine(" ASC");
             }
+
+            _metricHandler?.EmitQuery(new VectorSearchQueryMetricNotification { IsApproximate = false });
         }
 
         private void GenerateApproximate(

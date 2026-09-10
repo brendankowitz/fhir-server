@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,6 +21,7 @@ using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
 using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage;
 using Microsoft.Health.JobManagement;
 using Newtonsoft.Json;
@@ -38,6 +40,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Operations.EmbeddingGeneratio
         private readonly ISqlServerFhirModel _model;
         private readonly RequestContextAccessor<IFhirRequestContext> _contextAccessor;
         private readonly ILogger<EmbeddingGenerationJob> _logger;
+        private readonly IVectorSearchMetricHandler _metricHandler;
 
         public EmbeddingGenerationJob(
             Func<IScoped<ISearchService>> searchServiceFactory,
@@ -48,7 +51,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Operations.EmbeddingGeneratio
             IVectorSearchCapabilityProvider capabilityProvider,
             ISqlServerFhirModel model,
             RequestContextAccessor<IFhirRequestContext> contextAccessor,
-            ILoggerFactory loggerFactory)
+            ILoggerFactory loggerFactory,
+            IVectorSearchMetricHandler metricHandler)
         {
             _searchServiceFactory = EnsureArg.IsNotNull(searchServiceFactory, nameof(searchServiceFactory));
             _searchIndexer = EnsureArg.IsNotNull(searchIndexer, nameof(searchIndexer));
@@ -59,6 +63,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Operations.EmbeddingGeneratio
             _model = EnsureArg.IsNotNull(model, nameof(model));
             _contextAccessor = EnsureArg.IsNotNull(contextAccessor, nameof(contextAccessor));
             _logger = EnsureArg.IsNotNull(loggerFactory, nameof(loggerFactory)).CreateLogger<EmbeddingGenerationJob>();
+            _metricHandler = EnsureArg.IsNotNull(metricHandler, nameof(metricHandler));
         }
 
         public async Task<string> ExecuteAsync(JobInfo jobInfo, CancellationToken cancellationToken)
@@ -163,24 +168,46 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Operations.EmbeddingGeneratio
 
             if (pendingValues.Count > 0)
             {
-                IReadOnlyList<float[]> embeddings = await _embeddingClient.EmbedAsync(
-                    pendingValues.Select(value => value.SourceText).ToList(),
-                    tightBudget: false,
-                    cancellationToken);
-
-                if (embeddings == null || embeddings.Count != pendingValues.Count)
+                Stopwatch stopwatch = Stopwatch.StartNew();
+                IReadOnlyList<float[]> embeddings;
+                try
                 {
-                    _logger.LogError(
-                        "The embedding client returned {EmbeddingCount} embeddings for {InputCount} inputs.",
-                        embeddings?.Count ?? 0,
-                        pendingValues.Count);
-                    throw new InvalidOperationException(
-                        $"The embedding client returned {embeddings?.Count ?? 0} embeddings for {pendingValues.Count} inputs.");
+                    embeddings = await _embeddingClient.EmbedAsync(
+                        pendingValues.Select(value => value.SourceText).ToList(),
+                        tightBudget: false,
+                        cancellationToken);
+
+                    if (embeddings == null || embeddings.Count != pendingValues.Count)
+                    {
+                        _logger.LogError(
+                            "The embedding client returned {EmbeddingCount} embeddings for {InputCount} inputs.",
+                            embeddings?.Count ?? 0,
+                            pendingValues.Count);
+                        throw new InvalidOperationException(
+                            $"The embedding client returned {embeddings?.Count ?? 0} embeddings for {pendingValues.Count} inputs.");
+                    }
+
+                    for (int i = 0; i < pendingValues.Count; i++)
+                    {
+                        pendingValues[i].SetEmbedding(embeddings[i]);
+                    }
+
+                    _metricHandler.EmitEmbedding(new VectorEmbeddingMetricNotification
+                    {
+                        Operation = VectorEmbeddingOperation.BackgroundWrite,
+                        Outcome = VectorEmbeddingOutcome.Success,
+                        ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
+                    });
                 }
-
-                for (int i = 0; i < pendingValues.Count; i++)
+                catch
                 {
-                    pendingValues[i].SetEmbedding(embeddings[i]);
+                    _metricHandler.EmitEmbedding(new VectorEmbeddingMetricNotification
+                    {
+                        Operation = VectorEmbeddingOperation.BackgroundWrite,
+                        Outcome = VectorEmbeddingOutcome.Failure,
+                        ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
+                    });
+                    throw;
                 }
             }
 
@@ -191,6 +218,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Operations.EmbeddingGeneratio
 
             result.RowsWritten = pendingValues.Count;
             jobInfo.Data = result.ResourcesProcessed;
+            _metricHandler.EmitBackgroundJob(new VectorBackgroundJobMetricNotification
+            {
+                RowsWritten = result.RowsWritten,
+                ResourcesSkipped = result.ResourcesSkipped,
+            });
 
             return JsonConvert.SerializeObject(result);
         }

@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer.Features.Search;
 using Microsoft.Health.Fhir.Tests.Common;
@@ -25,6 +26,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
     public class VectorSearchQueryEmbeddingEnricherTests
     {
         private readonly IEmbeddingClient _embeddingClient = Substitute.For<IEmbeddingClient>();
+        private readonly IVectorSearchMetricHandler _metricHandler = Substitute.For<IVectorSearchMetricHandler>();
 
         [Fact]
         public async Task GivenExpressionWithoutVectorSearch_WhenEnriching_ThenDoesNotCallEmbeddingClient()
@@ -35,7 +37,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                 Expression.StringEquals(FieldName.TokenCode, null, "example", ignoreCase: false));
 
             // Act
-            await SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(expression, _embeddingClient, CancellationToken.None);
+            await SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(expression, _embeddingClient, _metricHandler, CancellationToken.None);
 
             // Assert
             await _embeddingClient.DidNotReceiveWithAnyArgs().EmbedAsync(default, default, default);
@@ -54,6 +56,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
             await SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(
                 Expression.SearchParameter(vectorSearch.Parameter, vectorSearch),
                 _embeddingClient,
+                _metricHandler,
                 CancellationToken.None);
 
             // Assert
@@ -62,6 +65,11 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                 Arg.Is<IReadOnlyList<string>>(inputs => inputs.SequenceEqual(new[] { "first query" })),
                 false,
                 CancellationToken.None);
+            _metricHandler.Received(1).EmitEmbedding(
+                Arg.Is<VectorEmbeddingMetricNotification>(notification =>
+                    notification.Operation == VectorEmbeddingOperation.Read &&
+                    notification.Outcome == VectorEmbeddingOutcome.Success &&
+                    notification.ElapsedMilliseconds >= 0));
         }
 
         [Fact]
@@ -76,6 +84,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
             await SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(
                 Expression.SearchParameter(vectorSearch.Parameter, vectorSearch),
                 _embeddingClient,
+                _metricHandler,
                 CancellationToken.None);
 
             // Assert
@@ -100,7 +109,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                 Expression.SearchParameter(second.Parameter, second));
 
             // Act
-            await SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(expression, _embeddingClient, CancellationToken.None);
+            await SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(expression, _embeddingClient, _metricHandler, CancellationToken.None);
 
             // Assert
             Assert.Same(firstEmbedding, first.QueryEmbedding);
@@ -123,10 +132,16 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
             Func<Task> act = () => SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(
                 Expression.SearchParameter(vectorSearch.Parameter, vectorSearch),
                 _embeddingClient,
+                _metricHandler,
                 CancellationToken.None);
 
             // Assert
             await Assert.ThrowsAsync<EmbeddingUnavailableException>(act);
+            _metricHandler.Received(1).EmitEmbedding(
+                Arg.Is<VectorEmbeddingMetricNotification>(notification =>
+                    notification.Operation == VectorEmbeddingOperation.Read &&
+                    notification.Outcome == VectorEmbeddingOutcome.Failure &&
+                    notification.ElapsedMilliseconds >= 0));
         }
 
         [Fact]
@@ -142,7 +157,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                 Expression.SearchParameter(second.Parameter, second));
 
             // Act
-            Func<Task> act = () => SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(expression, _embeddingClient, CancellationToken.None);
+            Func<Task> act = () => SqlServerSearchService.VectorSearchQueryEmbeddingEnricher.EnrichAsync(expression, _embeddingClient, _metricHandler, CancellationToken.None);
 
             // Assert
             await Assert.ThrowsAsync<InvalidOperationException>(act);

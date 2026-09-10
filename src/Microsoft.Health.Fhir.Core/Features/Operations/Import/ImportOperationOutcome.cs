@@ -27,5 +27,11 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Import
         /// </summary>
         [JsonProperty("inputUrl")]
         public Uri InputUrl { get; set; }
+
+        /// <summary>
+        /// Gets or sets an operational warning associated with the imported resource type.
+        /// </summary>
+        [JsonProperty("warning", NullValueHandling = NullValueHandling.Ignore)]
+        public string Warning { get; set; }
     }
 }

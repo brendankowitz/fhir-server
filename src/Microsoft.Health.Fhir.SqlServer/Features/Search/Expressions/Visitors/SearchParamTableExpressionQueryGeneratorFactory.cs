@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors.QueryGenerators;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage;
@@ -25,6 +26,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors
         private readonly SearchParameterToSearchValueTypeMap _searchParameterToSearchValueTypeMap;
         private readonly IVectorSearchCapabilityProvider _vectorSearchCapabilityProvider;
         private readonly VectorSearchConfiguration _vectorSearchConfiguration;
+        private readonly IVectorSearchMetricHandler _vectorSearchMetricHandler;
         private readonly ConcurrentDictionary<Uri, SearchParamTableExpressionQueryGenerator> _cache = new ConcurrentDictionary<Uri, SearchParamTableExpressionQueryGenerator>();
 
         public SearchParamTableExpressionQueryGeneratorFactory(SearchParameterToSearchValueTypeMap searchParameterToSearchValueTypeMap)
@@ -43,11 +45,21 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors
             SearchParameterToSearchValueTypeMap searchParameterToSearchValueTypeMap,
             IVectorSearchCapabilityProvider vectorSearchCapabilityProvider,
             IOptions<VectorSearchConfiguration> vectorSearchConfiguration)
+            : this(searchParameterToSearchValueTypeMap, vectorSearchCapabilityProvider, vectorSearchConfiguration, null)
+        {
+        }
+
+        public SearchParamTableExpressionQueryGeneratorFactory(
+            SearchParameterToSearchValueTypeMap searchParameterToSearchValueTypeMap,
+            IVectorSearchCapabilityProvider vectorSearchCapabilityProvider,
+            IOptions<VectorSearchConfiguration> vectorSearchConfiguration,
+            IVectorSearchMetricHandler vectorSearchMetricHandler)
         {
             EnsureArg.IsNotNull(searchParameterToSearchValueTypeMap, nameof(searchParameterToSearchValueTypeMap));
             _searchParameterToSearchValueTypeMap = searchParameterToSearchValueTypeMap;
             _vectorSearchCapabilityProvider = vectorSearchCapabilityProvider;
             _vectorSearchConfiguration = EnsureArg.IsNotNull(vectorSearchConfiguration, nameof(vectorSearchConfiguration)).Value;
+            _vectorSearchMetricHandler = vectorSearchMetricHandler;
         }
 
         public object InitialContext => null;
@@ -167,7 +179,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search.Expressions.Visitors
                     $"{nameof(IVectorSearchCapabilityProvider)} is required to generate vector search SQL.");
             }
 
-            return new VectorSearchQueryGenerator(_vectorSearchCapabilityProvider, _vectorSearchConfiguration);
+            return new VectorSearchQueryGenerator(_vectorSearchCapabilityProvider, _vectorSearchConfiguration, _vectorSearchMetricHandler);
         }
 
         public SearchParamTableExpressionQueryGenerator VisitChained(ChainedExpression expression, object context)

@@ -26,6 +26,7 @@ using Microsoft.Health.Fhir.Core.Features.Persistence.Orchestration;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
 using Microsoft.Health.Fhir.Core.Features.Search.Registry;
+using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
 using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Core.UnitTests.Extensions;
@@ -372,7 +373,54 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
             Assert.Contains("is not a known resource type", exception.Message, StringComparison.Ordinal);
         }
 
-        private static SqlServerFhirDataStore CreateSqlServerFhirDataStore(ISqlRetryService sqlRetryService, SqlTransactionHandler sqlTransactionHandler = null)
+        [Fact]
+        public async Task GivenSynchronousEmbeddingMode_WhenImporting_ThenImportBypassesInlineEmbedding()
+        {
+            var sqlRetryService = Substitute.For<ISqlRetryService>();
+            sqlRetryService.ExecuteReaderAsync(
+                    Arg.Any<SqlCommand>(),
+                    Arg.Any<Func<SqlDataReader, ResourceWrapper>>(),
+                    Arg.Any<ILogger>(),
+                    Arg.Any<string>(),
+                    Arg.Any<CancellationToken>(),
+                    Arg.Any<bool>())
+                .Throws(new OperationCanceledException());
+            var embeddingClient = Substitute.For<IEmbeddingClient>();
+            var capabilityProvider = Substitute.For<IVectorSearchCapabilityProvider>();
+            capabilityProvider.IsVectorSearchAvailable.Returns(true);
+            capabilityProvider.EnsureInitializedAsync(Arg.Any<CancellationToken>()).Returns(Task.CompletedTask);
+            SqlServerFhirDataStore dataStore = CreateSqlServerFhirDataStore(
+                sqlRetryService,
+                embeddingClient: embeddingClient,
+                vectorSearchCapabilityProvider: capabilityProvider,
+                embeddingPersistenceMode: EmbeddingPersistenceMode.Synchronous);
+            ResourceWrapper wrapper = CreateResourceWrapper("{\"resourceType\":\"Patient\",\"id\":\"123\"}");
+            wrapper.UpdateSearchIndices(
+            [
+                new SearchIndexEntry(
+                    new SearchParameterInfo("semantic", "semantic"),
+                    new VectorSearchValue("text to embed", 0)),
+            ]);
+            var importResource = new ImportResource(0, 0, 0, false, false, false, wrapper);
+
+            await Assert.ThrowsAsync<OperationCanceledException>(
+                () => dataStore.ImportResourcesAsync(
+                    [importResource],
+                    ImportMode.InitialLoad,
+                    allowNegativeVersions: false,
+                    eventualConsistency: false,
+                    CancellationToken.None));
+
+            await embeddingClient.DidNotReceiveWithAnyArgs().EmbedAsync(default, default, default);
+            await capabilityProvider.DidNotReceiveWithAnyArgs().EnsureInitializedAsync(default);
+        }
+
+        private static SqlServerFhirDataStore CreateSqlServerFhirDataStore(
+            ISqlRetryService sqlRetryService,
+            SqlTransactionHandler sqlTransactionHandler = null,
+            IEmbeddingClient embeddingClient = null,
+            IVectorSearchCapabilityProvider vectorSearchCapabilityProvider = null,
+            EmbeddingPersistenceMode embeddingPersistenceMode = EmbeddingPersistenceMode.Synchronous)
         {
             sqlTransactionHandler ??= new SqlTransactionHandler();
 
@@ -431,13 +479,14 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
 
             var sqlConnectionWrapperFactory = new SqlConnectionWrapperFactory(sqlTransactionHandler, sqlConnectionBuilder, sqlRetryLogicBaseProvider, Options.Create(sqlServerDataStoreConfiguration));
 
-            var vectorSearchCapabilityProvider = Substitute.For<IVectorSearchCapabilityProvider>();
+            vectorSearchCapabilityProvider ??= Substitute.For<IVectorSearchCapabilityProvider>();
             var vectorEmbeddingEnricher = new VectorEmbeddingEnricher(
-                Substitute.For<IEmbeddingClient>(),
+                embeddingClient ?? Substitute.For<IEmbeddingClient>(),
                 vectorSearchCapabilityProvider,
-                Options.Create(new VectorSearchConfiguration()),
+                Options.Create(new VectorSearchConfiguration { EmbeddingPersistenceMode = embeddingPersistenceMode }),
                 Substitute.For<RequestContextAccessor<IFhirRequestContext>>(),
-                NullLogger<VectorEmbeddingEnricher>.Instance);
+                NullLogger<VectorEmbeddingEnricher>.Instance,
+                Substitute.For<Microsoft.Health.Fhir.Core.Logging.Metrics.IVectorSearchMetricHandler>());
             var dataStore = new SqlServerFhirDataStore(
                 model,
                 new SearchParameterToSearchValueTypeMap(),

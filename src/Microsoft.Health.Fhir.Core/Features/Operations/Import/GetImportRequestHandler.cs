@@ -14,6 +14,7 @@ using EnsureThat;
 using Medino;
 using Microsoft.Health.Core.Features.Security.Authorization;
 using Microsoft.Health.Fhir.Core.Exceptions;
+using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Security;
 using Microsoft.Health.Fhir.Core.Features.Security.Authorization;
 using Microsoft.Health.Fhir.Core.Messages.Import;
@@ -27,14 +28,20 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Import
     {
         private readonly IQueueClient _queueClient;
         private readonly IAuthorizationService<DataActions> _authorizationService;
+        private readonly ISearchParameterDefinitionManager _searchParameterDefinitionManager;
 
-        public GetImportRequestHandler(IQueueClient queueClient, IAuthorizationService<DataActions> authorizationService)
+        public GetImportRequestHandler(
+            IQueueClient queueClient,
+            IAuthorizationService<DataActions> authorizationService,
+            ISearchParameterDefinitionManager searchParameterDefinitionManager)
         {
             EnsureArg.IsNotNull(queueClient, nameof(queueClient));
             EnsureArg.IsNotNull(authorizationService, nameof(authorizationService));
+            EnsureArg.IsNotNull(searchParameterDefinitionManager, nameof(searchParameterDefinitionManager));
 
             _queueClient = queueClient;
             _authorizationService = authorizationService;
+            _searchParameterDefinitionManager = searchParameterDefinitionManager;
         }
 
         public async Task<GetImportResponse> HandleAsync(GetImportRequest request, CancellationToken cancellationToken)
@@ -72,7 +79,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Import
             {
                 var start = Stopwatch.StartNew();
                 var jobs = (await _queueClient.GetJobByGroupIdAsync(QueueType.Import, coord.GroupId, true, cancellationToken)).Where(x => x.Id != coord.Id).ToList();
-                var results = GetProcessingResultAsync(jobs, request.ReturnDetails);
+                var results = GetProcessingResult(jobs, request.ReturnDetails);
                 await Task.Delay(TimeSpan.FromSeconds(start.Elapsed.TotalSeconds > 6 ? 60 : start.Elapsed.TotalSeconds * 10), cancellationToken); // throttle to avoid misuse.
                 var inFlightJobsExist = jobs.Any(x => x.Status == JobStatus.Running || x.Status == JobStatus.Created);
                 var cancelledJobsExist = jobs.Any(x => x.Status == JobStatus.Cancelled || x.CancelRequested);
@@ -113,7 +120,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Import
                 throw new OperationFailedException(Core.Resources.UnknownError, HttpStatusCode.InternalServerError);
             }
 
-            static (List<ImportOperationOutcome> Completed, List<ImportFailedOperationOutcome> Failed) GetProcessingResultAsync(IList<JobInfo> jobs, bool returnDetails)
+            (List<ImportOperationOutcome> Completed, List<ImportFailedOperationOutcome> Failed) GetProcessingResult(IList<JobInfo> jobs, bool returnDetails)
             {
                 var completed = new List<ImportOperationOutcome>();
                 var failed = new List<ImportFailedOperationOutcome>();
@@ -129,7 +136,13 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Import
                     }
 
                     var result = DeserializeOrDefault<ImportProcessingJobResult>(job.Result);
-                    completed.Add(new ImportOperationOutcome() { Type = definition.ResourceType, Count = result.SucceededResources, InputUrl = inputUrl });
+                    completed.Add(new ImportOperationOutcome()
+                    {
+                        Type = definition.ResourceType,
+                        Count = result.SucceededResources,
+                        InputUrl = inputUrl,
+                        Warning = GetVectorImportWarning(definition.ResourceType),
+                    });
                     if (result.FailedResources > 0)
                     {
                         failed.Add(new ImportFailedOperationOutcome() { Type = definition.ResourceType, Count = result.FailedResources, InputUrl = inputUrl, Url = result.ErrorLogLocation });
@@ -142,10 +155,27 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Import
                 }
 
                 // group success results by url
-                var groupped = completed.GroupBy(o => o.InputUrl).Select(g => new ImportOperationOutcome() { Type = g.First().Type, Count = g.Sum(_ => _.Count), InputUrl = g.Key }).ToList();
+                var groupped = completed.GroupBy(o => o.InputUrl).Select(g => new ImportOperationOutcome()
+                {
+                    Type = g.First().Type,
+                    Count = g.Sum(_ => _.Count),
+                    InputUrl = g.Key,
+                    Warning = g.First().Warning,
+                }).ToList();
 
                 return (groupped, failed);
             }
+        }
+
+        private string GetVectorImportWarning(string resourceType)
+        {
+            bool hasVectorSearchParameter = _searchParameterDefinitionManager
+                .GetSearchParameters(resourceType)
+                .Any(parameter => parameter.VectorConfig != null);
+
+            return hasVectorSearchParameter
+                ? $"Imported {resourceType} resources were not embedded inline and will not be available to vector search until background vectorization runs."
+                : null;
         }
 
         /// <summary>

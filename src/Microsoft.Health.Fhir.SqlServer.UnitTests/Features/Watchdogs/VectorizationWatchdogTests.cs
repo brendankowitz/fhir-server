@@ -85,6 +85,23 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
         }
 
         [Fact]
+        public async Task GivenAsynchronousEmbeddingModeAndImportedTransaction_WhenWatchdogRuns_ThenTransactionRemainsEligibleForVectorization()
+        {
+            ConfigureResourceType("Patient", 1);
+            TestVectorizationWatchdog watchdog = CreateWatchdog(
+                new[] { CreateSearchParameter("patient-vector", true, "Patient") },
+                Transactions(20),
+                embeddingPersistenceMode: EmbeddingPersistenceMode.Asynchronous);
+
+            await watchdog.RunWorkForTestingAsync(CancellationToken.None);
+
+            EmbeddingGenerationJobDefinition definition = Assert.Single(Deserialize(Assert.Single(watchdog.EnqueueCalls)));
+            Assert.Equal(Watermark, definition.StartSurrogateId);
+            Assert.Equal(20, definition.EndSurrogateId);
+            Assert.Equal(20, Assert.Single(watchdog.AdvancedWatermarks));
+        }
+
+        [Fact]
         public async Task GivenMultipleTransactionChunks_WhenWatchdogRuns_ThenRangesAreContiguousAndCoverMaximumTransaction()
         {
             // Arrange
@@ -203,14 +220,20 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
         private TestVectorizationWatchdog CreateWatchdog(
             IReadOnlyList<SearchParameterInfo> searchParameters,
             IReadOnlyList<(long TransactionId, DateTime? VisibleDate, DateTime? InvisibleHistoryRemovedDate)> transactions,
-            int jobBatchSize = 500)
+            int jobBatchSize = 500,
+            EmbeddingPersistenceMode embeddingPersistenceMode = EmbeddingPersistenceMode.Synchronous)
         {
             _searchParameterDefinitionManager.AllSearchParameters.Returns(searchParameters);
             return new TestVectorizationWatchdog(
                 _capabilityProvider,
                 _searchParameterDefinitionManager,
                 _model,
-                Options.Create(new VectorSearchConfiguration { Enabled = true, JobBatchSize = jobBatchSize }),
+                Options.Create(new VectorSearchConfiguration
+                {
+                    Enabled = true,
+                    JobBatchSize = jobBatchSize,
+                    EmbeddingPersistenceMode = embeddingPersistenceMode,
+                }),
                 new[] { transactions });
         }
 

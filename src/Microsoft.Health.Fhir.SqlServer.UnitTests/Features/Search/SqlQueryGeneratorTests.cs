@@ -14,6 +14,7 @@ using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema;
@@ -42,6 +43,7 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
     private readonly ISqlServerFhirModel _fhirModel;
     private readonly IVectorSearchCapabilityProvider _vectorSearchCapabilityProvider;
     private readonly VectorSearchConfiguration _vectorSearchConfiguration = new();
+    private readonly IVectorSearchMetricHandler _vectorSearchMetricHandler = Substitute.For<IVectorSearchMetricHandler>();
     private readonly SearchParamTableExpressionQueryGeneratorFactory _queryGeneratorFactory;
     private readonly SchemaInformation _schemaInformation = new(SchemaVersionConstants.Min, SchemaVersionConstants.Max);
     private readonly IndentedStringBuilder _strBuilder = new(new StringBuilder());
@@ -60,7 +62,8 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
         _queryGeneratorFactory = new SearchParamTableExpressionQueryGeneratorFactory(
             searchParameterToSearchValueTypeMap,
             _vectorSearchCapabilityProvider,
-            Options.Create(_vectorSearchConfiguration));
+            Options.Create(_vectorSearchConfiguration),
+            _vectorSearchMetricHandler);
 
         _schemaInformation.Current = SchemaVersionConstants.Max;
 
@@ -786,6 +789,8 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
         Assert.Contains("VECTOR_DISTANCE(", generatedSql);
         Assert.DoesNotContain("WITH APPROXIMATE", generatedSql);
         Assert.DoesNotContain("VECTOR_SEARCH(", generatedSql);
+        _vectorSearchMetricHandler.Received(1).EmitQuery(
+            Arg.Is<VectorSearchQueryMetricNotification>(notification => !notification.IsApproximate));
         Assert.Single(topParameters);
         Assert.Equal(5, Convert.ToInt32(_sqlCommand.Parameters[topParameters[0]].Value));
     }
@@ -804,6 +809,8 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
         Assert.Contains("FROM VECTOR_SEARCH(", vectorCte);
         Assert.Contains("TABLE = dbo.VectorSearchParam AS vectorEntry", vectorCte);
         Assert.Contains("ORDER BY vectorResult.distance ASC", vectorCte);
+        _vectorSearchMetricHandler.Received(1).EmitQuery(
+            Arg.Is<VectorSearchQueryMetricNotification>(notification => notification.IsApproximate));
         Assert.DoesNotContain("ORDER BY vectorResult.distance ASC,", vectorCte);
         Assert.Contains("vectorEntry.EmbeddingModelId = @", vectorCte);
         Assert.Contains("MIN(vectorSearch.distance) AS VectorDistance", vectorCte);
@@ -883,6 +890,8 @@ public class SqlQueryGeneratorTests : IClassFixture<ModelInfoProviderFixture>, I
         Assert.Contains("VECTOR_DISTANCE(", vectorCte);
         Assert.DoesNotContain("WITH APPROXIMATE", vectorCte);
         Assert.DoesNotContain("VECTOR_SEARCH(", vectorCte);
+        _vectorSearchMetricHandler.Received(1).EmitQuery(
+            Arg.Is<VectorSearchQueryMetricNotification>(notification => !notification.IsApproximate));
     }
 
     private string GenerateVectorSearchSql(bool withCompartment = false, int? k = null, double? minScore = null, string continuationToken = null)

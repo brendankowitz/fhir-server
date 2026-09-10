@@ -32,6 +32,7 @@ using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema.Model;
@@ -95,6 +96,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
         private readonly IFhirDataStore _fhirDataStore;
         private readonly IEmbeddingClient _embeddingClient;
         private readonly IQueryPlanReuseChecker _queryPlanReuseChecker;
+        private readonly IVectorSearchMetricHandler _vectorSearchMetricHandler;
 
         private static readonly string[] NewLineSeparators = ["\r\n", "\n"];
         private static readonly Regex WhitespacePattern = new Regex(@"\s+", RegexOptions.Compiled);
@@ -168,7 +170,8 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
             ICompressedRawResourceConverter compressedRawResourceConverter,
             ISqlQueryHashCalculator queryHashCalculator,
             IQueryPlanReuseChecker queryPlanReuseChecker,
-            ILogger<SqlServerSearchService> logger)
+            ILogger<SqlServerSearchService> logger,
+            IVectorSearchMetricHandler vectorSearchMetricHandler)
             : base(searchOptionsFactory, fhirDataStore, logger)
         {
             EnsureArg.IsNotNull(sqlRootExpressionRewriter, nameof(sqlRootExpressionRewriter));
@@ -187,6 +190,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
             _fhirSqlServerConfiguration = EnsureArg.IsNotNull(fhirSqlServerConfiguration, nameof(fhirSqlServerConfiguration));
             _fhirDataStore = fhirDataStore;
             _embeddingClient = EnsureArg.IsNotNull(embeddingClient, nameof(embeddingClient));
+            _vectorSearchMetricHandler = EnsureArg.IsNotNull(vectorSearchMetricHandler, nameof(vectorSearchMetricHandler));
             _model = model;
             _sqlRootExpressionRewriter = sqlRootExpressionRewriter;
             _sortRewriter = sortRewriter;
@@ -237,7 +241,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
         public override async Task<SearchResult> SearchAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
         {
             SqlSearchOptions sqlSearchOptions = new SqlSearchOptions(searchOptions);
-            await VectorSearchQueryEmbeddingEnricher.EnrichAsync(sqlSearchOptions.Expression, _embeddingClient, cancellationToken);
+            await VectorSearchQueryEmbeddingEnricher.EnrichAsync(sqlSearchOptions.Expression, _embeddingClient, _vectorSearchMetricHandler, cancellationToken);
 
             if (sqlSearchOptions.IsIncludesOperation)
             {
@@ -3115,7 +3119,11 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
 
         internal static class VectorSearchQueryEmbeddingEnricher
         {
-            internal static async Task EnrichAsync(Expression expression, IEmbeddingClient embeddingClient, CancellationToken cancellationToken)
+            internal static async Task EnrichAsync(
+                Expression expression,
+                IEmbeddingClient embeddingClient,
+                IVectorSearchMetricHandler metricHandler,
+                CancellationToken cancellationToken)
             {
                 if (expression == null)
                 {
@@ -3137,16 +3145,38 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                     inputs.Add(vectorSearchExpression.QueryText);
                 }
 
-                IReadOnlyList<float[]> embeddings = await embeddingClient.EmbedAsync(inputs, tightBudget: false, cancellationToken);
-                if (embeddings == null || embeddings.Count != vectorSearchExpressions.Count)
+                Stopwatch stopwatch = Stopwatch.StartNew();
+                IReadOnlyList<float[]> embeddings;
+                try
                 {
-                    throw new InvalidOperationException(
-                        $"The embedding client returned {embeddings?.Count ?? 0} embeddings for {vectorSearchExpressions.Count} inputs.");
-                }
+                    embeddings = await embeddingClient.EmbedAsync(inputs, tightBudget: false, cancellationToken);
+                    if (embeddings == null || embeddings.Count != vectorSearchExpressions.Count)
+                    {
+                        throw new InvalidOperationException(
+                            $"The embedding client returned {embeddings?.Count ?? 0} embeddings for {vectorSearchExpressions.Count} inputs.");
+                    }
 
-                for (int i = 0; i < vectorSearchExpressions.Count; i++)
+                    for (int i = 0; i < vectorSearchExpressions.Count; i++)
+                    {
+                        vectorSearchExpressions[i].SetQueryEmbedding(embeddings[i]);
+                    }
+
+                    metricHandler.EmitEmbedding(new VectorEmbeddingMetricNotification
+                    {
+                        Operation = VectorEmbeddingOperation.Read,
+                        Outcome = VectorEmbeddingOutcome.Success,
+                        ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
+                    });
+                }
+                catch
                 {
-                    vectorSearchExpressions[i].SetQueryEmbedding(embeddings[i]);
+                    metricHandler.EmitEmbedding(new VectorEmbeddingMetricNotification
+                    {
+                        Operation = VectorEmbeddingOperation.Read,
+                        Outcome = VectorEmbeddingOutcome.Failure,
+                        ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
+                    });
+                    throw;
                 }
             }
 

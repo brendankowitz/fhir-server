@@ -31,6 +31,7 @@ using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
 using Microsoft.Health.Fhir.Core.Features.Search.Registry;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
 using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Core.UnitTests.Extensions;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema;
@@ -246,12 +247,14 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
 
             var vectorSearchCapabilityProvider = Substitute.For<IVectorSearchCapabilityProvider>();
             var embeddingClient = Substitute.For<IEmbeddingClient>();
+            var vectorSearchMetricHandler = Substitute.For<IVectorSearchMetricHandler>();
             var vectorEmbeddingEnricher = new VectorEmbeddingEnricher(
                 embeddingClient,
                 vectorSearchCapabilityProvider,
                 Options.Create(new VectorSearchConfiguration()),
                 _fhirRequestContextAccessor,
-                NullLogger<VectorEmbeddingEnricher>.Instance);
+                NullLogger<VectorEmbeddingEnricher>.Instance,
+                vectorSearchMetricHandler);
             _fhirDataStore = new SqlServerFhirDataStore(
                 sqlServerFhirModel,
                 searchParameterToSearchValueTypeMap,
@@ -331,7 +334,8 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
                 new CompressedRawResourceConverter(),
                 SqlQueryHashCalculator,
                 queryPlanReuseChecker,
-                NullLogger<SqlServerSearchService>.Instance);
+                NullLogger<SqlServerSearchService>.Instance,
+                vectorSearchMetricHandler);
 
             ISearchParameterSupportResolver searchParameterSupportResolver = Substitute.For<ISearchParameterSupportResolver>();
             searchParameterSupportResolver.IsSearchParameterSupported(Arg.Any<SearchParameterInfo>()).Returns((true, false));

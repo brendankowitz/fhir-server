@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,6 +21,7 @@ using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
 using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 
 namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
 {
@@ -33,6 +35,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
         private readonly VectorSearchConfiguration _vectorSearchConfiguration;
         private readonly RequestContextAccessor<IFhirRequestContext> _requestContextAccessor;
         private readonly ILogger<VectorEmbeddingEnricher> _logger;
+        private readonly IVectorSearchMetricHandler _metricHandler;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="VectorEmbeddingEnricher"/> class.
@@ -42,18 +45,21 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
         /// <param name="vectorSearchConfiguration">The vector search configuration.</param>
         /// <param name="requestContextAccessor">The FHIR request context accessor.</param>
         /// <param name="logger">The logger.</param>
+        /// <param name="metricHandler">The vector search metric handler.</param>
         public VectorEmbeddingEnricher(
             IEmbeddingClient embeddingClient,
             IVectorSearchCapabilityProvider capabilityProvider,
             IOptions<VectorSearchConfiguration> vectorSearchConfiguration,
             RequestContextAccessor<IFhirRequestContext> requestContextAccessor,
-            ILogger<VectorEmbeddingEnricher> logger)
+            ILogger<VectorEmbeddingEnricher> logger,
+            IVectorSearchMetricHandler metricHandler)
         {
             _embeddingClient = EnsureArg.IsNotNull(embeddingClient, nameof(embeddingClient));
             _capabilityProvider = EnsureArg.IsNotNull(capabilityProvider, nameof(capabilityProvider));
             _vectorSearchConfiguration = EnsureArg.IsNotNull(vectorSearchConfiguration, nameof(vectorSearchConfiguration)).Value;
             _requestContextAccessor = EnsureArg.IsNotNull(requestContextAccessor, nameof(requestContextAccessor));
             _logger = EnsureArg.IsNotNull(logger, nameof(logger));
+            _metricHandler = EnsureArg.IsNotNull(metricHandler, nameof(metricHandler));
         }
 
         /// <summary>
@@ -102,24 +108,46 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
 
             try
             {
-                IReadOnlyList<float[]> embeddings = await _embeddingClient.EmbedAsync(
-                    pending.Select(value => value.SourceText).ToList(),
-                    tightBudget: !syncMode,
-                    cancellationToken);
-
-                if (embeddings == null || embeddings.Count != pending.Count)
+                Stopwatch stopwatch = Stopwatch.StartNew();
+                IReadOnlyList<float[]> embeddings;
+                try
                 {
-                    _logger.LogError(
-                        "The embedding client returned {EmbeddingCount} embeddings for {InputCount} inputs.",
-                        embeddings?.Count ?? 0,
-                        pending.Count);
-                    throw new InvalidOperationException(
-                        $"The embedding client returned {embeddings?.Count ?? 0} embeddings for {pending.Count} inputs.");
+                    embeddings = await _embeddingClient.EmbedAsync(
+                        pending.Select(value => value.SourceText).ToList(),
+                        tightBudget: !syncMode,
+                        cancellationToken);
+
+                    if (embeddings == null || embeddings.Count != pending.Count)
+                    {
+                        _logger.LogError(
+                            "The embedding client returned {EmbeddingCount} embeddings for {InputCount} inputs.",
+                            embeddings?.Count ?? 0,
+                            pending.Count);
+                        throw new InvalidOperationException(
+                            $"The embedding client returned {embeddings?.Count ?? 0} embeddings for {pending.Count} inputs.");
+                    }
+
+                    for (int i = 0; i < pending.Count; i++)
+                    {
+                        pending[i].SetEmbedding(embeddings[i]);
+                    }
+
+                    _metricHandler.EmitEmbedding(new VectorEmbeddingMetricNotification
+                    {
+                        Operation = VectorEmbeddingOperation.Write,
+                        Outcome = VectorEmbeddingOutcome.Success,
+                        ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
+                    });
                 }
-
-                for (int i = 0; i < pending.Count; i++)
+                catch
                 {
-                    pending[i].SetEmbedding(embeddings[i]);
+                    _metricHandler.EmitEmbedding(new VectorEmbeddingMetricNotification
+                    {
+                        Operation = VectorEmbeddingOperation.Write,
+                        Outcome = VectorEmbeddingOutcome.Failure,
+                        ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
+                    });
+                    throw;
                 }
 
                 ApplySynchronousEmbeddingPreference(prefersSynchronous);

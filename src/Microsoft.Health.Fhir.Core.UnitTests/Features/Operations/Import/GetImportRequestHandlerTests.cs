@@ -13,11 +13,15 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Health.Extensions.DependencyInjection;
 using Microsoft.Health.Fhir.Core.Exceptions;
 using Microsoft.Health.Fhir.Core.Extensions;
+using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Operations;
 using Microsoft.Health.Fhir.Core.Features.Operations.Import;
+using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Security.Authorization;
 using Microsoft.Health.Fhir.Core.Messages.Import;
+using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.Tests.Common;
+using Microsoft.Health.Fhir.ValueSets;
 using Microsoft.Health.JobManagement;
 using Microsoft.Health.Test.Utilities;
 using Newtonsoft.Json;
@@ -33,11 +37,12 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Operations.BulkImport
     {
         private readonly IMediator _mediator;
         private IQueueClient _queueClient = Substitute.For<IQueueClient>();
+        private readonly ISearchParameterDefinitionManager _searchParameterDefinitionManager = Substitute.For<ISearchParameterDefinitionManager>();
 
         public GetImportRequestHandlerTests()
         {
             var collection = new ServiceCollection();
-            collection.Add(x => new GetImportRequestHandler(_queueClient, DisabledFhirAuthorizationService.Instance)).Singleton().AsSelf().AsImplementedInterfaces();
+            collection.Add(x => new GetImportRequestHandler(_queueClient, DisabledFhirAuthorizationService.Instance, _searchParameterDefinitionManager)).Singleton().AsSelf().AsImplementedInterfaces();
 
             ServiceProvider provider = collection.BuildServiceProvider();
             _mediator = new Mediator(provider);
@@ -56,6 +61,56 @@ namespace Microsoft.Health.Fhir.Core.UnitTests.Features.Operations.BulkImport
             Assert.Equal(HttpStatusCode.OK, result.StatusCode);
             Assert.Single(result.JobResult.Output);
             Assert.Single(result.JobResult.Error);
+        }
+
+        [Fact]
+        public async Task GivenImportedResourceTypeWithVectorSearchParameter_WhenGettingCompletedJob_ThenOutputIncludesVectorizationWarning()
+        {
+            var vectorSearchParameter = new SearchParameterInfo(
+                "semantic",
+                "semantic",
+                SearchParamType.String,
+                baseResourceTypes: ["Patient"])
+            {
+                VectorConfig = new VectorSearchParameterConfig(),
+            };
+            _searchParameterDefinitionManager.GetSearchParameters("Patient").Returns([vectorSearchParameter]);
+            var coordResult = new ImportOrchestratorJobResult() { Request = "Request" };
+            var coord = new JobInfo() { Status = JobStatus.Completed, Result = JsonConvert.SerializeObject(coordResult), Definition = JsonConvert.SerializeObject(new ImportOrchestratorJobDefinition()) };
+            var workerResult = new ImportProcessingJobResult() { SucceededResources = 1 };
+            var worker = new JobInfo()
+            {
+                Id = 1,
+                Status = JobStatus.Completed,
+                Result = JsonConvert.SerializeObject(workerResult),
+                Definition = JsonConvert.SerializeObject(new ImportProcessingJobDefinition { ResourceLocation = "http://xyz", ResourceType = "Patient" }),
+            };
+
+            GetImportResponse result = await SetupAndExecuteGetBulkImportJobByIdAsync(coord, [worker]);
+
+            ImportOperationOutcome outcome = Assert.Single(result.JobResult.Output);
+            Assert.Contains("Patient", outcome.Warning, StringComparison.Ordinal);
+            Assert.Contains("vector", outcome.Warning, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public async Task GivenImportedResourceTypeWithoutVectorSearchParameter_WhenGettingCompletedJob_ThenOutputDoesNotIncludeVectorizationWarning()
+        {
+            _searchParameterDefinitionManager.GetSearchParameters("Patient").Returns(Array.Empty<SearchParameterInfo>());
+            var coordResult = new ImportOrchestratorJobResult() { Request = "Request" };
+            var coord = new JobInfo() { Status = JobStatus.Completed, Result = JsonConvert.SerializeObject(coordResult), Definition = JsonConvert.SerializeObject(new ImportOrchestratorJobDefinition()) };
+            var workerResult = new ImportProcessingJobResult() { SucceededResources = 1 };
+            var worker = new JobInfo()
+            {
+                Id = 1,
+                Status = JobStatus.Completed,
+                Result = JsonConvert.SerializeObject(workerResult),
+                Definition = JsonConvert.SerializeObject(new ImportProcessingJobDefinition { ResourceLocation = "http://xyz", ResourceType = "Patient" }),
+            };
+
+            GetImportResponse result = await SetupAndExecuteGetBulkImportJobByIdAsync(coord, [worker]);
+
+            Assert.Null(Assert.Single(result.JobResult.Output).Warning);
         }
 
         [Theory]

@@ -23,6 +23,7 @@ using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
 using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema.Model;
@@ -121,7 +122,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                 _compressedRawResourceConverter,
                 _queryHashCalculator,
                 _queryPlanReuseChecker,
-                NullLogger<SqlServerSearchService>.Instance);
+                NullLogger<SqlServerSearchService>.Instance,
+                Substitute.For<IVectorSearchMetricHandler>());
         }
 
         [Theory]
@@ -220,7 +222,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                     _compressedRawResourceConverter,
                     _queryHashCalculator,
                     _queryPlanReuseChecker,
-                    NullLogger<SqlServerSearchService>.Instance);
+                    NullLogger<SqlServerSearchService>.Instance,
+                    Substitute.For<IVectorSearchMetricHandler>());
             });
 
             Assert.NotNull(ex);
@@ -270,7 +273,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                     _compressedRawResourceConverter,
                     _queryHashCalculator,
                     _queryPlanReuseChecker,
-                    NullLogger<SqlServerSearchService>.Instance);
+                    NullLogger<SqlServerSearchService>.Instance,
+                    Substitute.For<IVectorSearchMetricHandler>());
             });
 
             Assert.NotNull(ex);
@@ -320,7 +324,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                     _compressedRawResourceConverter,
                     _queryHashCalculator,
                     _queryPlanReuseChecker,
-                    NullLogger<SqlServerSearchService>.Instance);
+                    NullLogger<SqlServerSearchService>.Instance,
+                    Substitute.For<IVectorSearchMetricHandler>());
             });
 
             Assert.NotNull(ex);

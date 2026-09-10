@@ -20,6 +20,7 @@ using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
 using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage;
 using Microsoft.Health.Fhir.Tests.Common;
@@ -37,6 +38,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
         private readonly IVectorSearchCapabilityProvider _capabilityProvider = Substitute.For<IVectorSearchCapabilityProvider>();
         private readonly RequestContextAccessor<IFhirRequestContext> _requestContextAccessor = Substitute.For<RequestContextAccessor<IFhirRequestContext>>();
         private readonly ILogger<VectorEmbeddingEnricher> _logger = Substitute.For<ILogger<VectorEmbeddingEnricher>>();
+        private readonly IVectorSearchMetricHandler _metricHandler = Substitute.For<IVectorSearchMetricHandler>();
         private readonly Dictionary<string, StringValues> _requestHeaders = new();
         private readonly Dictionary<string, StringValues> _responseHeaders = new();
 
@@ -98,6 +100,11 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
                 Arg.Is<IReadOnlyList<string>>(inputs => inputs.SequenceEqual(new[] { "first" })),
                 false,
                 CancellationToken.None);
+            _metricHandler.Received(1).EmitEmbedding(
+                Arg.Is<VectorEmbeddingMetricNotification>(notification =>
+                    notification.Operation == VectorEmbeddingOperation.Write &&
+                    notification.Outcome == VectorEmbeddingOutcome.Success &&
+                    notification.ElapsedMilliseconds >= 0));
         }
 
         [Fact]
@@ -301,6 +308,11 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
 
             // Assert
             await Assert.ThrowsAsync<EmbeddingUnavailableException>(act);
+            _metricHandler.Received(1).EmitEmbedding(
+                Arg.Is<VectorEmbeddingMetricNotification>(notification =>
+                    notification.Operation == VectorEmbeddingOperation.Write &&
+                    notification.Outcome == VectorEmbeddingOutcome.Failure &&
+                    notification.ElapsedMilliseconds >= 0));
         }
 
         [Fact]
@@ -420,7 +432,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
                     EmbeddingPersistenceMode = mode,
                 }),
                 _requestContextAccessor,
-                _logger);
+                _logger,
+                _metricHandler);
         }
 
         private void SetSynchronousPreference()
