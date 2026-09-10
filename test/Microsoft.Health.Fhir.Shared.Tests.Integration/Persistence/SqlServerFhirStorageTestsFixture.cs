@@ -245,8 +245,9 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             var importErrorSerializer = new Shared.Core.Features.Operations.Import.ImportErrorSerializer(new Hl7.Fhir.Serialization.FhirJsonSerializer());
 
             var vectorSearchCapabilityProvider = Substitute.For<IVectorSearchCapabilityProvider>();
+            var embeddingClient = Substitute.For<IEmbeddingClient>();
             var vectorEmbeddingEnricher = new VectorEmbeddingEnricher(
-                Substitute.For<IEmbeddingClient>(),
+                embeddingClient,
                 vectorSearchCapabilityProvider,
                 Options.Create(new VectorSearchConfiguration()),
                 _fhirRequestContextAccessor,
@@ -313,6 +314,7 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             _searchService = new SqlServerSearchService(
                 searchOptionsFactory,
                 _fhirDataStore,
+                embeddingClient,
                 sqlServerFhirModel,
                 sqlRootExpressionRewriter,
                 chainFlatteningRewriter,

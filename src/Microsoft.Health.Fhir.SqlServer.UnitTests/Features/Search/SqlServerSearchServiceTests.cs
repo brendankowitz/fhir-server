@@ -21,6 +21,7 @@ using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
 using Microsoft.Health.Fhir.Core.Features.Search.Parameters;
 using Microsoft.Health.Fhir.Core.Features.Search.SearchValues;
+using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema.Model;
@@ -51,6 +52,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
     {
         private readonly ISearchOptionsFactory _searchOptionsFactory;
         private readonly IFhirDataStore _fhirDataStore;
+        private readonly IEmbeddingClient _embeddingClient;
         private readonly ISqlServerFhirModel _model;
         private readonly SearchParamTableExpressionQueryGeneratorFactory _queryGeneratorFactory;
         private readonly ISqlRetryService _sqlRetryService;
@@ -65,6 +67,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
         {
             _searchOptionsFactory = Substitute.For<ISearchOptionsFactory>();
             _fhirDataStore = Substitute.For<IFhirDataStore>();
+            _embeddingClient = Substitute.For<IEmbeddingClient>();
             _model = Substitute.For<ISqlServerFhirModel>();
             _queryGeneratorFactory = new SearchParamTableExpressionQueryGeneratorFactory(new SearchParameterToSearchValueTypeMap());
             _sqlRetryService = Substitute.For<ISqlRetryService>();
@@ -100,6 +103,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
             _searchService = new SqlServerSearchService(
                 _searchOptionsFactory,
                 _fhirDataStore,
+                _embeddingClient,
                 _model,
                 sqlRootExpressionRewriter,
                 chainFlatteningRewriter,
@@ -146,6 +150,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                 _ = new SqlServerSearchService(
                     null,
                     _fhirDataStore,
+                    _embeddingClient,
                     model,
                     sqlRootExpressionRewriter,
                     chainFlatteningRewriter,
@@ -195,6 +200,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                 _ = new SqlServerSearchService(
                     _searchOptionsFactory,
                     _fhirDataStore,
+                    _embeddingClient,
                     model,
                     sqlRootExpressionRewriter,
                     chainFlatteningRewriter,
@@ -244,6 +250,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Search
                 _ = new SqlServerSearchService(
                     _searchOptionsFactory,
                     _fhirDataStore,
+                    _embeddingClient,
                     model,
                     sqlRootExpressionRewriter,
                     chainFlatteningRewriter,

@@ -31,6 +31,7 @@ using Microsoft.Health.Fhir.Core.Features.Parameters;
 using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Features.Search;
 using Microsoft.Health.Fhir.Core.Features.Search.Expressions;
+using Microsoft.Health.Fhir.Core.Features.Search.VectorSearch;
 using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema;
 using Microsoft.Health.Fhir.SqlServer.Features.Schema.Model;
@@ -90,6 +91,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
         private readonly SearchParameterInfo _fakeLastUpdate = new SearchParameterInfo(SearchParameterNames.LastUpdated, SearchParameterNames.LastUpdated);
         private readonly ISqlQueryHashCalculator _queryHashCalculator;
         private readonly IFhirDataStore _fhirDataStore;
+        private readonly IEmbeddingClient _embeddingClient;
         private readonly IQueryPlanReuseChecker _queryPlanReuseChecker;
 
         private static readonly string[] NewLineSeparators = ["\r\n", "\n"];
@@ -147,6 +149,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
         public SqlServerSearchService(
             ISearchOptionsFactory searchOptionsFactory,
             IFhirDataStore fhirDataStore,
+            IEmbeddingClient embeddingClient,
             ISqlServerFhirModel model,
             SqlRootExpressionRewriter sqlRootExpressionRewriter,
             ChainFlatteningRewriter chainFlatteningRewriter,
@@ -181,6 +184,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
             _sqlServerDataStoreConfiguration = EnsureArg.IsNotNull(sqlServerDataStoreConfiguration?.Value, nameof(sqlServerDataStoreConfiguration));
             _fhirSqlServerConfiguration = EnsureArg.IsNotNull(fhirSqlServerConfiguration, nameof(fhirSqlServerConfiguration));
             _fhirDataStore = fhirDataStore;
+            _embeddingClient = EnsureArg.IsNotNull(embeddingClient, nameof(embeddingClient));
             _model = model;
             _sqlRootExpressionRewriter = sqlRootExpressionRewriter;
             _sortRewriter = sortRewriter;
@@ -231,6 +235,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
         public override async Task<SearchResult> SearchAsync(SearchOptions searchOptions, CancellationToken cancellationToken)
         {
             SqlSearchOptions sqlSearchOptions = new SqlSearchOptions(searchOptions);
+            await VectorSearchQueryEmbeddingEnricher.EnrichAsync(sqlSearchOptions.Expression, _embeddingClient, cancellationToken);
 
             if (sqlSearchOptions.IsIncludesOperation)
             {
@@ -3052,6 +3057,61 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Search
                     }
 
                     yield return new TokenListRow(code, codeOverflow, token.SystemId, token.SystemValue);
+                }
+            }
+        }
+
+        internal static class VectorSearchQueryEmbeddingEnricher
+        {
+            internal static async Task EnrichAsync(Expression expression, IEmbeddingClient embeddingClient, CancellationToken cancellationToken)
+            {
+                if (expression == null)
+                {
+                    return;
+                }
+
+                var collector = new VectorSearchExpressionCollector();
+                expression.AcceptVisitor(collector, null);
+
+                IReadOnlyList<VectorSearchExpression> vectorSearchExpressions = collector.VectorSearchExpressions;
+                if (vectorSearchExpressions == null)
+                {
+                    return;
+                }
+
+                var inputs = new List<string>(vectorSearchExpressions.Count);
+                foreach (VectorSearchExpression vectorSearchExpression in vectorSearchExpressions)
+                {
+                    inputs.Add(vectorSearchExpression.QueryText);
+                }
+
+                IReadOnlyList<float[]> embeddings = await embeddingClient.EmbedAsync(inputs, tightBudget: false, cancellationToken);
+                if (embeddings == null || embeddings.Count != vectorSearchExpressions.Count)
+                {
+                    throw new InvalidOperationException(
+                        $"The embedding client returned {embeddings?.Count ?? 0} embeddings for {vectorSearchExpressions.Count} inputs.");
+                }
+
+                for (int i = 0; i < vectorSearchExpressions.Count; i++)
+                {
+                    vectorSearchExpressions[i].SetQueryEmbedding(embeddings[i]);
+                }
+            }
+
+            private sealed class VectorSearchExpressionCollector : ExpressionRewriter<object>
+            {
+                private List<VectorSearchExpression> _vectorSearchExpressions;
+
+                public IReadOnlyList<VectorSearchExpression> VectorSearchExpressions => _vectorSearchExpressions;
+
+                public override Expression VisitVectorSearch(VectorSearchExpression expression, object context)
+                {
+                    if (expression.QueryEmbedding == null)
+                    {
+                        (_vectorSearchExpressions ??= new List<VectorSearchExpression>()).Add(expression);
+                    }
+
+                    return expression;
                 }
             }
         }
