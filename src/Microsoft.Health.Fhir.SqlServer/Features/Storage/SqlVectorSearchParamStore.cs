@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
@@ -22,6 +23,9 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
 {
     internal sealed class SqlVectorSearchParamStore : IVectorSearchParamStore
     {
+        internal const int DeleteBatchSize = 1000;
+        internal const int MaxDeleteBatchesPerRun = 10;
+
         private const string ReadStateSql = @"
 SELECT ResourceSurrogateId, SearchParamId, ChunkOrdinal, SourceTextHash, EmbeddingModelId
 FROM dbo.VectorSearchParam
@@ -30,13 +34,13 @@ WHERE ResourceTypeId = @ResourceTypeId
 
         private readonly ISqlRetryService _sqlRetryService;
         private readonly ITableValuedParameterRowGenerator<IReadOnlyList<MergeResourceWrapper>, VectorSearchParamListRow> _rowGenerator;
-        private readonly SqlServerFhirModel _model;
+        private readonly ISqlServerFhirModel _model;
         private readonly ILogger<SqlVectorSearchParamStore> _logger;
 
         public SqlVectorSearchParamStore(
             ISqlRetryService sqlRetryService,
             ITableValuedParameterRowGenerator<IReadOnlyList<MergeResourceWrapper>, VectorSearchParamListRow> rowGenerator,
-            SqlServerFhirModel model,
+            ISqlServerFhirModel model,
             ILogger<SqlVectorSearchParamStore> logger)
         {
             _sqlRetryService = EnsureArg.IsNotNull(sqlRetryService, nameof(sqlRetryService));
@@ -76,6 +80,62 @@ WHERE ResourceTypeId = @ResourceTypeId
                             row.SourceTextHash,
                             row.EmbeddingModelId))
                         .ToList());
+        }
+
+        public async Task<IReadOnlyDictionary<short, long>> DeleteRowsForDisabledSearchParametersAsync(
+            IReadOnlyCollection<short> vectorEnabledSearchParamIds,
+            CancellationToken cancellationToken)
+        {
+            EnsureArg.IsNotNull(vectorEnabledSearchParamIds, nameof(vectorEnabledSearchParamIds));
+
+            if (vectorEnabledSearchParamIds.Count == 0)
+            {
+                return new Dictionary<short, long>();
+            }
+
+            short[] enabledIds = vectorEnabledSearchParamIds.Distinct().OrderBy(id => id).ToArray();
+            var commandText = new StringBuilder(@"
+DELETE TOP (@BatchSize)
+FROM dbo.VectorSearchParam
+OUTPUT deleted.SearchParamId
+WHERE SearchParamId NOT IN (");
+            commandText.AppendJoin(", ", enabledIds.Select((_, index) => $"@EnabledSearchParamId{index}"));
+            commandText.Append(");");
+
+            var deletedBySearchParamId = new Dictionary<short, long>();
+            for (int batch = 0; batch < MaxDeleteBatchesPerRun; batch++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+#pragma warning disable CA2100 // SQL structure contains only generated parameter names; all values remain parameterized.
+                using var command = new SqlCommand(commandText.ToString());
+#pragma warning restore CA2100
+                command.Parameters.Add("@BatchSize", SqlDbType.Int).Value = DeleteBatchSize;
+                for (int index = 0; index < enabledIds.Length; index++)
+                {
+                    command.Parameters.Add($"@EnabledSearchParamId{index}", SqlDbType.SmallInt).Value = enabledIds[index];
+                }
+
+                IReadOnlyList<short> deletedSearchParamIds = await _sqlRetryService.ExecuteReaderAsync(
+                    command,
+                    reader => reader.GetInt16(0),
+                    _logger,
+                    "Deleting stored vectors for disabled search parameters.",
+                    cancellationToken,
+                    isReadOnly: false);
+
+                foreach (IGrouping<short, short> group in deletedSearchParamIds.GroupBy(id => id))
+                {
+                    deletedBySearchParamId.TryGetValue(group.Key, out long existingCount);
+                    deletedBySearchParamId[group.Key] = existingCount + group.LongCount();
+                }
+
+                if (deletedSearchParamIds.Count < DeleteBatchSize)
+                {
+                    break;
+                }
+            }
+
+            return deletedBySearchParamId;
         }
 
         public async Task ReplaceAsync(

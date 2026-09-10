@@ -495,6 +495,13 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Operations.Embeddin
 
             public IReadOnlyList<ResourceWrapper> ReplacedResources { get; private set; } = Array.Empty<ResourceWrapper>();
 
+            public Task<IReadOnlyDictionary<short, long>> DeleteRowsForDisabledSearchParametersAsync(
+                IReadOnlyCollection<short> vectorEnabledSearchParamIds,
+                CancellationToken cancellationToken)
+            {
+                return Task.FromResult<IReadOnlyDictionary<short, long>>(new Dictionary<short, long>());
+            }
+
             public Task<IReadOnlyDictionary<long, IReadOnlyList<VectorSearchParamState>>> GetStateAsync(
                 short resourceTypeId,
                 long startSurrogateId,

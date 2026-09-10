@@ -16,6 +16,7 @@ using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Operations;
 using Microsoft.Health.Fhir.Core.Features.Operations.EmbeddingGeneration;
+using Microsoft.Health.Fhir.Core.Models;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage;
 using Newtonsoft.Json;
 
@@ -37,6 +38,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Watchdogs
         private readonly IVectorSearchCapabilityProvider _vectorSearchCapabilityProvider;
         private readonly ISearchParameterDefinitionManager _searchParameterDefinitionManager;
         private readonly ISqlServerFhirModel _model;
+        private readonly IVectorSearchParamStore _vectorSearchParamStore;
         private readonly VectorSearchConfiguration _configuration;
         private readonly ILogger<VectorizationWatchdog> _logger;
 
@@ -47,6 +49,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Watchdogs
             IVectorSearchCapabilityProvider vectorSearchCapabilityProvider,
             ISearchParameterDefinitionManager searchParameterDefinitionManager,
             ISqlServerFhirModel model,
+            IVectorSearchParamStore vectorSearchParamStore,
             IOptions<VectorSearchConfiguration> configuration,
             ILogger<VectorizationWatchdog> logger)
             : base(sqlRetryService, logger)
@@ -57,6 +60,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Watchdogs
             _vectorSearchCapabilityProvider = EnsureArg.IsNotNull(vectorSearchCapabilityProvider, nameof(vectorSearchCapabilityProvider));
             _searchParameterDefinitionManager = EnsureArg.IsNotNull(searchParameterDefinitionManager, nameof(searchParameterDefinitionManager));
             _model = EnsureArg.IsNotNull(model, nameof(model));
+            _vectorSearchParamStore = EnsureArg.IsNotNull(vectorSearchParamStore, nameof(vectorSearchParamStore));
             _configuration = EnsureArg.IsNotNull(configuration?.Value, nameof(configuration));
             _logger = EnsureArg.IsNotNull(logger, nameof(logger));
         }
@@ -70,12 +74,14 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Watchdogs
             IVectorSearchCapabilityProvider vectorSearchCapabilityProvider,
             ISearchParameterDefinitionManager searchParameterDefinitionManager,
             ISqlServerFhirModel model,
+            IVectorSearchParamStore vectorSearchParamStore,
             IOptions<VectorSearchConfiguration> configuration,
             ILogger<VectorizationWatchdog> logger)
         {
             _vectorSearchCapabilityProvider = EnsureArg.IsNotNull(vectorSearchCapabilityProvider, nameof(vectorSearchCapabilityProvider));
             _searchParameterDefinitionManager = EnsureArg.IsNotNull(searchParameterDefinitionManager, nameof(searchParameterDefinitionManager));
             _model = EnsureArg.IsNotNull(model, nameof(model));
+            _vectorSearchParamStore = EnsureArg.IsNotNull(vectorSearchParamStore, nameof(vectorSearchParamStore));
             _configuration = EnsureArg.IsNotNull(configuration?.Value, nameof(configuration));
             _logger = EnsureArg.IsNotNull(logger, nameof(logger));
         }
@@ -113,6 +119,49 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Watchdogs
                 return;
             }
 
+            List<SearchParameterInfo> searchParameters = _searchParameterDefinitionManager.AllSearchParameters?.ToList();
+            if (searchParameters == null || searchParameters.Count == 0)
+            {
+                _logger.LogWarning($"{Name}: search parameter definitions are unavailable; skipping vector teardown.");
+                return;
+            }
+
+            SearchParameterInfo[] vectorEnabledSearchParameters = searchParameters
+                .Where(parameter => parameter.VectorConfig != null && parameter.IsSearchable && parameter.IsSupported)
+                .ToArray();
+            if (vectorEnabledSearchParameters.Length == 0)
+            {
+                _logger.LogWarning($"{Name}: no vector-enabled search parameters were found; skipping vector teardown.");
+                return;
+            }
+
+            short[] vectorEnabledSearchParamIds;
+            try
+            {
+                vectorEnabledSearchParamIds = vectorEnabledSearchParameters
+                    .Select(parameter => _model.GetSearchParamId(parameter.Url))
+                    .Distinct()
+                    .ToArray();
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or KeyNotFoundException or ArgumentException)
+            {
+                _logger.LogWarning(exception, $"{Name}: vector-enabled search parameter ids are unavailable; skipping vector teardown.");
+                vectorEnabledSearchParamIds = Array.Empty<short>();
+            }
+
+            if (vectorEnabledSearchParamIds.Length > 0)
+            {
+                IReadOnlyDictionary<short, long> deletedRows =
+                    await _vectorSearchParamStore.DeleteRowsForDisabledSearchParametersAsync(vectorEnabledSearchParamIds, cancellationToken);
+                foreach (KeyValuePair<short, long> deleted in deletedRows.OrderBy(entry => entry.Key))
+                {
+                    _logger.LogInformation(
+                        $"{Name}: deleted vector rows for disabled search parameter id={{SearchParamId}}, rows={{RowCount}}.",
+                        deleted.Key,
+                        deleted.Value);
+                }
+            }
+
             _logger.LogInformation($"{Name}: starting...");
             long visibility = await GetTransactionVisibilityAsync(cancellationToken);
             _logger.LogInformation($"{Name}: visibility={visibility}.");
@@ -122,8 +171,7 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Watchdogs
                 throw new InvalidOperationException($"{nameof(VectorSearchConfiguration.JobBatchSize)} must be greater than zero.");
             }
 
-            short[] resourceTypeIds = _searchParameterDefinitionManager.AllSearchParameters
-                .Where(parameter => parameter.VectorConfig != null && parameter.IsSearchable && parameter.IsSupported)
+            short[] resourceTypeIds = vectorEnabledSearchParameters
                 .SelectMany(parameter => parameter.BaseResourceTypes)
                 .Distinct(StringComparer.Ordinal)
                 .Select(GetResourceTypeId)

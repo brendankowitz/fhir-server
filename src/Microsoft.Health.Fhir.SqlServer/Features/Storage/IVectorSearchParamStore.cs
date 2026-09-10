@@ -24,6 +24,15 @@ namespace Microsoft.Health.Fhir.SqlServer.Features.Storage
             CancellationToken cancellationToken);
 
         /// <summary>
+        /// Deletes complete vector rows whose search parameter is not in the supplied vector-enabled set.
+        /// Deletion is bounded per statement and per invocation. An empty set is treated as unavailable
+        /// configuration and deletes nothing.
+        /// </summary>
+        Task<IReadOnlyDictionary<short, long>> DeleteRowsForDisabledSearchParametersAsync(
+            IReadOnlyCollection<short> vectorEnabledSearchParamIds,
+            CancellationToken cancellationToken);
+
+        /// <summary>
         /// Completely replaces vector rows for every listed resource. All existing vector rows for each
         /// resource are deleted, and only rows generated from the supplied resources are reinserted.
         /// Callers must supply the complete vector set for every resource they list, and every supplied

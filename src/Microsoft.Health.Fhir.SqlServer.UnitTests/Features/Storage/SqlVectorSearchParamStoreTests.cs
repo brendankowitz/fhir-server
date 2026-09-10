@@ -81,6 +81,131 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Storage
         }
 
         [Fact]
+        public async Task GivenEnabledSearchParameterIds_WhenDeletingDisabledRows_ThenEnabledIdsAreExcluded()
+        {
+            // Arrange
+            var commands = new List<SqlCommand>();
+            _sqlRetryService.ExecuteReaderAsync<short>(
+                    Arg.Do<SqlCommand>(command => commands.Add(command)),
+                    Arg.Any<Func<SqlDataReader, short>>(),
+                    Arg.Any<ILogger>(),
+                    Arg.Any<string>(),
+                    Arg.Any<CancellationToken>(),
+                    isReadOnly: false)
+                .Returns(Task.FromResult<IReadOnlyList<short>>(new short[] { 12 }));
+            SqlVectorSearchParamStore store = CreateStore();
+
+            // Act
+            IReadOnlyDictionary<short, long> deleted =
+                await store.DeleteRowsForDisabledSearchParametersAsync(new short[] { 10, 11 }, CancellationToken.None);
+
+            // Assert
+            SqlCommand command = Assert.Single(commands);
+            Assert.Contains("DELETE TOP (@BatchSize)", command.CommandText, StringComparison.Ordinal);
+            Assert.Contains("SearchParamId NOT IN (@EnabledSearchParamId0, @EnabledSearchParamId1)", command.CommandText, StringComparison.Ordinal);
+            Assert.Equal((short)10, command.Parameters["@EnabledSearchParamId0"].Value);
+            Assert.Equal((short)11, command.Parameters["@EnabledSearchParamId1"].Value);
+            Assert.Equal(1L, deleted[12]);
+            Assert.DoesNotContain((short)10, deleted.Keys);
+            Assert.DoesNotContain((short)11, deleted.Keys);
+        }
+
+        [Fact]
+        public async Task GivenEmptyEnabledSearchParameterIds_WhenDeletingDisabledRows_ThenDatabaseIsNotCalled()
+        {
+            // Arrange
+            var commands = new List<SqlCommand>();
+            _sqlRetryService.ExecuteReaderAsync<short>(
+                    Arg.Do<SqlCommand>(command => commands.Add(command)),
+                    Arg.Any<Func<SqlDataReader, short>>(),
+                    Arg.Any<ILogger>(),
+                    Arg.Any<string>(),
+                    Arg.Any<CancellationToken>(),
+                    isReadOnly: false)
+                .Returns(Task.FromResult<IReadOnlyList<short>>(Array.Empty<short>()));
+            SqlVectorSearchParamStore store = CreateStore();
+
+            // Act
+            await store.DeleteRowsForDisabledSearchParametersAsync(new short[] { 10 }, CancellationToken.None);
+
+            // Assert
+            Assert.Single(commands);
+
+            // Act
+            commands.Clear();
+            IReadOnlyDictionary<short, long> deleted =
+                await store.DeleteRowsForDisabledSearchParametersAsync(Array.Empty<short>(), CancellationToken.None);
+
+            // Assert
+            Assert.Empty(deleted);
+            Assert.Empty(commands);
+        }
+
+        [Fact]
+        public async Task GivenFullDeleteBatch_WhenDeletingDisabledRows_ThenAdditionalBoundedBatchIsIssued()
+        {
+            // Arrange
+            var commands = new List<SqlCommand>();
+            IReadOnlyList<short> fullBatch = Enumerable.Repeat((short)12, 1000).ToArray();
+            _sqlRetryService.ExecuteReaderAsync<short>(
+                    Arg.Do<SqlCommand>(command => commands.Add(command)),
+                    Arg.Any<Func<SqlDataReader, short>>(),
+                    Arg.Any<ILogger>(),
+                    Arg.Any<string>(),
+                    Arg.Any<CancellationToken>(),
+                    isReadOnly: false)
+                .Returns(
+                    Task.FromResult(fullBatch),
+                    Task.FromResult<IReadOnlyList<short>>(new short[] { 12 }));
+            SqlVectorSearchParamStore store = CreateStore();
+
+            // Act
+            IReadOnlyDictionary<short, long> deleted =
+                await store.DeleteRowsForDisabledSearchParametersAsync(new short[] { 10 }, CancellationToken.None);
+
+            // Assert
+            Assert.Equal(2, commands.Count);
+            Assert.All(commands, command => Assert.Equal(1000, command.Parameters["@BatchSize"].Value));
+            Assert.Equal(1001L, deleted[12]);
+        }
+
+        [Fact]
+        public async Task GivenEveryDeleteBatchIsFull_WhenDeletingDisabledRows_ThenPerRunBatchBudgetIsEnforced()
+        {
+            // Arrange
+            var commands = new List<SqlCommand>();
+            IReadOnlyList<short> fullBatch = Enumerable.Repeat((short)12, 1000).ToArray();
+            int calls = 0;
+            _sqlRetryService.ExecuteReaderAsync<short>(
+                    Arg.Do<SqlCommand>(command => commands.Add(command)),
+                    Arg.Any<Func<SqlDataReader, short>>(),
+                    Arg.Any<ILogger>(),
+                    Arg.Any<string>(),
+                    Arg.Any<CancellationToken>(),
+                    isReadOnly: false)
+                .Returns(_ =>
+                {
+                    calls++;
+                    if (calls > 10)
+                    {
+                        throw new InvalidOperationException("Delete exceeded the per-run batch limit.");
+                    }
+
+                    return Task.FromResult(fullBatch);
+                });
+            SqlVectorSearchParamStore store = CreateStore();
+
+            // Act
+            IReadOnlyDictionary<short, long> deleted =
+                await store.DeleteRowsForDisabledSearchParametersAsync(new short[] { 10 }, CancellationToken.None);
+
+            // Assert
+            Assert.Equal(10, commands.Count);
+            Assert.All(commands, command => Assert.Equal(1000, command.Parameters["@BatchSize"].Value));
+            Assert.Equal(10000L, deleted[12]);
+        }
+
+        [Fact]
         public async Task GivenResources_WhenWriting_ThenBindsVectorTvpAndCallsMergeProcedure()
         {
             // Arrange

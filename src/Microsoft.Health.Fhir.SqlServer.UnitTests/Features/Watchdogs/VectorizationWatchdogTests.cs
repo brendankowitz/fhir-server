@@ -8,17 +8,24 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Features.Definition;
 using Microsoft.Health.Fhir.Core.Features.Operations;
 using Microsoft.Health.Fhir.Core.Features.Operations.EmbeddingGeneration;
+using Microsoft.Health.Fhir.Core.Features.Persistence;
 using Microsoft.Health.Fhir.Core.Models;
+using Microsoft.Health.Fhir.SqlServer.Features.Schema.Model;
 using Microsoft.Health.Fhir.SqlServer.Features.Storage;
+using Microsoft.Health.Fhir.SqlServer.Features.Storage.TvpRowGeneration;
+using Microsoft.Health.Fhir.SqlServer.Features.Storage.TvpRowGeneration.Merge;
 using Microsoft.Health.Fhir.SqlServer.Features.Watchdogs;
 using Microsoft.Health.Fhir.Tests.Common;
 using Microsoft.Health.Fhir.ValueSets;
+using Microsoft.Health.SqlServer.Features.Schema.Model;
 using Microsoft.Health.Test.Utilities;
 using NSubstitute;
 using Xunit;
@@ -33,6 +40,9 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
         private readonly IVectorSearchCapabilityProvider _capabilityProvider;
         private readonly ISearchParameterDefinitionManager _searchParameterDefinitionManager;
         private readonly ISqlServerFhirModel _model;
+        private readonly ISqlRetryService _sqlRetryService;
+        private readonly RecordingVectorSearchParamStore _vectorSearchParamStore;
+        private readonly List<SqlCommand> _deleteCommands = new();
 
         public VectorizationWatchdogTests()
         {
@@ -40,15 +50,32 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
             _capabilityProvider.IsVectorSearchAvailable.Returns(true);
             _searchParameterDefinitionManager = Substitute.For<ISearchParameterDefinitionManager>();
             _model = Substitute.For<ISqlServerFhirModel>();
+            _sqlRetryService = Substitute.For<ISqlRetryService>();
+            _sqlRetryService.ExecuteReaderAsync<short>(
+                    Arg.Do<SqlCommand>(command => _deleteCommands.Add(command)),
+                    Arg.Any<Func<SqlDataReader, short>>(),
+                    Arg.Any<ILogger>(),
+                    Arg.Any<string>(),
+                    Arg.Any<CancellationToken>(),
+                    isReadOnly: false)
+                .Returns(Task.FromResult<IReadOnlyList<short>>(Array.Empty<short>()));
+            _vectorSearchParamStore = new RecordingVectorSearchParamStore(
+                new SqlVectorSearchParamStore(
+                    _sqlRetryService,
+                    new EmptyVectorRowGenerator(),
+                    _model,
+                    NullLogger<SqlVectorSearchParamStore>.Instance));
         }
 
         [Fact]
         public async Task GivenNoTransactions_WhenWatchdogRuns_ThenNothingIsEnqueuedOrAdvanced()
         {
             // Arrange
+            SearchParameterInfo searchParameter = CreateSearchParameter("patient-vector", true, "Patient");
             ConfigureResourceType("Patient", 1);
+            ConfigureSearchParameter(searchParameter, 101);
             TestVectorizationWatchdog watchdog = CreateWatchdog(
-                new[] { CreateSearchParameter("patient-vector", true, "Patient") },
+                new[] { searchParameter },
                 Array.Empty<(long, DateTime?, DateTime?)>());
 
             // Act
@@ -57,6 +84,94 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
             // Assert
             Assert.Empty(watchdog.EnqueueCalls);
             Assert.Empty(watchdog.AdvancedWatermarks);
+            AssertDeleteCommand(101);
+        }
+
+        [Fact]
+        public async Task GivenSearchParameterWithoutVectorConfiguration_WhenWatchdogRuns_ThenItsRowsAreEligibleForDeletion()
+        {
+            // Arrange
+            SearchParameterInfo enabled = CreateSearchParameter("patient-vector", true, "Patient");
+            SearchParameterInfo disabled = CreateSearchParameter("patient-disabled-vector", false, "Patient");
+            ConfigureResourceType("Patient", 1);
+            ConfigureSearchParameter(enabled, 101);
+            ConfigureSearchParameter(disabled, 102);
+            _sqlRetryService.ExecuteReaderAsync<short>(
+                    Arg.Any<SqlCommand>(),
+                    Arg.Any<Func<SqlDataReader, short>>(),
+                    Arg.Any<ILogger>(),
+                    Arg.Any<string>(),
+                    Arg.Any<CancellationToken>(),
+                    isReadOnly: false)
+                .Returns(Task.FromResult<IReadOnlyList<short>>(new short[] { 102 }));
+            TestVectorizationWatchdog watchdog = CreateWatchdog(
+                new[] { enabled, disabled },
+                Array.Empty<(long, DateTime?, DateTime?)>());
+
+            // Act
+            await watchdog.RunWorkForTestingAsync(CancellationToken.None);
+
+            // Assert
+            AssertDeleteCommand(101);
+        }
+
+        [Fact]
+        public async Task GivenNoVectorEnabledSearchParameters_WhenWatchdogRuns_ThenNoRowsAreDeleted()
+        {
+            // Arrange
+            SearchParameterInfo disabled = CreateSearchParameter("patient-disabled-vector", false, "Patient");
+            ConfigureResourceType("Patient", 1);
+            ConfigureSearchParameter(disabled, 102);
+            TestVectorizationWatchdog watchdog = CreateWatchdog(
+                new[] { disabled },
+                Array.Empty<(long, DateTime?, DateTime?)>());
+
+            // Act
+            await watchdog.RunWorkForTestingAsync(CancellationToken.None);
+
+            // Assert
+            Assert.Empty(_deleteCommands);
+            Assert.Empty(_vectorSearchParamStore.DeleteCalls);
+            Assert.Equal(0, watchdog.VisibilityReadCount);
+            Assert.Equal(0, watchdog.TransactionFetchCount);
+        }
+
+        [Fact]
+        public async Task GivenSearchParameterDefinitionsUnavailable_WhenWatchdogRuns_ThenNoRowsAreDeleted()
+        {
+            // Arrange
+            _searchParameterDefinitionManager.AllSearchParameters.Returns((IEnumerable<SearchParameterInfo>)null);
+            TestVectorizationWatchdog watchdog = CreateWatchdog(
+                null,
+                Array.Empty<(long, DateTime?, DateTime?)>());
+
+            // Act
+            await watchdog.RunWorkForTestingAsync(CancellationToken.None);
+
+            // Assert
+            Assert.Empty(_deleteCommands);
+            Assert.Empty(_vectorSearchParamStore.DeleteCalls);
+            Assert.Equal(0, watchdog.VisibilityReadCount);
+        }
+
+        [Fact]
+        public async Task GivenVectorSearchParameterIdMappingUnavailable_WhenWatchdogRuns_ThenNoRowsAreDeleted()
+        {
+            // Arrange
+            SearchParameterInfo enabled = CreateSearchParameter("patient-vector", true, "Patient");
+            ConfigureResourceType("Patient", 1);
+            _model.GetSearchParamId(enabled.Url).Returns(_ => throw new InvalidOperationException("Model not initialized."));
+            TestVectorizationWatchdog watchdog = CreateWatchdog(
+                new[] { enabled },
+                Array.Empty<(long, DateTime?, DateTime?)>());
+
+            // Act
+            await watchdog.RunWorkForTestingAsync(CancellationToken.None);
+
+            // Assert
+            Assert.Empty(_deleteCommands);
+            Assert.Empty(_vectorSearchParamStore.DeleteCalls);
+            Assert.Equal(1, watchdog.VisibilityReadCount);
         }
 
         [Fact]
@@ -195,6 +310,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
             Assert.Equal(0, watchdog.VisibilityReadCount);
             Assert.Empty(watchdog.EnqueueCalls);
             Assert.Empty(watchdog.AdvancedWatermarks);
+            Assert.Empty(_deleteCommands);
+            Assert.Empty(_vectorSearchParamStore.DeleteCalls);
         }
 
         [Fact]
@@ -215,6 +332,8 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
             Assert.Equal(0, watchdog.VisibilityReadCount);
             Assert.Empty(watchdog.EnqueueCalls);
             Assert.Empty(watchdog.AdvancedWatermarks);
+            Assert.Empty(_deleteCommands);
+            Assert.Empty(_vectorSearchParamStore.DeleteCalls);
         }
 
         [Fact]
@@ -248,6 +367,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
                 _capabilityProvider,
                 _searchParameterDefinitionManager,
                 _model,
+                _vectorSearchParamStore,
                 Options.Create(new VectorSearchConfiguration
                 {
                     Enabled = true,
@@ -267,6 +387,7 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
                 _capabilityProvider,
                 _searchParameterDefinitionManager,
                 _model,
+                _vectorSearchParamStore,
                 Options.Create(new VectorSearchConfiguration { Enabled = true, JobBatchSize = jobBatchSize }),
                 transactionBatches);
         }
@@ -281,9 +402,32 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
                 });
         }
 
+        private void ConfigureSearchParameter(SearchParameterInfo searchParameter, short searchParamId)
+        {
+            _model.GetSearchParamId(searchParameter.Url).Returns(searchParamId);
+        }
+
+        private void AssertDeleteCommand(params short[] enabledSearchParamIds)
+        {
+            Assert.Equal(enabledSearchParamIds, Assert.Single(_vectorSearchParamStore.DeleteCalls));
+            SqlCommand command = Assert.Single(_deleteCommands);
+            Assert.Contains("DELETE TOP (@BatchSize)", command.CommandText, StringComparison.Ordinal);
+            Assert.Equal(1000, command.Parameters["@BatchSize"].Value);
+            Assert.Equal(
+                enabledSearchParamIds,
+                enabledSearchParamIds
+                    .Select((_, index) => (short)command.Parameters[$"@EnabledSearchParamId{index}"].Value)
+                    .ToArray());
+        }
+
         private static SearchParameterInfo CreateSearchParameter(string name, bool isVector, params string[] resourceTypes)
         {
-            return new SearchParameterInfo(name, name, SearchParamType.String, baseResourceTypes: resourceTypes)
+            return new SearchParameterInfo(
+                name,
+                name,
+                SearchParamType.String,
+                url: new Uri($"http://example.org/SearchParameter/{name}"),
+                baseResourceTypes: resourceTypes)
             {
                 VectorConfig = isVector ? new VectorSearchParameterConfig() : null,
             };
@@ -310,12 +454,14 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
                 IVectorSearchCapabilityProvider capabilityProvider,
                 ISearchParameterDefinitionManager searchParameterDefinitionManager,
                 ISqlServerFhirModel model,
+                IVectorSearchParamStore vectorSearchParamStore,
                 IOptions<VectorSearchConfiguration> configuration,
                 IEnumerable<IReadOnlyList<(long TransactionId, DateTime? VisibleDate, DateTime? InvisibleHistoryRemovedDate)>> transactionBatches)
                 : base(
                     capabilityProvider,
                     searchParameterDefinitionManager,
                     model,
+                    vectorSearchParamStore,
                     configuration,
                     NullLogger<VectorizationWatchdog>.Instance)
             {
@@ -374,6 +520,52 @@ namespace Microsoft.Health.Fhir.SqlServer.UnitTests.Features.Watchdogs
                 AdvancedWatermarks.Add(lastTransactionId);
                 _watermark = lastTransactionId;
                 return Task.CompletedTask;
+            }
+        }
+
+        private sealed class EmptyVectorRowGenerator :
+            ITableValuedParameterRowGenerator<IReadOnlyList<MergeResourceWrapper>, VectorSearchParamListRow>
+        {
+            public IEnumerable<VectorSearchParamListRow> GenerateRows(IReadOnlyList<MergeResourceWrapper> input)
+            {
+                return Array.Empty<VectorSearchParamListRow>();
+            }
+        }
+
+        private sealed class RecordingVectorSearchParamStore : IVectorSearchParamStore
+        {
+            private readonly IVectorSearchParamStore _inner;
+
+            public RecordingVectorSearchParamStore(IVectorSearchParamStore inner)
+            {
+                _inner = inner;
+            }
+
+            public List<IReadOnlyCollection<short>> DeleteCalls { get; } = new();
+
+            public Task<IReadOnlyDictionary<long, IReadOnlyList<VectorSearchParamState>>> GetStateAsync(
+                short resourceTypeId,
+                long startSurrogateId,
+                long endSurrogateId,
+                CancellationToken cancellationToken)
+            {
+                return _inner.GetStateAsync(resourceTypeId, startSurrogateId, endSurrogateId, cancellationToken);
+            }
+
+            public Task<IReadOnlyDictionary<short, long>> DeleteRowsForDisabledSearchParametersAsync(
+                IReadOnlyCollection<short> vectorEnabledSearchParamIds,
+                CancellationToken cancellationToken)
+            {
+                DeleteCalls.Add(vectorEnabledSearchParamIds);
+                return _inner.DeleteRowsForDisabledSearchParametersAsync(vectorEnabledSearchParamIds, cancellationToken);
+            }
+
+            public Task ReplaceAsync(
+                short resourceTypeId,
+                IReadOnlyList<ResourceWrapper> resources,
+                CancellationToken cancellationToken)
+            {
+                return _inner.ReplaceAsync(resourceTypeId, resources, cancellationToken);
             }
         }
     }
